@@ -160,16 +160,6 @@ pub struct Config {
 	#[serde(default = "default_new_user_displayname_suffix")]
 	pub new_user_displayname_suffix: String,
 
-	/// If enabled, conduwuit will send a simple GET request periodically to
-	/// `https://pupbrain.dev/check-for-updates/stable` for any new
-	/// announcements made. Despite the name, this is not an update check
-	/// endpoint, it is simply an announcement check endpoint.
-	///
-	/// This is disabled by default as this is rarely used except for security
-	/// updates or major updates.
-	#[serde(default, alias = "allow_announcements_check")]
-	pub allow_check_for_updates: bool,
-
 	/// Set this to any float value to multiply conduwuit's in-memory LRU caches
 	/// with such as "auth_chain_cache_capacity".
 	///

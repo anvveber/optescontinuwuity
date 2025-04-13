@@ -25,7 +25,6 @@ pub mod server_keys;
 pub mod sync;
 pub mod transaction_ids;
 pub mod uiaa;
-pub mod updates;
 pub mod users;
 
 extern crate conduwuit_core as conduwuit;

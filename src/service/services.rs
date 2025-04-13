@@ -14,7 +14,7 @@ use crate::{
 	manager::Manager,
 	media, presence, pusher, resolver, rooms, sending, server_keys, service,
 	service::{Args, Map, Service},
-	sync, transaction_ids, uiaa, updates, users,
+	sync, transaction_ids, uiaa, users,
 };
 
 pub struct Services {
@@ -37,7 +37,6 @@ pub struct Services {
 	pub sync: Arc<sync::Service>,
 	pub transaction_ids: Arc<transaction_ids::Service>,
 	pub uiaa: Arc<uiaa::Service>,
-	pub updates: Arc<updates::Service>,
 	pub users: Arc<users::Service>,
 
 	manager: Mutex<Option<Arc<Manager>>>,
@@ -104,7 +103,6 @@ impl Services {
 			sync: build!(sync::Service),
 			transaction_ids: build!(transaction_ids::Service),
 			uiaa: build!(uiaa::Service),
-			updates: build!(updates::Service),
 			users: build!(users::Service),
 
 			manager: Mutex::new(None),

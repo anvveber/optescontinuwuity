@@ -127,8 +127,6 @@ impl Service {
 		&self.server.config.new_user_displayname_suffix
 	}
 
-	pub fn allow_check_for_updates(&self) -> bool { self.server.config.allow_check_for_updates }
-
 	pub fn trusted_servers(&self) -> &[OwnedServerName] { &self.server.config.trusted_servers }
 
 	pub fn turn_password(&self) -> &String { &self.server.config.turn_password }
