@@ -4,7 +4,7 @@ This page is for about contributing to conduwuit. The
 [development](./development.md) page may be of interest for you as well.
 
 If you would like to work on an [issue][issues] that is not assigned, preferably
-ask in the Matrix room first at [#conduwuit:puppygock.gay][conduwuit-matrix],
+ask in the Matrix room first at [#continuwuity:continuwuity.org][continuwuity-matrix],
 and comment on it.
 
 ### Linting and Formatting
@@ -23,9 +23,9 @@ suggestion, allow the lint and mention that in a comment.
 
 ### Running CI tests locally
 
-conduwuit's CI for tests, linting, formatting, audit, etc use
+continuwuity's CI for tests, linting, formatting, audit, etc use
 [`engage`][engage]. engage can be installed from nixpkgs or `cargo install
-engage`. conduwuit's Nix flake devshell has the nixpkgs engage with `direnv`.
+engage`. continuwuity's Nix flake devshell has the nixpkgs engage with `direnv`.
 Use `engage --help` for more usage details.
 
 To test, format, lint, etc that CI would do, install engage, allow the `.envrc`
@@ -111,7 +111,7 @@ applies here.
 
 ### Creating pull requests
 
-Please try to keep contributions to the Forgejo Instance. While the mirrors of conduwuit
+Please try to keep contributions to the Forgejo Instance. While the mirrors of continuwuity
 allow for pull/merge requests, there is no guarantee the maintainers will see them in a timely
 manner. Additionally, please mark WIP or unfinished or incomplete PRs as drafts.
 This prevents us from having to ping once in a while to double check the status
