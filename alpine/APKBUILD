@@ -1,0 +1,63 @@
+# Contributor: magmaus3 <maia@magmaus3.eu.org>
+# Maintainer: magmaus3 <maia@magmaus3.eu.org>
+pkgname=continuwuity
+
+# abuild doesn't like the format of v0.5.0-rc.5, so i had to change it 
+# see https://wiki.alpinelinux.org/wiki/Package_policies
+pkgver=0.5.0_rc5
+pkgrel=0
+pkgdesc="a continuwuation of a very cool, featureful fork of conduit"
+url="https://continuwuity.org/"
+arch="all"
+license="Apache-2.0"
+depends="liburing"
+
+# cargo version on alpine v3.21 is too old to use the 2024 edition
+# i recommend either building everything on edge, or adding
+# the edge repo as a tag
+makedepends="cargo liburing-dev clang-dev linux-headers"
+checkdepends=""
+install="$pkgname.pre-install"
+subpackages="$pkgname-openrc"
+source="https://forgejo.ellis.link/continuwuation/continuwuity/archive/v0.5.0-rc.5.tar.gz
+continuwuity.initd
+continuwuity.confd
+"
+builddir="$srcdir/continuwuity"
+options="net !check"
+
+prepare() {
+	default_prepare
+	cd $srcdir/continuwuity
+
+    # add the default database path to the config (commented out)
+    cat conduwuit-example.toml \
+        | sed '/#database_path/ s:$: "/var/lib/continuwuity":' \
+        > "$srcdir"/continuwuity.toml
+
+	cargo fetch --target="$CTARGET" --locked
+}
+
+build() {
+	cargo build --frozen --release --all-features
+}
+
+check() {
+	# TODO: make sure the tests work
+	#cargo test --frozen
+    return
+}
+
+package() {
+	cd $srcdir	
+	install -Dm755 continuwuity/target/release/conduwuit "$pkgdir"/usr/bin/continuwuity
+	install -Dm644 "$srcdir"/continuwuity.toml -t "$pkgdir"/etc/continuwuity
+	install -Dm755 "$srcdir"/continuwuity.initd "$pkgdir"/etc/init.d/continuwuity
+	install -Dm644 "$srcdir"/continuwuity.confd "$pkgdir"/etc/conf.d/continuwuity
+}
+
+sha512sums="
+66f6da5e98b6f7bb8c1082500101d5c87b1b79955c139b44c6ef5123919fb05feb0dffc669a3af1bc8d571ddb9f3576660f08dc10a6b19eab6db9e391175436a  v0.5.0-rc.5.tar.gz
+0482674be24740496d70da256d4121c5a5e3b749f2445d2bbe0e8991f1449de052724f8427da21a6f55574bc53eac9ca1e47e5012b4c13049b2b39044734d80d  continuwuity.initd
+38e2576278b450d16ba804dd8f4a128f18cd793e6c3ce55aedee1e186905755b31ee23baaa6586b1ab0e25a1f29bf1ea86bfaae4185b0cb1a29203726a199426  continuwuity.confd
+"

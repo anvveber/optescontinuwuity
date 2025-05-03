@@ -1,0 +1,19 @@
+#!/sbin/openrc-run
+
+command="/usr/bin/continuwuity"
+command_user="continuwuity:continuwuity"
+command_args="--config ${CONTINUWUITY_CONFIG=/etc/continuwuity/continuwuity.toml}"
+command_background=true
+pidfile="/run/$RC_SVCNAME.pid"
+
+output_log="/var/log/continuwuity.log"
+error_log="/var/log/continuwuity.log"
+
+depend() {
+	need net
+}
+
+start_pre() {
+	checkpath -d -m 0755 -o "$command_user" /var/lib/continuwuity
+	checkpath -f -m 0644 -o "$command_user" "$output_log"
+}
