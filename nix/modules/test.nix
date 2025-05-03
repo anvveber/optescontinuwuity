@@ -1,3 +1,4 @@
+# This system sole purpose is to test the nixosModules.continuwuity module from ../modules/default.nix
 { inputs, ... }:
 {
   testSystem = inputs.nixpkgs.lib.nixosSystem {

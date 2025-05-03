@@ -87,13 +87,15 @@
               [ cfg.domain ]
             ]
           );
+          # HTTPs URL, used frequently
           baseUrl = "https://${fullDomain}";
         in
         lib.mkIf cfg.enable {
 
+          # configure the user that runs the continuwuity server
           users.users.${cfg.user} = {
-            inherit (cfg) group;
             isSystemUser = true;
+            inherit (cfg) group;
             home = cfg.dataDir;
             createHome = true;
             shell = "${lib.getExe pkgs.bash}";
@@ -114,6 +116,9 @@
                   server = "${fullDomain}:443";
                 };
               };
+              # this applies the default config options as well as the extra config options
+              # NOTE: It might be possible to overwrite the defaults through the extraConfig, in this case the user of
+              # this module is on her own
               mergedConfig =
                 builtins.foldl' lib.recursiveUpdate (builtins.removeAttrs cfg.settings [ "extraConfig" ])
                   [
@@ -215,6 +220,7 @@
               };
             };
 
+          # optionally configure nginx if enabled
           services.nginx =
             let
               clientConfig = {
