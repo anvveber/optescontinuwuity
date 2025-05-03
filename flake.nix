@@ -14,7 +14,7 @@
   };
 
   outputs = inputs:
-    inputs.flake-utils.lib.eachDefaultSystem (system:
+    (inputs.flake-utils.lib.eachDefaultSystem (system:
     let
       pkgsHost = import inputs.nixpkgs{
         inherit system;
@@ -574,5 +574,8 @@
           main = prev.main.override { default_features = false; };
         }));
       devShells.dynamic = mkDevShell scopeHost;
+    }) // {
+      nixosModules = import ./nix/modules { inherit inputs; };
+      nixosConfigurations = import ./nix/modules/test.nix { inherit inputs; };
     });
 }
