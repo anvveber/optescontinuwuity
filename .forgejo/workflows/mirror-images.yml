@@ -1,0 +1,40 @@
+name: Mirror Container Images
+
+on:
+  schedule:
+    # Run every 2 hours
+    - cron: "0 */2 * * *"
+  workflow_dispatch:
+    inputs:
+      dry_run:
+        description: 'Dry run (check only, no actual mirroring)'
+        required: false
+        default: false
+        type: boolean
+
+concurrency:
+  group: "mirror-images"
+  cancel-in-progress: true
+
+jobs:
+  mirror-images:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+
+      - name: Install regctl
+        uses: https://github.com/regclient/actions/regctl-installer@main]
+
+      - name: Check what images need mirroring
+        run: |
+          echo "Checking images that need mirroring..."
+          regsync check -c .forgejo/regsync/regsync.yml -v info
+
+      - name: Mirror images
+        if: ${{ !inputs.dry_run }}
+        run: |
+          echo "Starting image mirroring..."
+          regsync once -c .forgejo/regsync/regsync.yml -v info
