@@ -11,7 +11,7 @@ use ruma::{RoomAliasId, RoomId, UserId, api::appservice::Registration};
 use tokio::sync::{RwLock, RwLockReadGuard};
 
 pub use self::{namespace_regex::NamespaceRegex, registration_info::RegistrationInfo};
-use crate::{Dep, sending};
+use crate::{Dep, globals, sending, users};
 
 pub struct Service {
 	registration_info: RwLock<Registrations>,
@@ -20,7 +20,9 @@ pub struct Service {
 }
 
 struct Services {
+	globals: Dep<globals::Service>,
 	sending: Dep<sending::Service>,
+	users: Dep<users::Service>,
 }
 
 struct Data {
@@ -35,7 +37,9 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			registration_info: RwLock::new(BTreeMap::new()),
 			services: Services {
+				globals: args.depend::<globals::Service>("globals"),
 				sending: args.depend::<sending::Service>("sending"),
+				users: args.depend::<users::Service>("users"),
 			},
 			db: Data {
 				id_appserviceregistrations: args.db["id_appserviceregistrations"].clone(),
@@ -68,6 +72,16 @@ impl Service {
 		appservice_config_body: &str,
 	) -> Result {
 		//TODO: Check for collisions between exclusive appservice namespaces
+
+		let appservice_user_id = UserId::parse_with_server_name(
+			registration.sender_localpart.as_str(),
+			self.services.globals.server_name(),
+		)?;
+
+		if !self.services.users.exists(&appservice_user_id).await {
+			self.services.users.create(&appservice_user_id, None)?;
+		}
+
 		self.registration_info
 			.write()
 			.await
