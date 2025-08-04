@@ -220,6 +220,10 @@ async fn auth_appservice(
 		return Err!(Request(Exclusive("User is not in namespace.")));
 	}
 
+	if !services.users.exists(&user_id).await {
+		services.users.create(&user_id, None)?;
+	}
+
 	Ok(Auth {
 		origin: None,
 		sender_user: Some(user_id),
