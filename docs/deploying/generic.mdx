@@ -217,7 +217,7 @@ server {
 
 }
 
-location ~ ^(/|/_matrix|/_tuwunel|/.well-known/matrix) {
+location ~ ^(/|/_matrix|/_conduwuit|/.well-known/matrix) {
     proxy_pass http://unix:/run/conduwuit/conduwuit.sock;
 
     # Nginx by default only allows file uploads up to 1M in size
