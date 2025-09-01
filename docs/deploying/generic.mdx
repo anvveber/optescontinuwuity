@@ -221,7 +221,7 @@ location ~ ^(/|/_matrix|/_conduwuit|/.well-known/matrix) {
     proxy_pass http://unix:/run/conduwuit/conduwuit.sock;
 
     # Nginx by default only allows file uploads up to 1M in size
-    # Increase client_max_body_size to match max_upload_size defined in homeserver.yaml
+    # Increase client_max_body_size to match max_request_size defined in conduwuit.toml
     client_max_body_size 50M;
 
     # Synapse-Server responses may be chunked, which is an HTTP/1.1 feature.
