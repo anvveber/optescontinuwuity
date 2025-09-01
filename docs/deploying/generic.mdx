@@ -189,6 +189,52 @@ your.server.name, your.server.name:8448 {
 }
 ```
 
+### NGINX
+
+For security and performance reasons, we recommend Unix sockets with NGINX.
+
+Please note that your NGINX must have access to the socket.
+
+In most cases, this is the **www-data** group. For consistency reasons, we change the systemd service.
+
+```
+User=conduwuit
+Group=www-data
+```
+This allows us to remain in mode 660 for the socket.
+
+#### Full NGINX-Example
+
+```nginx
+server {
+    listen 443 ssl http2;
+    listen 8448 ssl http2;
+    server_name example.com;
+
+    ssl_protocols TLSv1.2 TLSv1.3;
+    ssl_certificate PATH_TO_CRT;
+    ssl_certificate_key PATH_TO_KEY;
+
+}
+
+location ~ ^(/|/_matrix|/_tuwunel|/.well-known/matrix) {
+    proxy_pass http://unix:/run/conduwuit/conduwuit.sock;
+
+    # Nginx by default only allows file uploads up to 1M in size
+    # Increase client_max_body_size to match max_upload_size defined in homeserver.yaml
+    client_max_body_size 50M;
+
+    # Synapse-Server responses may be chunked, which is an HTTP/1.1 feature.
+    proxy_http_version 1.1;
+}
+```
+Nginx users need to increase the `client_max_body_size` setting (default is 1M) to match the
+`max_request_size` defined in conduwuit.toml.
+
+If using NGINX without socket, you need to pass the request URI to Continuwuity using `$request_uri`, like this:
+- `proxy_pass http://127.0.0.1:6167$request_uri;`
+- `proxy_pass http://127.0.0.1:6167;`
+
 That's it! Just start and enable the service and you're set.
 
 ```bash
@@ -228,13 +274,6 @@ Lighttpd is not supported as it appears to interfere with the `X-Matrix` Authori
 header, making federation non-functional. If you find a workaround, please share it so we can add it to this documentation.
 
 If using Apache, you need to use `nocanon` in your `ProxyPass` directive to prevent httpd from interfering with the `X-Matrix` header (note that Apache is not ideal as a general reverse proxy, so we discourage using it if alternatives are available).
-
-If using Nginx, you need to pass the request URI to Continuwuity using `$request_uri`, like this:
-- `proxy_pass http://127.0.0.1:6167$request_uri;`
-- `proxy_pass http://127.0.0.1:6167;`
-
-Nginx users need to increase the `client_max_body_size` setting (default is 1M) to match the
-`max_request_size` defined in conduwuit.toml.
 
 ## You're done
 
