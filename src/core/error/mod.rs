@@ -1,4 +1,5 @@
 mod err;
+mod enhanced;
 mod log;
 mod panic;
 mod response;
@@ -6,7 +7,7 @@ mod serde;
 
 use std::{any::Any, borrow::Cow, convert::Infallible, sync::PoisonError};
 
-pub use self::{err::visit, log::*};
+pub use self::{err::visit, enhanced::*, log::*};
 
 #[derive(thiserror::Error)]
 pub enum Error {
@@ -110,8 +111,6 @@ pub enum Error {
 	InconsistentRoomState(&'static str, ruma::OwnedRoomId),
 	#[error(transparent)]
 	IntoHttp(#[from] ruma::api::error::IntoHttpError),
-	#[error("{0}")]
-	Ldap(Cow<'static, str>),
 	#[error(transparent)]
 	Mxc(#[from] ruma::MxcUriError),
 	#[error(transparent)]
