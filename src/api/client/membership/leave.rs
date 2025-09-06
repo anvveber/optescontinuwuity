@@ -42,7 +42,11 @@ pub(crate) async fn leave_room_route(
 // Make a user leave all their joined rooms, rescinds knocks, forgets all rooms,
 // and ignores errors
 pub async fn leave_all_rooms(services: &Services, user_id: &UserId) {
-	let rooms_joined = services.rooms.state_cache.rooms_joined(user_id);
+	let rooms_joined = services
+		.rooms
+		.state_cache
+		.rooms_joined(user_id)
+		.map(ToOwned::to_owned);
 
 	let rooms_invited = services
 		.rooms
