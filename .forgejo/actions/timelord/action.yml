@@ -20,7 +20,7 @@ runs:
   steps:
     - name: Cache timelord-cli installation
       id: cache-timelord-bin
-      uses: actions/cache@v3
+      uses: actions/cache@v4
       with:
         path: ~/.cargo/bin/timelord
         key: timelord-cli-v3.0.1
@@ -32,7 +32,7 @@ runs:
       if: steps.cache-timelord-bin.outputs.cache-hit != 'true'
 
     - name: Load timelord files
-      uses: actions/cache/restore@v3
+      uses: actions/cache/restore@v4
       with:
         path: /timelord/
         key: ${{ inputs.key }}
@@ -40,7 +40,7 @@ runs:
       shell: bash
       run: timelord sync --source-dir ${{ inputs.path }} --cache-dir /timelord/
     - name: Save timelord
-      uses: actions/cache/save@v3
+      uses: actions/cache/save@v4
       with:
         path: /timelord/
         key: ${{ inputs.key }}
