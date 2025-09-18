@@ -20,9 +20,8 @@ jobs:
           submodules: false
           persist-credentials: false
 
-      - uses: https://github.com/cachix/install-nix-action@56a7bb7b56d9a92d4fd1bc05758de7eea4a370a8 # v31.1.6
-        with:
-          nix_path: nixpkgs=channel:nixos-unstable
+      - name: Install Nix
+        run: apt install -y nix
 
         # We can skip getting a toolchain hash if this was ran as a dispatch with the intent
         # to update just the rocksdb hash. If this was ran as a dispatch and the toolchain
@@ -30,9 +29,9 @@ jobs:
       - name: Detect changed files
         id: changes
         run: |
-          git fetch origin ${{ forgejo.base_ref }} --depth=1 || true
-          if [ -n "${{ forgejo.event.pull_request.base.sha }}" ]; then
-            base=${{ forgejo.event.pull_request.base.sha }}
+          git fetch origin ${{ github.base_ref }} --depth=1 || true
+          if [ -n "${{ github.event.pull_request.base.sha }}" ]; then
+            base=${{ github.event.pull_request.base.sha }}
           else
             base=$(git rev-parse HEAD~1)
           fi
@@ -97,7 +96,7 @@ jobs:
           git config user.email "renovate@mail.ellis.link"
           git config user.name "renovate"
 
-          REF="${{ forgejo.head_ref }}"
+          REF="${{ github.head_ref }}"
 
           git fetch origin "$REF"
           git checkout "$REF"
