@@ -313,11 +313,14 @@ pub async fn join_room_by_id_helper(
 		}
 	}
 
-	let local_join = server_in_room
-		|| servers.is_empty()
-		|| (servers.len() == 1 && services.globals.server_is_ours(&servers[0]));
+	if !server_in_room && servers.is_empty() {
+		return Err!(Request(NotFound(
+			"No servers were provided to assist in joining the room remotely, and we are not \
+			 already participating in the room."
+		)));
+	}
 
-	if local_join {
+	if server_in_room {
 		join_room_by_id_helper_local(
 			services,
 			sender_user,
@@ -739,6 +742,7 @@ async fn join_room_by_id_helper_local(
 			.iter()
 			.stream()
 			.any(|restriction_room_id| {
+				trace!("Checking if {sender_user} is joined to {restriction_room_id}");
 				services
 					.rooms
 					.state_cache
@@ -751,6 +755,7 @@ async fn join_room_by_id_helper_local(
 				.state_cache
 				.local_users_in_room(room_id)
 				.filter(|user| {
+					trace!("Checking if {user} can invite {sender_user} to {room_id}");
 					services.rooms.state_accessor.user_can_invite(
 						room_id,
 						user,
@@ -763,6 +768,7 @@ async fn join_room_by_id_helper_local(
 				.await
 				.map(ToOwned::to_owned)
 		} else {
+			trace!("No restriction rooms are joined by {sender_user}");
 			None
 		}
 	};
