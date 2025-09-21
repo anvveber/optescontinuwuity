@@ -321,32 +321,6 @@ pub(crate) async fn create_room_route(
 		// treat this as a v12 room
 	}
 
-	let mut creators: Vec<OwnedUserId> = vec![sender_user.to_owned()];
-	// Do we care about additional_creators?
-	if room_features.explicitly_privilege_room_creators {
-		// Have they been specified?
-		if let Some(additional_creators) = create_content.get("additional_creators") {
-			// Are they a real array?
-			if let Some(additional_creators) = additional_creators.as_array() {
-				// Iterate through them
-				for creator in additional_creators {
-					// Are they a string?
-					if let Some(creator) = creator.as_str() {
-						// Do they parse into a real user ID?
-						if let Ok(creator) = OwnedUserId::parse(creator) {
-							// Add them to the power levels and creators
-							creators.push(creator.clone());
-						}
-					}
-				}
-			}
-		}
-	} else {
-		power_levels_to_grant.insert(sender_user.to_owned(), int!(100));
-		creators.clear(); // If this vec is not empty, default_power_levels_content will
-		// treat this as a v12 room
-	}
-
 	let power_levels_content = default_power_levels_content(
 		body.power_level_content_override.as_ref(),
 		&body.visibility,
