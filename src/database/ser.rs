@@ -261,8 +261,8 @@ impl<W: Write> ser::Serializer for &mut Serializer<'_, W> {
 	fn serialize_bytes(self, v: &[u8]) -> Result<Self::Ok> {
 		debug_assert!(
 			self.depth > 0,
-			"serializing byte array at the top-level; you can skip serialization
-		instead" );
+			"serializing byte array at the top-level; you can skip serialization instead"
+		);
 
 		self.write(v)
 	}
