@@ -1,22 +1,23 @@
 # Dependencies (keep sorted)
-{ craneLib
-, inputs
-, jq
-, lib
-, libiconv
-, liburing
-, pkgsBuildHost
-, rocksdb
-, removeReferencesTo
-, rust
-, rust-jemalloc-sys
-, stdenv
+{
+  craneLib,
+  inputs,
+  jq,
+  lib,
+  libiconv,
+  liburing,
+  pkgsBuildHost,
+  rocksdb,
+  removeReferencesTo,
+  rust,
+  rust-jemalloc-sys,
+  stdenv,
 
   # Options (keep sorted)
-, all_features ? false
-, default_features ? true
+  all_features ? false,
+  default_features ? true,
   # default list of disabled features
-, disable_features ? [
+  disable_features ? [
     # dont include experimental features
     "experimental"
     # jemalloc profiling/stats features are expensive and shouldn't
@@ -27,32 +28,36 @@
     "hardened_malloc"
     # conduwuit_mods is a development-only hot reload feature
     "conduwuit_mods"
-  ]
-, disable_release_max_log_level ? false
-, features ? [ ]
-, profile ? "release"
+  ],
+  disable_release_max_log_level ? false,
+  features ? [ ],
+  profile ? "release",
   # rocksdb compiled with -march=haswell and target-cpu=haswell rustflag
   # haswell is pretty much any x86 cpu made in the last 12 years, and
   # supports modern CPU extensions that rocksdb can make use of.
   # disable if trying to make a portable x86_64 build for very old hardware
-, x86_64_haswell_target_optimised ? false
+  x86_64_haswell_target_optimised ? false,
 }:
 
 let
   # We perform default-feature unification in nix, because some of the dependencies
   # on the nix side depend on feature values.
-  crateFeatures = path:
-    let manifest = lib.importTOML "${path}/Cargo.toml"; in
+  crateFeatures =
+    path:
+    let
+      manifest = lib.importTOML "${path}/Cargo.toml";
+    in
     lib.remove "default" (lib.attrNames manifest.features);
-  crateDefaultFeatures = path:
-    (lib.importTOML "${path}/Cargo.toml").features.default;
+  crateDefaultFeatures = path: (lib.importTOML "${path}/Cargo.toml").features.default;
   allDefaultFeatures = crateDefaultFeatures "${inputs.self}/src/main";
   allFeatures = crateFeatures "${inputs.self}/src/main";
-  features' = lib.unique
-    (features ++
-      lib.optionals default_features allDefaultFeatures ++
-      lib.optionals all_features allFeatures);
-  disable_features' = disable_features ++ lib.optionals disable_release_max_log_level [ "release_max_log_level" ];
+  features' = lib.unique (
+    features
+    ++ lib.optionals default_features allDefaultFeatures
+    ++ lib.optionals all_features allFeatures
+  );
+  disable_features' =
+    disable_features ++ lib.optionals disable_release_max_log_level [ "release_max_log_level" ];
   features'' = lib.subtractLists disable_features' features';
 
   featureEnabled = feature: builtins.elem feature features'';
@@ -64,54 +69,68 @@ let
   # own. In order for this to work, we need to set flags on the build that match
   # whatever flags tikv-jemalloc-sys was going to use. These are dependent on
   # which features we enable in tikv-jemalloc-sys.
-  rust-jemalloc-sys' = (rust-jemalloc-sys.override {
-    # tikv-jemalloc-sys/unprefixed_malloc_on_supported_platforms feature
-    unprefixed = true;
-  }).overrideAttrs (old: {
-    configureFlags = old.configureFlags ++
-      # we dont need docs
-      [ "--disable-doc" ] ++
-      # we dont need cxx/C++ integration
-      [ "--disable-cxx" ] ++
-      # tikv-jemalloc-sys/profiling feature
-      lib.optional (featureEnabled "jemalloc_prof") "--enable-prof" ++
-      # tikv-jemalloc-sys/stats feature
-      (if (featureEnabled "jemalloc_stats") then [ "--enable-stats" ] else [ "--disable-stats" ]);
-  });
+  rust-jemalloc-sys' =
+    (rust-jemalloc-sys.override {
+      # tikv-jemalloc-sys/unprefixed_malloc_on_supported_platforms feature
+      unprefixed = true;
+    }).overrideAttrs
+      (old: {
+        configureFlags =
+          old.configureFlags
+          ++
+            # we dont need docs
+            [ "--disable-doc" ]
+          ++
+            # we dont need cxx/C++ integration
+            [ "--disable-cxx" ]
+          ++
+            # tikv-jemalloc-sys/profiling feature
+            lib.optional (featureEnabled "jemalloc_prof") "--enable-prof"
+          ++
+            # tikv-jemalloc-sys/stats feature
+            (if (featureEnabled "jemalloc_stats") then [ "--enable-stats" ] else [ "--disable-stats" ]);
+      });
 
   buildDepsOnlyEnv =
     let
-      rocksdb' = (rocksdb.override {
-        jemalloc = lib.optional (featureEnabled "jemalloc") rust-jemalloc-sys';
-        # rocksdb fails to build with prefixed jemalloc, which is required on
-        # darwin due to [1]. In this case, fall back to building rocksdb with
-        # libc malloc. This should not cause conflicts, because all of the
-        # jemalloc symbols are prefixed.
-        #
-        # [1]: https://github.com/tikv/jemallocator/blob/ab0676d77e81268cd09b059260c75b38dbef2d51/jemalloc-sys/src/env.rs#L17
-        enableJemalloc = featureEnabled "jemalloc" && !stdenv.hostPlatform.isDarwin;
+      rocksdb' =
+        (rocksdb.override {
+          jemalloc = lib.optional (featureEnabled "jemalloc") rust-jemalloc-sys';
+          # rocksdb fails to build with prefixed jemalloc, which is required on
+          # darwin due to [1]. In this case, fall back to building rocksdb with
+          # libc malloc. This should not cause conflicts, because all of the
+          # jemalloc symbols are prefixed.
+          #
+          # [1]: https://github.com/tikv/jemallocator/blob/ab0676d77e81268cd09b059260c75b38dbef2d51/jemalloc-sys/src/env.rs#L17
+          enableJemalloc = featureEnabled "jemalloc" && !stdenv.hostPlatform.isDarwin;
 
-        # for some reason enableLiburing in nixpkgs rocksdb is default true
-        # which breaks Darwin entirely
-        inherit enableLiburing;
-      }).overrideAttrs (old: {
-        inherit enableLiburing;
-        cmakeFlags = (if x86_64_haswell_target_optimised then
-          (lib.subtractLists [
-            # dont make a portable build if x86_64_haswell_target_optimised is enabled
-            "-DPORTABLE=1"
-          ]
-            old.cmakeFlags
-          ++ [ "-DPORTABLE=haswell" ]) else [ "-DPORTABLE=1" ]
-        )
-        ++ old.cmakeFlags;
+          # for some reason enableLiburing in nixpkgs rocksdb is default true
+          # which breaks Darwin entirely
+          inherit enableLiburing;
+        }).overrideAttrs
+          (old: {
+            inherit enableLiburing;
+            cmakeFlags =
+              (
+                if x86_64_haswell_target_optimised then
+                  (
+                    lib.subtractLists [
+                      # dont make a portable build if x86_64_haswell_target_optimised is enabled
+                      "-DPORTABLE=1"
+                    ] old.cmakeFlags
+                    ++ [ "-DPORTABLE=haswell" ]
+                  )
+                else
+                  [ "-DPORTABLE=1" ]
+              )
+              ++ old.cmakeFlags;
 
-        # outputs has "tools" which we dont need or use
-        outputs = [ "out" ];
+            # outputs has "tools" which we dont need or use
+            outputs = [ "out" ];
 
-        # preInstall hooks has stuff for messing with ldb/sst_dump which we dont need or use
-        preInstall = "";
-      });
+            # preInstall hooks has stuff for messing with ldb/sst_dump which we dont need or use
+            preInstall = "";
+          });
     in
     {
       # https://crane.dev/faq/rebuilds-bindgen.html
@@ -121,29 +140,30 @@ let
       ROCKSDB_INCLUDE_DIR = "${rocksdb'}/include";
       ROCKSDB_LIB_DIR = "${rocksdb'}/lib";
     }
-    //
-    (import ./cross-compilation-env.nix {
+    // (import ./cross-compilation-env.nix {
       # Keep sorted
       inherit
         lib
         pkgsBuildHost
         rust
-        stdenv;
+        stdenv
+        ;
     });
 
   buildPackageEnv = {
     GIT_COMMIT_HASH = inputs.self.rev or inputs.self.dirtyRev or "";
     GIT_COMMIT_HASH_SHORT = inputs.self.shortRev or inputs.self.dirtyShortRev or "";
-  } // buildDepsOnlyEnv // {
+  }
+  // buildDepsOnlyEnv
+  // {
     # Only needed in static stdenv because these are transitive dependencies of rocksdb
-    CARGO_BUILD_RUSTFLAGS = buildDepsOnlyEnv.CARGO_BUILD_RUSTFLAGS
-      + lib.optionalString (enableLiburing && stdenv.hostPlatform.isStatic)
-      " -L${lib.getLib liburing}/lib -luring"
-      + lib.optionalString x86_64_haswell_target_optimised
-      " -Ctarget-cpu=haswell";
+    CARGO_BUILD_RUSTFLAGS =
+      buildDepsOnlyEnv.CARGO_BUILD_RUSTFLAGS
+      + lib.optionalString (
+        enableLiburing && stdenv.hostPlatform.isStatic
+      ) " -L${lib.getLib liburing}/lib -luring"
+      + lib.optionalString x86_64_haswell_target_optimised " -Ctarget-cpu=haswell";
   };
-
-
 
   commonAttrs = {
     inherit
@@ -151,41 +171,48 @@ let
         cargoToml = "${inputs.self}/Cargo.toml";
       })
       pname
-      version;
+      version
+      ;
 
-    src = let filter = inputs.nix-filter.lib; in filter {
-      root = inputs.self;
+    src =
+      let
+        filter = inputs.nix-filter.lib;
+      in
+      filter {
+        root = inputs.self;
 
-      # Keep sorted
-      include = [
-        ".cargo"
-        "Cargo.lock"
-        "Cargo.toml"
-        "src"
-        "xtask"
-      ];
-    };
+        # Keep sorted
+        include = [
+          ".cargo"
+          "Cargo.lock"
+          "Cargo.toml"
+          "src"
+          "xtask"
+        ];
+      };
 
     doCheck = true;
 
-    cargoExtraArgs = "--no-default-features --locked "
-      + lib.optionalString
-      (features'' != [ ])
-      "--features " + (builtins.concatStringsSep "," features'');
+    cargoExtraArgs =
+      "--no-default-features --locked "
+      + lib.optionalString (features'' != [ ]) "--features "
+      + (builtins.concatStringsSep "," features'');
 
     dontStrip = profile == "dev" || profile == "test";
     dontPatchELF = profile == "dev" || profile == "test";
 
-    buildInputs = lib.optional (featureEnabled "jemalloc") rust-jemalloc-sys'
+    buildInputs =
+      lib.optional (featureEnabled "jemalloc") rust-jemalloc-sys'
       # needed to build Rust applications on macOS
       ++ lib.optionals stdenv.hostPlatform.isDarwin [
-      # https://github.com/NixOS/nixpkgs/issues/206242
-      # ld: library not found for -liconv
-      libiconv
-      # https://stackoverflow.com/questions/69869574/properly-adding-darwin-apple-sdk-to-a-nix-shell
-      # https://discourse.nixos.org/t/compile-a-rust-binary-on-macos-dbcrossbar/8612
-      pkgsBuildHost.darwin.apple_sdk.frameworks.Security
-    ];
+        # https://github.com/NixOS/nixpkgs/issues/206242
+        # ld: library not found for -liconv
+        libiconv
+        # https://stackoverflow.com/questions/69869574/properly-adding-darwin-apple-sdk-to-a-nix-shell
+        # https://discourse.nixos.org/t/compile-a-rust-binary-on-macos-dbcrossbar/8612
+        # Not needed anymore, according to: https://nixos.org/manual/nixpkgs/stable/#sec-darwin-legacy-frameworks
+        #pkgsBuildHost.darwin.apple_sdk.frameworks.Security
+      ];
 
     nativeBuildInputs = [
       # bindgen needs the build platform's libclang. Apparently due to "splicing
@@ -202,23 +229,29 @@ let
   };
 in
 
-craneLib.buildPackage (commonAttrs // {
-  cargoArtifacts = craneLib.buildDepsOnly (commonAttrs // {
-    env = buildDepsOnlyEnv;
-  });
+craneLib.buildPackage (
+  commonAttrs
+  // {
+    cargoArtifacts = craneLib.buildDepsOnly (
+      commonAttrs
+      // {
+        env = buildDepsOnlyEnv;
+      }
+    );
 
-  doCheck = true;
+    doCheck = true;
 
-  cargoExtraArgs = "--no-default-features --locked "
-    + lib.optionalString
-    (features'' != [ ])
-    "--features " + (builtins.concatStringsSep "," features'');
+    cargoExtraArgs =
+      "--no-default-features --locked "
+      + lib.optionalString (features'' != [ ]) "--features "
+      + (builtins.concatStringsSep "," features'');
 
-  env = buildPackageEnv;
-
-  passthru = {
     env = buildPackageEnv;
-  };
 
-  meta.mainProgram = commonAttrs.pname;
-})
+    passthru = {
+      env = buildPackageEnv;
+    };
+
+    meta.mainProgram = commonAttrs.pname;
+  }
+)

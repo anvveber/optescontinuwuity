@@ -32,7 +32,8 @@ pub enum MediaCommand {
 	///   or fallback to last modified date. This will always ignore errors by
 	///   default.
 	DeletePastRemoteMedia {
-		/// - The relative time (e.g. 30s, 5m, 7d) within which to search
+		/// - The relative time (e.g. 30s, 5m, 7d) from now within which to
+		///   search
 		duration: String,
 
 		/// - Only delete media created before [duration] ago
