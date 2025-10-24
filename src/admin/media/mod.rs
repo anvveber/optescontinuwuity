@@ -27,16 +27,17 @@ pub enum MediaCommand {
 	///   filesystem. This will always ignore errors.
 	DeleteList,
 
-	/// - Deletes all remote (and optionally local) media created before/after
-	///   [duration] ago, using filesystem metadata first created at date, or
-	///   fallback to last modified date. This will always ignore errors by
-	///   default.
-	/// - Examples:
-	///   * Delete all remote media older than a year: `!admin media
-	///     delete-past-remote-media -b 1y`
+	/// Deletes all remote (and optionally local) media created before/after
+	/// [duration] ago, using filesystem metadata first created at date, or
+	/// fallback to last modified date. This will always ignore errors by
+	/// default.
+	///
+	/// * Examples:
+	///   * Delete all remote media older than a year: 
+	///     `!admin media delete-past-remote-media -b 1y`
 	///   * Delete all remote and local media from 3 days ago, up until now:
-	///     `!admin media delete-past-remote-media -a 3d
-	///     --yes-i-want-to-delete-local-media`
+	///     `!admin media delete-past-remote-media -a 3d --yes-i-want-to-delete-local-media`
+	#[command(verbatim_doc_comment)]
 	DeletePastRemoteMedia {
 		/// - The relative time (e.g. 30s, 5m, 7d) from now within which to
 		///   search
