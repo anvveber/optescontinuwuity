@@ -1120,8 +1120,11 @@ default.
 
 * Examples:
   * Delete all remote media older than a year:
+
     `!admin media delete-past-remote-media -b 1y`
+
   * Delete all remote and local media from 3 days ago, up until now:
+
     `!admin media delete-past-remote-media -a 3d --yes-i-want-to-delete-local-media`
 
 **Usage:** `admin media delete-past-remote-media [OPTIONS] <DURATION>`
