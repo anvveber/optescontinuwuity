@@ -1,11 +1,13 @@
 use std::{path::PathBuf, sync::Arc};
 
 use conduwuit::{
-	Err, Result,
+	Err, Result, err,
 	utils::{stream::IterStream, time},
 	warn,
 };
+use ed25519_dalek::{SigningKey, pkcs8::EncodePrivateKey};
 use futures::TryStreamExt;
+use ruma::serde::{Base64, base64::Standard};
 
 use crate::admin_command;
 
@@ -152,4 +154,30 @@ pub(super) async fn shutdown(&self) -> Result {
 	self.services.server.shutdown()?;
 
 	self.write_str("Shutting down server...").await
+}
+
+#[admin_command]
+pub(super) async fn import_signing_key(&self, key_id: String, b64_key: String) -> Result {
+	self.bail_restricted()?;
+
+	let key = Base64::<Standard>::parse(b64_key)
+		.map_err(|e| err!("Failed to decode input string: {e:?}"))?;
+	let signing_key = SigningKey::from_bytes(
+		key.as_bytes()
+			.try_into()
+			.map_err(|e| err!("Failed to read signing key: {e:?}"))?,
+	);
+	let keypair = (
+		key_id,
+		signing_key
+			.to_pkcs8_der()
+			.map_err(|e| err!("Failed to convert key: {e:?}"))?
+			.to_bytes()
+			.to_vec(),
+	);
+
+	self.services.db["global"].raw_put(b"keypair", &keypair);
+
+	self.write_str("Signing key imported. It will be active after a restart.")
+		.await
 }

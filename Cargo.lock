@@ -1053,6 +1053,7 @@ dependencies = [
  "conduwuit_macros",
  "conduwuit_service",
  "const-str",
+ "ed25519-dalek",
  "futures",
  "log",
  "ruma",

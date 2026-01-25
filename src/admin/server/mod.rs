@@ -52,4 +52,23 @@ pub enum ServerCommand {
 
 	/// Shutdown the server
 	Shutdown,
+
+	/// Import an existing signing key, replacing the existing key.
+	///
+	/// Old Synapse key:
+	/// ```plaintext
+	/// ed25519 <key_id> <b64_key>
+	/// ```
+	/// Old Dendrite key:
+	/// ```plaintext
+	/// -----BEGIN MATRIX PRIVATE KEY-----
+	/// Key-ID: ed25519:<key_id>
+	///
+	/// <b64_key>
+	/// -----END MATRIX PRIVATE KEY-----
+	/// ```
+	ImportSigningKey {
+		key_id: String,
+		b64_key: String,
+	},
 }

@@ -47,3 +47,23 @@ Restart the server
 ## `!admin server shutdown`
 
 Shutdown the server
+
+## `!admin server import-signing-key`
+
+Import the given signing key, replacing the existing keypair.
+
+You can import Synapse and Dendrite keys by extracting the relevant fields from their respective key files.
+
+### Synapse
+```plaintext
+ed25519 <key_id> <b64_key>
+```
+
+### Dendrite
+```plaintext
+-----BEGIN MATRIX PRIVATE KEY-----
+Key-ID: ed25519:<key_id>
+
+<b64_key>
+-----END MATRIX PRIVATE KEY-----
+```
