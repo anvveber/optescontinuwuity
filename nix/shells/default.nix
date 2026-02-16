@@ -25,6 +25,11 @@
           self'.packages.dev-toolchain
         ];
         env.LIBCLANG_PATH = lib.makeLibraryPath [ pkgs.llvmPackages.libclang.lib ];
+        env.LD_LIBRARY_PATH = lib.makeLibraryPath [
+          pkgs.liburing
+          pkgs.stdenv.cc.cc.lib
+          pkgs.jemalloc
+        ];
       };
     };
 }
