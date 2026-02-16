@@ -1,3 +1,4 @@
 style = "conventional"
 subject_length = 72
+subject_capitalized = false
 allowed_types = ["ci", "build", "fix", "feat", "chore", "docs", "style", "refactor", "perf", "test"]
