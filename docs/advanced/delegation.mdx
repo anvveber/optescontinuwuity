@@ -1,0 +1,111 @@
+# Delegation/split-domain
+
+Matrix allows clients and servers to discover a homeserver's "true" destination via _`.well-known` delegation_. This is especially useful if you would like to:
+
+- Serve Continuwuity on a subdomain while having only the base domain for your usernames
+- Use a port other than `:8448` for server-to-server connections
+
+This guide will show you how to have `@user:example.com` usernames while serving Continuwuity on `https://matrix.example.com`. It assumes using port 443 for both client-to-server connections and server-to-server federation.
+
+## Configuration
+
+First, ensure that the `server_name` field matches your intended username suffix. If this is not the case, you **MUST** wipe the database directory and reinstall Continuwuity with your desired `server_name`
+
+Then, in the `[global.well_known]` section of your config file, add the following fields:
+
+```toml
+[global.well_known]
+
+client = "https://matrix.example.com"
+
+# port number MUST be specified
+server = "matrix.example.com:443"
+```
+
+Alternatively if you are using Docker, you can set the `CONTINUWUITY_WELL_KNOWN` environment variable as below:
+
+```yaml
+services:
+  continuwuity:
+    ...
+    environment:
+      CONTINUWUITY_WELL_KNOWN: |
+        {
+        client=https://matrix.example.com,
+        server=matrix.example.com:443
+        }
+```
+
+## Serving with a reverse proxy
+
+The steps above will generate two JSON files: `.well-known/matrix/client` and `.well-known/matrix/server`. To enable clients and servers to discover your homeserver's destination, you will need to serve these files from your base domain.
+
+<details>
+
+<summary>For Caddy</summary>
+
+```
+matrix.example.com:443 {
+  reverse_proxy 127.0.0.1:6167
+}
+
+example.com:443 {
+  reverse_proxy /.well-known/matrix* 127.0.0.1:6167
+}
+```
+
+</details>
+
+<details>
+
+<summary>For Traefik (via Docker labels)</summary>
+
+```
+services:
+  continuwuity:
+    ...
+    labels:
+      - "traefik.enable=true"
+      - "traefik.http.routers.continuwuity.rule=(Host(`matrix.example.com`) || (Host(`example.com`) && PathPrefix(`/.well-known/matrix`)))"
+      - "traefik.http.routers.continuwuity.service=continuwuity"
+      - "traefik.http.services.continuwuity.loadbalancer.server.port=6167"
+```
+
+</details>
+
+Bring up Continuwuity and the reverse proxy. You should now see the following contents
+
+<details open>
+
+<summary>`https://example.com/.well-known/matrix/server`</summary>
+
+```json
+{
+  "m.server": "matrix.example.com:443"
+}
+```
+
+</details>
+
+<details open>
+
+<summary>`https://example.com/.well-known/matrix/client`</summary>
+
+```json
+{
+  "m.homeserver": {
+    "base_url": "https://matrix.example.com/"
+  },
+  "org.matrix.msc3575.proxy": {
+    "url": "https://matrix.example.com/"
+  }
+}
+```
+
+</details>
+
+## Troubleshooting
+
+### Cannot log in with web clients
+
+Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
