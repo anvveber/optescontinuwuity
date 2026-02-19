@@ -20,6 +20,12 @@ client = "https://matrix.example.com"
 
 # port number MUST be specified
 server = "matrix.example.com:443"
+
+# (optional) customize your support contacts
+#support_page =
+#support_role = "m.role.admin"
+#support_email =
+#support_mxid = "@user:example.com"
 ```
 
 Alternatively if you are using Docker, you can set the `CONTINUWUITY_WELL_KNOWN` environment variable as below:
@@ -38,7 +44,7 @@ services:
 
 ## Serving with a reverse proxy
 
-The steps above will generate two JSON files: `.well-known/matrix/client` and `.well-known/matrix/server`. To enable clients and servers to discover your homeserver's destination, you will need to serve these files from your base domain.
+The steps above will generate three JSON files: `.well-known/matrix/client`, `.well-known/matrix/server`, and `.well-known/matrix/support. To enable clients and servers to discover your homeserver's destination and contact details, you will need to serve these files from your base domain.
 
 <details>
 
@@ -109,3 +115,11 @@ Bring up Continuwuity and the reverse proxy. You should now see the following co
 ### Cannot log in with web clients
 
 Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
+
+## Related Documentation
+
+See the following Matrix Specs for full details on client/server discovery mechanisms:
+
+- [Client-to-Server discovery](https://spec.matrix.org/v1.17/client-server-api/#server-discovery)
+- [Server-to-Server discovery](https://spec.matrix.org/v1.17/server-server-api/#resolving-server-names)
+- [MSC1929: Homeserver Admin Contact and Support page](https://github.com/matrix-org/matrix-spec-proposals/pull/1929)
