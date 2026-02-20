@@ -9,7 +9,9 @@ This guide will show you how to have `@user:example.com` usernames while serving
 
 ## Configuration
 
-First, ensure that the `server_name` field matches your intended username suffix. If this is not the case, you **MUST** wipe the database directory and reinstall Continuwuity with your desired `server_name`
+First, ensure you have set up A/AAAA records for `matrix.example.com` and `example.com` pointing to your IP.
+
+Then, ensure that the `server_name` field matches your intended username suffix. If this is not the case, you **MUST** wipe the database directory and reinstall Continuwuity with your desired `server_name`
 
 Then, in the `[global.well_known]` section of your config file, add the following fields:
 
@@ -44,7 +46,7 @@ services:
 
 ## Serving with a reverse proxy
 
-The steps above will generate three JSON files: `.well-known/matrix/client`, `.well-known/matrix/server`, and `.well-known/matrix/support. To enable clients and servers to discover your homeserver's destination and contact details, you will need to serve these files from your base domain.
+The steps above will generate three JSON files: `.well-known/matrix/client`, `.well-known/matrix/server`, and `.well-known/matrix/support`. To enable discovery of your homeserver's destination and contact details, you will need to serve these files from your base domain.
 
 <details>
 
@@ -116,10 +118,57 @@ Bring up Continuwuity and the reverse proxy. You should now see the following co
 
 Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
 
+---
+
+## Using SRV records (not recommended)
+
+The following methods uses the legacy SRV records and only apply to federation traffic. They are provided only for completeness, and are **not recommended** for most users due to increased complexity.
+
+<details>
+
+<summary>Using only SRV records</summary>
+
+If you can't set up `.well-known/matrix/server` for some reason, you can set up a SRV DNS record as below:
+
+- Service and name: `_matrix-fed._tcp.example.com.`
+- Priority: `10` (can be any number)
+- Weight: `10` (can be any number)
+- Port: `443`
+- Target: `matrix.example.com.`
+
+However, on the target's IP, you must configure a valid route and cert for the base domain, `example.com`. Therefore, this method only works to redirect traffic into the right port number.
+
+</details>
+
+<details>
+
+<summary>Using SRV records + .well-known</summary>
+
+You can also set up `.well-known/matrix/server` with a delegated domain but no ports:
+
+```toml
+[global.well_known]
+server = "matrix.example.com"
+```
+
+Then, set up a SRV DNS record to announce the port number as below:
+
+- Service and name: `_matrix-fed._tcp.matrix.example.com.`
+- Priority: `10` (can be any number)
+- Weight: `10` (can be any number)
+- Port: `443`
+- Target: `matrix.example.com.`
+
+On the target's IP, you'll need to provide a valid route and cert for `matrix.example.com`. It provides the same feature as pure `.well-known` delegation, albeit with more parts to handle.
+
+</details>
+
+---
+
 ## Related Documentation
 
 See the following Matrix Specs for full details on client/server discovery mechanisms:
 
+- [Server-to-Server discovery](https://spec.matrix.org/v1.17/server-server-api/#resolving-server-names) (see this for more information on SRV records)
 - [Client-to-Server discovery](https://spec.matrix.org/v1.17/client-server-api/#server-discovery)
-- [Server-to-Server discovery](https://spec.matrix.org/v1.17/server-server-api/#resolving-server-names)
 - [MSC1929: Homeserver Admin Contact and Support page](https://github.com/matrix-org/matrix-spec-proposals/pull/1929)
