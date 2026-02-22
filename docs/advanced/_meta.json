@@ -2,6 +2,6 @@
     {
         "type": "file",
         "name": "delegation",
-        "label": "Delegation"
+        "label": "Delegation / split-domain"
     }
 ]

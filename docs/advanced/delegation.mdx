@@ -1,17 +1,17 @@
-# Delegation/split-domain
+# Delegation/split-domain deployment
 
-Matrix allows clients and servers to discover a homeserver's "true" destination via _`.well-known` delegation_. This is especially useful if you would like to:
+Matrix allows clients and servers to discover a homeserver's "true" destination via **`.well-known` delegation**. This is especially useful if you would like to:
 
 - Serve Continuwuity on a subdomain while having only the base domain for your usernames
 - Use a port other than `:8448` for server-to-server connections
 
-This guide will show you how to have `@user:example.com` usernames while serving Continuwuity on `https://matrix.example.com`. It assumes using port 443 for both client-to-server connections and server-to-server federation.
+This guide will show you how to have `@user:example.com` usernames while serving Continuwuity on `https://matrix.example.com`. It assumes you are using port 443 for both client-to-server connections and server-to-server federation.
 
 ## Configuration
 
 First, ensure you have set up A/AAAA records for `matrix.example.com` and `example.com` pointing to your IP.
 
-Then, ensure that the `server_name` field matches your intended username suffix. If this is not the case, you **MUST** wipe the database directory and reinstall Continuwuity with your desired `server_name`
+Then, ensure that the `server_name` field matches your intended username suffix. If this is not the case, you **MUST** wipe the database directory and reinstall Continuwuity with your desired `server_name`.
 
 Then, in the `[global.well_known]` section of your config file, add the following fields:
 
@@ -46,7 +46,13 @@ services:
 
 ## Serving with a reverse proxy
 
-The steps above will generate three JSON files: `.well-known/matrix/client`, `.well-known/matrix/server`, and `.well-known/matrix/support`. To enable discovery of your homeserver's destination and contact details, you will need to serve these files from your base domain.
+After doing the steps above, Continuwuity will serve these 3 JSON files:
+
+- `.well-known/matrix/client`: for Client-Server discovery
+- `.well-known/matrix/server`: for Server-Server (federation) discovery
+- `.well-known/matrix/support`: admin contact details (strongly recommended to have)
+
+To enable full discovery, you will need to reverse proxy these paths from the base domain back to Continuwuity.
 
 <details>
 
@@ -54,11 +60,11 @@ The steps above will generate three JSON files: `.well-known/matrix/client`, `.w
 
 ```
 matrix.example.com:443 {
-  reverse_proxy 127.0.0.1:6167
+  reverse_proxy 127.0.0.1:8008
 }
 
 example.com:443 {
-  reverse_proxy /.well-known/matrix* 127.0.0.1:6167
+  reverse_proxy /.well-known/matrix* 127.0.0.1:8008
 }
 ```
 
@@ -76,12 +82,12 @@ services:
       - "traefik.enable=true"
       - "traefik.http.routers.continuwuity.rule=(Host(`matrix.example.com`) || (Host(`example.com`) && PathPrefix(`/.well-known/matrix`)))"
       - "traefik.http.routers.continuwuity.service=continuwuity"
-      - "traefik.http.services.continuwuity.loadbalancer.server.port=6167"
+      - "traefik.http.services.continuwuity.loadbalancer.server.port=8008"
 ```
 
 </details>
 
-Bring up Continuwuity and the reverse proxy. You should now see the following contents
+Restart Continuwuity and your reverse proxy. Once that's done, visit these routes and check that the responses match the examples below:
 
 <details open>
 
@@ -116,19 +122,23 @@ Bring up Continuwuity and the reverse proxy. You should now see the following co
 
 ### Cannot log in with web clients
 
-Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
+Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While Continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
 
 ---
 
 ## Using SRV records (not recommended)
 
-The following methods uses the legacy SRV records and only apply to federation traffic. They are provided only for completeness, and are **not recommended** for most users due to increased complexity with little benefits. If you have already set up `.well-known` delegation as above, you can safely skip this part.
+:::warning
+The following methods are **not recommended** due to increased complexity with little benefits. If you have already set up `.well-known` delegation as above, you can safely skip this part.
+:::
+
+The following methods uses SRV DNS records and only work with federation traffic. They are only included for completeness.
 
 <details>
 
 <summary>Using only SRV records</summary>
 
-If you can't set up `.well-known/matrix/server` for some reason, you can set up a SRV DNS record as below:
+If you can't set up `.well-known/matrix/server` for some reason, you can set up a SRV record (via your DNS provider) as below:
 
 - Service and name: `_matrix-fed._tcp.example.com.`
 - Priority: `10` (can be any number)
@@ -151,7 +161,7 @@ You can also set up `.well-known/matrix/server` with a delegated domain but no p
 server = "matrix.example.com"
 ```
 
-Then, set up a SRV DNS record to announce the port number as below:
+Then, set up a SRV record (via your DNS provider) to announce the port number as below:
 
 - Service and name: `_matrix-fed._tcp.matrix.example.com.`
 - Priority: `10` (can be any number)
@@ -167,8 +177,8 @@ On the target's IP, you'll need to provide a valid route and cert for `matrix.ex
 
 ## Related Documentation
 
-See the following Matrix Specs for full details on client/server discovery mechanisms:
+See the following Matrix Specs for full details on client/server resolution mechanisms:
 
-- [Server-to-Server discovery](https://spec.matrix.org/v1.17/server-server-api/#resolving-server-names) (see this for more information on SRV records)
-- [Client-to-Server discovery](https://spec.matrix.org/v1.17/client-server-api/#server-discovery)
+- [Server-to-Server resolution](https://spec.matrix.org/v1.17/server-server-api/#resolving-server-names) (see this for more information on SRV records)
+- [Client-to-Server resolution](https://spec.matrix.org/v1.17/client-server-api/#server-discovery)
 - [MSC1929: Homeserver Admin Contact and Support page](https://github.com/matrix-org/matrix-spec-proposals/pull/1929)
