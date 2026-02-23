@@ -77,7 +77,12 @@ rec {
     craneLib.buildDepsOnly (
       (commonAttrs commonAttrsArgs)
       // {
-        env = uwuenv.buildDepsOnlyEnv // (makeRocksDBEnv { inherit rocksdb; });
+        env = uwuenv.buildDepsOnlyEnv
+              // (makeRocksDBEnv { inherit rocksdb; })
+              // {
+                # required since we started using unstable reqwest apparently ... otherwise the all-features build will fail
+                RUSTFLAGS = "--cfg reqwest_unstable";
+              };
         inherit (features) cargoExtraArgs;
       }
 
@@ -102,7 +107,13 @@ rec {
         '';
         cargoArtifacts = deps;
         doCheck = true;
-        env = uwuenv.buildPackageEnv // rocksdbEnv;
+        env =
+          uwuenv.buildPackageEnv
+          // rocksdbEnv
+          // {
+            # required since we started using unstable reqwest apparently ... otherwise the all-features build will fail
+            RUSTFLAGS = "--cfg reqwest_unstable";
+          };
         passthru.env = uwuenv.buildPackageEnv // rocksdbEnv;
         meta.mainProgram = crateInfo.pname;
         inherit (features) cargoExtraArgs;
