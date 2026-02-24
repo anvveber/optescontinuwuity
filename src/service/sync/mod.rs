@@ -8,13 +8,14 @@ use std::{
 use conduwuit::{Result, Server, SyncMutex};
 use database::Map;
 use ruma::{
-	OwnedDeviceId, OwnedRoomId, OwnedUserId,
+	OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
 	api::client::sync::sync_events::{
 		self,
 		v4::{ExtensionsConfig, SyncRequestList},
 		v5,
 	},
 };
+use conduwuit::matrix::TypeStateKey;
 
 use crate::{Dep, rooms};
 
@@ -60,12 +61,15 @@ struct SnakeSyncCache {
 	subscriptions: BTreeMap<OwnedRoomId, v5::request::RoomSubscription>,
 	known_rooms: BTreeMap<String, BTreeMap<OwnedRoomId, u64>>,
 	extensions: v5::request::Extensions,
+	/// Last event_id sent per room per (event_type, state_key).
+	/// Used to avoid re-sending unchanged required state on incremental syncs.
+	sent_state: BTreeMap<OwnedRoomId, BTreeMap<TypeStateKey, OwnedEventId>>,
 }
 
 type DbConnections<K, V> = SyncMutex<BTreeMap<K, V>>;
 type DbConnectionsKey = (OwnedUserId, OwnedDeviceId, String);
 type DbConnectionsVal = Arc<SyncMutex<SlidingSyncCache>>;
-type SnakeConnectionsKey = (OwnedUserId, OwnedDeviceId, Option<String>);
+pub type SnakeConnectionsKey = (OwnedUserId, OwnedDeviceId, Option<String>);
 type SnakeConnectionsVal = Arc<SyncMutex<SnakeSyncCache>>;
 
 impl crate::Service for Service {
@@ -423,6 +427,43 @@ impl Service {
 		drop(cache);
 
 		cached.subscriptions = subscriptions;
+	}
+
+	/// Returns the last set of state event IDs sent to the client for `room_id`
+	/// on the given connection.  Returns an empty map if not yet tracked.
+	pub fn get_room_sent_state(
+		&self,
+		key: &SnakeConnectionsKey,
+		room_id: &RoomId,
+	) -> BTreeMap<TypeStateKey, OwnedEventId> {
+		let cache = self.snake_connections.lock();
+		let Some(entry) = cache.get(key) else {
+			return BTreeMap::new();
+		};
+		entry
+			.lock()
+			.sent_state
+			.get(room_id)
+			.cloned()
+			.unwrap_or_default()
+	}
+
+	/// Update the per-room sent-state cache for `room_id` on the given
+	/// connection so that subsequent incremental syncs can diff against it.
+	pub fn update_room_sent_state(
+		&self,
+		key: &SnakeConnectionsKey,
+		room_id: &RoomId,
+		new_state: BTreeMap<TypeStateKey, OwnedEventId>,
+	) {
+		let mut cache = self.snake_connections.lock();
+		let cached = Arc::clone(
+			cache
+				.entry(key.clone())
+				.or_insert_with(|| Arc::new(SyncMutex::new(SnakeSyncCache::default()))),
+		);
+		drop(cache);
+		cached.lock().sent_state.insert(room_id.to_owned(), new_state);
 	}
 }
 

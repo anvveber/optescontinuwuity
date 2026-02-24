@@ -19,7 +19,11 @@ use conduwuit::{
 	},
 	warn,
 };
-use conduwuit_service::{Services, rooms::read_receipt::pack_receipts, sync::into_snake_key};
+use conduwuit_service::{
+	Services,
+	rooms::read_receipt::pack_receipts,
+	sync::{SnakeConnectionsKey, into_snake_key},
+};
 use futures::{
 	FutureExt, Stream, StreamExt, TryFutureExt,
 	future::{OptionFuture, join3, try_join},
@@ -211,6 +215,10 @@ pub(crate) async fn sync_events_v5_route(
 	response.extensions.receipts = receipts;
 	response.extensions.account_data = account_data;
 
+	// Pass Some(&snake_key) only when a conn_id is present; connectionless syncs
+	// have no persistent cache to diff required state against.
+	let snake_key_opt = body.conn_id.as_ref().map(|_| &snake_key);
+
 	response.rooms = process_rooms(
 		services,
 		sender_user,
@@ -218,7 +226,7 @@ pub(crate) async fn sync_events_v5_route(
 		all_invited_rooms.clone(),
 		&todo_rooms,
 		&response,
-		&body,
+		snake_key_opt,
 	)
 	.await?;
 
@@ -441,7 +449,7 @@ async fn process_rooms<'a, Rooms>(
 	all_invited_rooms: Rooms,
 	todo_rooms: &TodoRooms,
 	response: &sync_events::v5::Response,
-	_body: &sync_events::v5::Request,
+	snake_key: Option<&SnakeConnectionsKey>,
 ) -> Result<BTreeMap<OwnedRoomId, sync_events::v5::response::Room>>
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
@@ -501,7 +509,8 @@ where
 		}
 
 		let required_state =
-			collect_required_state(services, room_id, required_state_request).await;
+			collect_required_state(services, room_id, required_state_request, snake_key, *roomsince)
+				.await;
 
 		if roomsince != &0
 			&& timeline_pdus.is_empty()
@@ -676,13 +685,24 @@ where
 	Ok(rooms)
 }
 
-/// Collect the required state events for a room
+/// Collect the required state events for a room.
+///
+/// On an initial sync (`roomsince == 0`) all matching events are returned and
+/// the full set of (type, state_key) → event_id mappings is stored in the
+/// connection cache so incremental syncs can diff against it.
+///
+/// On an incremental sync (`roomsince != 0`) only events whose `event_id` has
+/// changed since the last time they were sent are included.  If `snake_key` is
+/// `None` (connectionless sync) there is no cache to diff against, so the full
+/// set is always returned.
 async fn collect_required_state(
 	services: &Services,
 	room_id: &RoomId,
 	required_state_request: &BTreeSet<TypeStateKey>,
+	snake_key: Option<&SnakeConnectionsKey>,
+	roomsince: u64,
 ) -> Vec<Raw<AnySyncStateEvent>> {
-	let mut required_state = Vec::new();
+	let mut fetched: Vec<(TypeStateKey, OwnedEventId, Raw<AnySyncStateEvent>)> = Vec::new();
 	let mut wildcard_types: HashSet<&StateEventType> = HashSet::new();
 
 	for (event_type, state_key) in required_state_request {
@@ -705,7 +725,9 @@ async fn collect_required_state(
 						.room_state_get(room_id, event_type, &key)
 						.await
 					{
-						required_state.push(Event::into_format(event));
+						let tsk = (event_type.clone(), key.as_str().into());
+						let event_id = event.event_id().to_owned();
+						fetched.push((tsk, event_id, Event::into_format(event)));
 					}
 				}
 			}
@@ -715,9 +737,36 @@ async fn collect_required_state(
 			.room_state_get(room_id, event_type, state_key)
 			.await
 		{
-			required_state.push(Event::into_format(event));
+			let tsk = (event_type.clone(), state_key.clone());
+			let event_id = event.event_id().to_owned();
+			fetched.push((tsk, event_id, Event::into_format(event)));
 		}
 	}
+
+	// On incremental syncs, diff against the previously sent state so we only
+	// transmit changed events.  On initial syncs (or connectionless syncs with
+	// no cache) always return everything.
+	let prev_sent = match (snake_key, roomsince) {
+		| (Some(key), since) if since != 0 =>
+			services.sync.get_room_sent_state(key, room_id),
+		| _ => BTreeMap::new(),
+	};
+
+	let mut new_sent: BTreeMap<TypeStateKey, OwnedEventId> = prev_sent.clone();
+	let mut required_state = Vec::new();
+
+	for (tsk, event_id, raw) in fetched {
+		new_sent.insert(tsk.clone(), event_id.clone());
+		if prev_sent.get(&tsk) != Some(&event_id) {
+			required_state.push(raw);
+		}
+	}
+
+	// Persist the updated state map so the next incremental sync can diff.
+	if let Some(key) = snake_key {
+		services.sync.update_room_sent_state(key, room_id, new_sent);
+	}
+
 	required_state
 }
 
