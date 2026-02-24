@@ -159,7 +159,7 @@ pub(crate) async fn sync_events_v5_route(
 
 	let to_device = collect_to_device(services, sync_info, next_batch).map(Ok);
 
-	let receipts = collect_receipts().map(Ok);
+	let receipts = collect_receipts(services).map(Ok);
 
 	let (account_data, e2ee, to_device, receipts) =
 		try_join4(account_data, e2ee, to_device, receipts).await?;
@@ -180,7 +180,7 @@ pub(crate) async fn sync_events_v5_route(
 		extensions,
 	};
 
-	handle_lists(
+	let _rooms_by_list = handle_lists(
 		services,
 		sync_info,
 		all_invited_rooms.clone(),
@@ -192,7 +192,8 @@ pub(crate) async fn sync_events_v5_route(
 	)
 	.await;
 
-	fetch_subscriptions(services, sync_info, &known_rooms, &mut todo_rooms).await;
+	let _subscription_rooms =
+		fetch_subscriptions(services, sync_info, &known_rooms, &mut todo_rooms).await;
 
 	response.rooms = process_rooms(
 		services,
@@ -239,7 +240,7 @@ async fn fetch_subscriptions(
 	(sender_user, sender_device, globalsince, body): SyncInfo<'_>,
 	known_rooms: &KnownRooms,
 	todo_rooms: &mut TodoRooms,
-) {
+) -> BTreeSet<OwnedRoomId> {
 	let mut known_subscription_rooms = BTreeSet::new();
 	for (room_id, room) in &body.room_subscriptions {
 		let not_exists = services.rooms.metadata.exists(room_id).eq(&false);
@@ -287,10 +288,12 @@ async fn fetch_subscriptions(
 		services.sync.update_snake_sync_known_rooms(
 			&snake_key,
 			"subscriptions".to_owned(),
-			known_subscription_rooms,
+			known_subscription_rooms.clone(),
 			globalsince,
 		);
 	}
+
+	known_subscription_rooms
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -303,7 +306,7 @@ async fn handle_lists<'a, Rooms, AllRooms>(
 	todo_rooms: &'a mut TodoRooms,
 	known_rooms: &'a KnownRooms,
 	response: &'_ mut sync_events::v5::Response,
-)
+) -> BTreeMap<String, BTreeSet<OwnedRoomId>>
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
 	AllRooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
@@ -314,6 +317,8 @@ where
 		.conn_id
 		.clone()
 		.map(|conn_id| into_snake_key(sender_user, sender_device, conn_id));
+
+	let mut rooms_by_list: BTreeMap<String, BTreeSet<OwnedRoomId>> = BTreeMap::new();
 
 	for (list_id, list) in &body.lists {
 		let active_rooms: Vec<_> = match list.filters.as_ref().and_then(|f| f.is_invite) {
@@ -390,6 +395,8 @@ where
 				count: ruma_from_usize(active_rooms.len()),
 			});
 
+		rooms_by_list.insert(list_id.clone(), new_known_rooms.clone());
+
 		if let Some(snake_key) = &snake_key {
 			services.sync.update_snake_sync_known_rooms(
 				snake_key,
@@ -399,6 +406,8 @@ where
 			);
 		}
 	}
+
+	rooms_by_list
 }
 
 async fn process_rooms<'a, Rooms>(
@@ -504,6 +513,22 @@ where
 				.receipts
 				.rooms
 				.insert(room_id.clone(), pack_receipts(Box::new(receipts.into_iter())));
+		}
+
+		// Cheap early-exit: no state was requested and nothing else to send — skip the
+		// DB round-trip that collect_required_state would otherwise perform.
+		if roomsince != &0
+			&& timeline_pdus.is_empty()
+			&& required_state_request.is_empty()
+			&& response
+				.extensions
+				.account_data
+				.rooms
+				.get(room_id)
+				.is_none_or(Vec::is_empty)
+			&& receipt_size == 0
+		{
+			continue;
 		}
 
 		let required_state =
@@ -1036,7 +1061,7 @@ async fn collect_to_device(
 	})
 }
 
-async fn collect_receipts() -> sync_events::v5::response::Receipts {
+async fn collect_receipts(_services: &Services) -> sync_events::v5::response::Receipts {
 	// TODO: get explicitly requested read receipts
 	sync_events::v5::response::Receipts::default()
 }
