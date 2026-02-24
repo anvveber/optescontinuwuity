@@ -159,7 +159,7 @@ pub(crate) async fn sync_events_v5_route(
 
 	let to_device = collect_to_device(services, sync_info, next_batch).map(Ok);
 
-	let receipts = collect_receipts(services).map(Ok);
+	let receipts = collect_receipts().map(Ok);
 
 	let (account_data, e2ee, to_device, receipts) =
 		try_join4(account_data, e2ee, to_device, receipts).await?;
@@ -1032,9 +1032,9 @@ async fn collect_to_device(
 	})
 }
 
-async fn collect_receipts(_services: &Services) -> sync_events::v5::response::Receipts {
-	sync_events::v5::response::Receipts { rooms: BTreeMap::new() }
+async fn collect_receipts() -> sync_events::v5::response::Receipts {
 	// TODO: get explicitly requested read receipts
+	sync_events::v5::response::Receipts::default()
 }
 
 fn filter_rooms<'a, Rooms>(
