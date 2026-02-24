@@ -310,6 +310,11 @@ where
 {
 	// TODO MSC4186: Implement remaining list filters: is_dm, is_encrypted,
 	// room_types.
+	let snake_key = body
+		.conn_id
+		.clone()
+		.map(|conn_id| into_snake_key(sender_user, sender_device, conn_id));
+
 	for (list_id, list) in &body.lists {
 		let active_rooms: Vec<_> = match list.filters.as_ref().and_then(|f| f.is_invite) {
 			| None => all_rooms.clone().collect(),
@@ -385,17 +390,15 @@ where
 				count: ruma_from_usize(active_rooms.len()),
 			});
 
-		if let Some(conn_id) = body.conn_id.clone() {
-			let snake_key = into_snake_key(sender_user, sender_device, conn_id);
+		if let Some(snake_key) = &snake_key {
 			services.sync.update_snake_sync_known_rooms(
-				&snake_key,
+				snake_key,
 				list_id.clone(),
 				new_known_rooms,
 				globalsince,
 			);
 		}
 	}
-
 }
 
 async fn process_rooms<'a, Rooms>(
