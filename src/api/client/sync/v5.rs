@@ -542,20 +542,19 @@ where
 		let room_events: Vec<_> = timeline_pdus
 			.iter()
 			.stream()
-			.filter_map(|item| ignored_filter(services, item.clone(), sender_user))
+			.filter_map(|item| {
+				let pdu = &item.1;
+				if DEFAULT_BUMP_TYPES.binary_search(&pdu.kind).is_ok()
+					&& timestamp.is_none_or(|time| time <= pdu.origin_server_ts)
+				{
+					timestamp = Some(pdu.origin_server_ts);
+				}
+				ignored_filter(services, item.clone(), sender_user)
+			})
 			.map(at!(1))
 			.map(Event::into_format)
 			.collect()
 			.await;
-
-		for (_, pdu) in timeline_pdus {
-			let ts = pdu.origin_server_ts;
-			if DEFAULT_BUMP_TYPES.binary_search(&pdu.kind).is_ok()
-				&& timestamp.is_none_or(|time| time <= ts)
-			{
-				timestamp = Some(ts);
-			}
-		}
 
 		// Heroes
 		let heroes: Vec<_> = services
