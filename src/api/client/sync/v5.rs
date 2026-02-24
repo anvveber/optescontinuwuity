@@ -22,12 +22,13 @@ use conduwuit::{
 use conduwuit_service::{Services, rooms::read_receipt::pack_receipts, sync::into_snake_key};
 use futures::{
 	FutureExt, Stream, StreamExt, TryFutureExt,
-	future::{OptionFuture, join3, try_join4},
+	future::{OptionFuture, join3, try_join},
 	pin_mut,
 };
 use ruma::{
 	DeviceId, OwnedEventId, OwnedRoomId, RoomId, UInt, UserId,
-	api::client::sync::sync_events::{self, DeviceLists, UnreadNotificationsCount},
+	api::client::sync::sync_events::{self, v5::request::ReceiptsRoom, DeviceLists,
+		UnreadNotificationsCount},
 	directory::RoomTypeFilter,
 	events::{
 		AnyRawAccountDataEvent, AnySyncEphemeralRoomEvent, AnySyncStateEvent, StateEventType,
@@ -153,34 +154,27 @@ pub(crate) async fn sync_events_v5_route(
 
 	let sync_info: SyncInfo<'_> = (sender_user, sender_device, globalsince, &body);
 
-	let account_data = collect_account_data(services, sync_info).map(Ok);
-
+	// Run e2ee and to_device in parallel; they don't need todo_rooms.
 	let e2ee = collect_e2ee(services, sync_info, all_joined_rooms.clone());
-
 	let to_device = collect_to_device(services, sync_info, next_batch).map(Ok);
-
-	let receipts = collect_receipts(services).map(Ok);
-
-	let (account_data, e2ee, to_device, receipts) =
-		try_join4(account_data, e2ee, to_device, receipts).await?;
-
-	let extensions = sync_events::v5::response::Extensions {
-		account_data,
-		e2ee,
-		to_device,
-		receipts,
-		typing: sync_events::v5::response::Typing::default(),
-	};
+	let (e2ee, to_device) = try_join(e2ee, to_device).await?;
 
 	let mut response = sync_events::v5::Response {
 		txn_id: body.txn_id.clone(),
 		pos,
 		lists: BTreeMap::new(),
 		rooms: BTreeMap::new(),
-		extensions,
+		extensions: sync_events::v5::response::Extensions {
+			account_data: sync_events::v5::response::AccountData::default(),
+			e2ee,
+			to_device,
+			receipts: sync_events::v5::response::Receipts::default(),
+			typing: sync_events::v5::response::Typing::default(),
+		},
 	};
 
-	let _rooms_by_list = handle_lists(
+	// Build todo_rooms from list windows and room subscriptions.
+	let rooms_by_list = handle_lists(
 		services,
 		sync_info,
 		all_invited_rooms.clone(),
@@ -192,8 +186,30 @@ pub(crate) async fn sync_events_v5_route(
 	)
 	.await;
 
-	let _subscription_rooms =
+	let subscription_rooms =
 		fetch_subscriptions(services, sync_info, &known_rooms, &mut todo_rooms).await;
+
+	// Collect receipts and account data now that todo_rooms is fully populated.
+	let receipts = collect_receipts(
+		services,
+		sender_user,
+		&body,
+		&rooms_by_list,
+		&subscription_rooms,
+		&todo_rooms,
+	)
+	.await;
+	let account_data = collect_account_data(
+		services,
+		sync_info,
+		&rooms_by_list,
+		&subscription_rooms,
+		&todo_rooms,
+		next_batch,
+	)
+	.await;
+	response.extensions.receipts = receipts;
+	response.extensions.account_data = account_data;
 
 	response.rooms = process_rooms(
 		services,
@@ -201,7 +217,7 @@ pub(crate) async fn sync_events_v5_route(
 		next_batch,
 		all_invited_rooms.clone(),
 		&todo_rooms,
-		&mut response,
+		&response,
 		&body,
 	)
 	.await?;
@@ -223,7 +239,15 @@ pub(crate) async fn sync_events_v5_route(
 		_ = tokio::time::timeout(duration, watcher).await;
 	}
 
-	let typing = collect_typing_events(services, sender_user, &body, &todo_rooms).await?;
+	let typing = collect_typing_events(
+		services,
+		sender_user,
+		&body,
+		&todo_rooms,
+		&rooms_by_list,
+		&subscription_rooms,
+	)
+	.await?;
 	response.extensions.typing = typing;
 
 	trace!(
@@ -416,8 +440,8 @@ async fn process_rooms<'a, Rooms>(
 	next_batch: u64,
 	all_invited_rooms: Rooms,
 	todo_rooms: &TodoRooms,
-	response: &mut sync_events::v5::Response,
-	body: &sync_events::v5::Request,
+	response: &sync_events::v5::Response,
+	_body: &sync_events::v5::Request,
 ) -> Result<BTreeMap<OwnedRoomId, sync_events::v5::response::Room>>
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
@@ -459,64 +483,9 @@ where
 			};
 		}
 
-		if body.extensions.account_data.enabled == Some(true) {
-			response.extensions.account_data.rooms.insert(
-				room_id.to_owned(),
-				services
-					.account_data
-					.changes_since(Some(room_id), sender_user, Some(*roomsince), Some(next_batch))
-					.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Room))
-					.collect()
-					.await,
-			);
-		}
-
-		let last_privateread_update = services
-			.rooms
-			.read_receipt
-			.last_privateread_update(sender_user, room_id)
-			.await;
-
-		let private_read_event: OptionFuture<_> = (last_privateread_update > *roomsince)
-			.then(|| {
-				services
-					.rooms
-					.read_receipt
-					.private_read_get(room_id, sender_user)
-					.ok()
-			})
-			.into();
-
-		let mut receipts: Vec<Raw<AnySyncEphemeralRoomEvent>> = services
-			.rooms
-			.read_receipt
-			.readreceipts_since(room_id, Some(*roomsince))
-			.filter_map(|(read_user, _ts, v)| async move {
-				services
-					.users
-					.user_is_ignored(&read_user, sender_user)
-					.await
-					.or_some(v)
-			})
-			.collect()
-			.await;
-
-		if let Some(private_read_event) = private_read_event.await.flatten() {
-			receipts.push(private_read_event);
-		}
-
-		let receipt_size = receipts.len();
-
-		if receipt_size > 0 {
-			response
-				.extensions
-				.receipts
-				.rooms
-				.insert(room_id.clone(), pack_receipts(Box::new(receipts.into_iter())));
-		}
-
-		// Cheap early-exit: no state was requested and nothing else to send — skip the
-		// DB round-trip that collect_required_state would otherwise perform.
+		// Cheap early-exit: per-room account data and receipts are now pre-populated by
+		// collect_account_data / collect_receipts before process_rooms runs.  If no
+		// state was requested and there is nothing else to send, skip the DB call.
 		if roomsince != &0
 			&& timeline_pdus.is_empty()
 			&& required_state_request.is_empty()
@@ -526,7 +495,7 @@ where
 				.rooms
 				.get(room_id)
 				.is_none_or(Vec::is_empty)
-			&& receipt_size == 0
+			&& !response.extensions.receipts.rooms.contains_key(room_id)
 		{
 			continue;
 		}
@@ -543,7 +512,7 @@ where
 				.rooms
 				.get(room_id)
 				.is_none_or(Vec::is_empty)
-			&& receipt_size == 0
+			&& !response.extensions.receipts.rooms.contains_key(room_id)
 		{
 			continue;
 		}
@@ -757,29 +726,31 @@ async fn collect_typing_events(
 	sender_user: &UserId,
 	body: &sync_events::v5::Request,
 	todo_rooms: &TodoRooms,
+	rooms_by_list: &BTreeMap<String, BTreeSet<OwnedRoomId>>,
+	subscription_rooms: &BTreeSet<OwnedRoomId>,
 ) -> Result<sync_events::v5::response::Typing> {
 	if !body.extensions.typing.enabled.unwrap_or(false) {
 		return Ok(sync_events::v5::response::Typing::default());
 	}
-	let rooms: Vec<_> = body.extensions.typing.rooms.clone().unwrap_or_else(|| {
-		body.room_subscriptions
-			.keys()
-			.map(ToOwned::to_owned)
-			.collect()
-	});
-	let lists: Vec<_> = body
-		.extensions
-		.typing
-		.lists
-		.clone()
-		.unwrap_or_else(|| body.lists.keys().map(ToOwned::to_owned).collect::<Vec<_>>());
 
-	if rooms.is_empty() && lists.is_empty() {
+	let qualifying = extension_room_set(
+		body.extensions.typing.lists.as_ref(),
+		body.extensions.typing.rooms.as_ref(),
+		false,
+		rooms_by_list,
+		subscription_rooms,
+	);
+
+	if qualifying.is_empty() {
 		return Ok(sync_events::v5::response::Typing::default());
 	}
 
 	let mut typing_response = sync_events::v5::response::Typing::default();
 	for (room_id, (_, _, roomsince)) in todo_rooms {
+		if !qualifying.contains(room_id) {
+			continue;
+		}
+
 		if services.rooms.typing.last_typing_update(room_id).await? <= *roomsince {
 			continue;
 		}
@@ -792,7 +763,7 @@ async fn collect_typing_events(
 		{
 			| Ok(typing_users) => {
 				typing_response.rooms.insert(
-					room_id.to_owned(), // Already OwnedRoomId
+					room_id.to_owned(),
 					Raw::new(&sync_events::v5::response::SyncTypingEvent {
 						content: TypingEventContent::new(typing_users),
 					})?,
@@ -809,39 +780,46 @@ async fn collect_typing_events(
 
 async fn collect_account_data(
 	services: &Services,
-	(sender_user, _, globalsince, body): (&UserId, &DeviceId, u64, &sync_events::v5::Request),
+	(sender_user, _, globalsince, body): SyncInfo<'_>,
+	rooms_by_list: &BTreeMap<String, BTreeSet<OwnedRoomId>>,
+	subscription_rooms: &BTreeSet<OwnedRoomId>,
+	todo_rooms: &TodoRooms,
+	next_batch: u64,
 ) -> sync_events::v5::response::AccountData {
-	let mut account_data = sync_events::v5::response::AccountData {
-		global: Vec::new(),
-		rooms: BTreeMap::new(),
-	};
-
 	if !body.extensions.account_data.enabled.unwrap_or(false) {
 		return sync_events::v5::response::AccountData::default();
 	}
 
-	account_data.global = services
+	let global = services
 		.account_data
 		.changes_since(None, sender_user, Some(globalsince), None)
 		.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Global))
 		.collect()
 		.await;
 
-	if let Some(rooms) = &body.extensions.account_data.rooms {
-		for room in rooms {
-			account_data.rooms.insert(
-				room.clone(),
-				services
-					.account_data
-					.changes_since(Some(room), sender_user, Some(globalsince), None)
-					.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Room))
-					.collect()
-					.await,
-			);
-		}
+	let qualifying = extension_room_set(
+		body.extensions.account_data.lists.as_ref(),
+		body.extensions.account_data.rooms.as_ref(),
+		false,
+		rooms_by_list,
+		subscription_rooms,
+	);
+
+	let mut rooms = BTreeMap::new();
+	for room_id in &qualifying {
+		let Some((_, _, roomsince)) = todo_rooms.get(room_id) else {
+			continue;
+		};
+		let room_data = services
+			.account_data
+			.changes_since(Some(room_id), sender_user, Some(*roomsince), Some(next_batch))
+			.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Room))
+			.collect()
+			.await;
+		rooms.insert(room_id.clone(), room_data);
 	}
 
-	account_data
+	sync_events::v5::response::AccountData { global, rooms }
 }
 
 async fn collect_e2ee<'a, Rooms>(
@@ -1061,9 +1039,138 @@ async fn collect_to_device(
 	})
 }
 
-async fn collect_receipts(_services: &Services) -> sync_events::v5::response::Receipts {
-	// TODO: get explicitly requested read receipts
-	sync_events::v5::response::Receipts::default()
+/// Compute the set of rooms that qualify for a sync extension (receipts, typing,
+/// account data) given the extension's `lists` and `rooms` filter fields.
+///
+/// | `lists_filter`        | rooms from list windows included          |
+/// |-----------------------|-------------------------------------------|
+/// | `None`                | all rooms from all list windows           |
+/// | `Some([])`            | none                                      |
+/// | `Some(ids)`           | union of windows for those list ids       |
+///
+/// | `room_ids_filter` / `all_subscribed` | subscription rooms included          |
+/// |--------------------------------------|--------------------------------------|
+/// | `None` or `all_subscribed = true`    | all subscription rooms               |
+/// | `Some([])`                           | none                                 |
+/// | `Some(ids)` (and not all_subscribed) | ids that are subscription rooms      |
+fn extension_room_set(
+	lists_filter: Option<&Vec<String>>,
+	room_ids_filter: Option<&Vec<OwnedRoomId>>,
+	all_subscribed: bool,
+	rooms_by_list: &BTreeMap<String, BTreeSet<OwnedRoomId>>,
+	subscription_rooms: &BTreeSet<OwnedRoomId>,
+) -> BTreeSet<OwnedRoomId> {
+	let list_rooms: BTreeSet<OwnedRoomId> = match lists_filter {
+		| None => rooms_by_list.values().flatten().cloned().collect(),
+		| Some(ids) if ids.is_empty() => BTreeSet::new(),
+		| Some(ids) => ids
+			.iter()
+			.filter_map(|id| rooms_by_list.get(id))
+			.flatten()
+			.cloned()
+			.collect(),
+	};
+
+	let sub_rooms: BTreeSet<OwnedRoomId> = if all_subscribed || room_ids_filter.is_none() {
+		subscription_rooms.clone()
+	} else {
+		match room_ids_filter {
+			| None => subscription_rooms.clone(),
+			| Some(ids) if ids.is_empty() => BTreeSet::new(),
+			| Some(ids) => ids
+				.iter()
+				.filter(|id| subscription_rooms.contains(*id))
+				.cloned()
+				.collect(),
+		}
+	};
+
+	list_rooms.union(&sub_rooms).cloned().collect()
+}
+
+async fn collect_receipts(
+	services: &Services,
+	sender_user: &UserId,
+	body: &sync_events::v5::Request,
+	rooms_by_list: &BTreeMap<String, BTreeSet<OwnedRoomId>>,
+	subscription_rooms: &BTreeSet<OwnedRoomId>,
+	todo_rooms: &TodoRooms,
+) -> sync_events::v5::response::Receipts {
+	if !body.extensions.receipts.enabled.unwrap_or(false) {
+		return sync_events::v5::response::Receipts::default();
+	}
+
+	// Normalise receipts.rooms (Option<Vec<ReceiptsRoom>>) into a plain room-id
+	// list plus a flag for the AllSubscribed wildcard.
+	let (room_ids_filter, all_subscribed) = match &body.extensions.receipts.rooms {
+		| None => (None, false),
+		| Some(rooms) => {
+			let all = rooms.iter().any(|r| matches!(r, ReceiptsRoom::AllSubscribed));
+			let ids: Vec<OwnedRoomId> = rooms
+				.iter()
+				.filter_map(|r| match r {
+					| ReceiptsRoom::Room(id) => Some(id.clone()),
+					| _ => None,
+				})
+				.collect();
+			(Some(ids), all)
+		},
+	};
+
+	let qualifying = extension_room_set(
+		body.extensions.receipts.lists.as_ref(),
+		room_ids_filter.as_ref(),
+		all_subscribed,
+		rooms_by_list,
+		subscription_rooms,
+	);
+
+	let mut rooms = BTreeMap::new();
+	for room_id in &qualifying {
+		let Some((_, _, roomsince)) = todo_rooms.get(room_id) else {
+			continue;
+		};
+
+		let last_privateread_update = services
+			.rooms
+			.read_receipt
+			.last_privateread_update(sender_user, room_id)
+			.await;
+
+		let private_read_event: OptionFuture<_> = (last_privateread_update > *roomsince)
+			.then(|| {
+				services
+					.rooms
+					.read_receipt
+					.private_read_get(room_id, sender_user)
+					.ok()
+			})
+			.into();
+
+		let mut receipts: Vec<Raw<AnySyncEphemeralRoomEvent>> = services
+			.rooms
+			.read_receipt
+			.readreceipts_since(room_id, Some(*roomsince))
+			.filter_map(|(read_user, _ts, v)| async move {
+				services
+					.users
+					.user_is_ignored(&read_user, sender_user)
+					.await
+					.or_some(v)
+			})
+			.collect()
+			.await;
+
+		if let Some(private_read_event) = private_read_event.await.flatten() {
+			receipts.push(private_read_event);
+		}
+
+		if !receipts.is_empty() {
+			rooms.insert(room_id.clone(), pack_receipts(Box::new(receipts.into_iter())));
+		}
+	}
+
+	sync_events::v5::response::Receipts { rooms }
 }
 
 fn filter_rooms<'a, Rooms>(
