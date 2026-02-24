@@ -303,7 +303,7 @@ async fn handle_lists<'a, Rooms, AllRooms>(
 	todo_rooms: &'a mut TodoRooms,
 	known_rooms: &'a KnownRooms,
 	response: &'_ mut sync_events::v5::Response,
-) -> KnownRooms
+)
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
 	AllRooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
@@ -396,7 +396,6 @@ where
 		}
 	}
 
-	BTreeMap::default()
 }
 
 async fn process_rooms<'a, Rooms>(
