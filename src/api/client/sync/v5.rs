@@ -506,8 +506,12 @@ where
 				.insert(room_id.clone(), pack_receipts(Box::new(receipts.into_iter())));
 		}
 
+		let required_state =
+			collect_required_state(services, room_id, required_state_request).await;
+
 		if roomsince != &0
 			&& timeline_pdus.is_empty()
+			&& required_state.is_empty()
 			&& response
 				.extensions
 				.account_data
@@ -537,9 +541,6 @@ where
 					None
 				}
 			});
-
-		let required_state =
-			collect_required_state(services, room_id, required_state_request).await;
 
 		let room_events: Vec<_> = timeline_pdus
 			.iter()
