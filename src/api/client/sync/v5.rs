@@ -31,8 +31,9 @@ use futures::{
 };
 use ruma::{
 	DeviceId, OwnedEventId, OwnedRoomId, RoomId, UInt, UserId,
-	api::client::sync::sync_events::{self, v5::request::ReceiptsRoom, DeviceLists,
-		UnreadNotificationsCount},
+	api::client::sync::sync_events::{
+		self, DeviceLists, UnreadNotificationsCount, v5::request::ReceiptsRoom,
+	},
 	directory::RoomTypeFilter,
 	events::{
 		AnyRawAccountDataEvent, AnySyncEphemeralRoomEvent, AnySyncStateEvent, StateEventType,
@@ -508,9 +509,14 @@ where
 			continue;
 		}
 
-		let required_state =
-			collect_required_state(services, room_id, required_state_request, snake_key, *roomsince)
-				.await;
+		let required_state = collect_required_state(
+			services,
+			room_id,
+			required_state_request,
+			snake_key,
+			*roomsince,
+		)
+		.await;
 
 		if roomsince != &0
 			&& timeline_pdus.is_empty()
@@ -747,8 +753,7 @@ async fn collect_required_state(
 	// transmit changed events.  On initial syncs (or connectionless syncs with
 	// no cache) always return everything.
 	let prev_sent = match (snake_key, roomsince) {
-		| (Some(key), since) if since != 0 =>
-			services.sync.get_room_sent_state(key, room_id),
+		| (Some(key), since) if since != 0 => services.sync.get_room_sent_state(key, room_id),
 		| _ => BTreeMap::new(),
 	};
 
@@ -1088,8 +1093,9 @@ async fn collect_to_device(
 	})
 }
 
-/// Compute the set of rooms that qualify for a sync extension (receipts, typing,
-/// account data) given the extension's `lists` and `rooms` filter fields.
+/// Compute the set of rooms that qualify for a sync extension (receipts,
+/// typing, account data) given the extension's `lists` and `rooms` filter
+/// fields.
 ///
 /// | `lists_filter`        | rooms from list windows included          |
 /// |-----------------------|-------------------------------------------|
@@ -1154,7 +1160,9 @@ async fn collect_receipts(
 	let (room_ids_filter, all_subscribed) = match &body.extensions.receipts.rooms {
 		| None => (None, false),
 		| Some(rooms) => {
-			let all = rooms.iter().any(|r| matches!(r, ReceiptsRoom::AllSubscribed));
+			let all = rooms
+				.iter()
+				.any(|r| matches!(r, ReceiptsRoom::AllSubscribed));
 			let ids: Vec<OwnedRoomId> = rooms
 				.iter()
 				.filter_map(|r| match r {

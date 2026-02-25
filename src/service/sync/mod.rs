@@ -5,7 +5,7 @@ use std::{
 	sync::Arc,
 };
 
-use conduwuit::{Result, Server, SyncMutex};
+use conduwuit::{Result, Server, SyncMutex, matrix::TypeStateKey};
 use database::Map;
 use ruma::{
 	OwnedDeviceId, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId,
@@ -15,7 +15,6 @@ use ruma::{
 		v5,
 	},
 };
-use conduwuit::matrix::TypeStateKey;
 
 use crate::{Dep, rooms};
 
@@ -463,7 +462,10 @@ impl Service {
 				.or_insert_with(|| Arc::new(SyncMutex::new(SnakeSyncCache::default()))),
 		);
 		drop(cache);
-		cached.lock().sent_state.insert(room_id.to_owned(), new_state);
+		cached
+			.lock()
+			.sent_state
+			.insert(room_id.to_owned(), new_state);
 	}
 }
 
