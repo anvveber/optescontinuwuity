@@ -34,15 +34,10 @@ pub async fn fetch_remote_thumbnail(
 		.fetch_thumbnail_authenticated(mxc, user, server, timeout_ms, dim)
 		.await;
 
-	if let Err(error) = &result {
-		if matches!(
-			error.kind(),
-			NotFound | Unrecognized | Unauthorized | Forbidden { .. } | Unknown
-		) {
-			return self
-				.fetch_thumbnail_unauthenticated(mxc, user, server, timeout_ms, dim)
-				.await;
-		}
+	if let Err(Error::Request(NotFound, ..)) = &result {
+		return self
+			.fetch_thumbnail_unauthenticated(mxc, user, server, timeout_ms, dim)
+			.await;
 	}
 
 	result
@@ -71,15 +66,10 @@ pub async fn fetch_remote_content(
 			);
 		});
 
-	if let Err(error) = &result {
-		if matches!(
-			error.kind(),
-			NotFound | Unrecognized | Unauthorized | Forbidden { .. } | Unknown
-		) {
-			return self
-				.fetch_content_unauthenticated(mxc, user, server, timeout_ms)
-				.await;
-		}
+	if let Err(Error::Request(Unrecognized, ..)) = &result {
+		return self
+			.fetch_content_unauthenticated(mxc, user, server, timeout_ms)
+			.await;
 	}
 
 	result
