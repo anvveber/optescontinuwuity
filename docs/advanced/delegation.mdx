@@ -48,9 +48,9 @@ services:
 
 After doing the steps above, Continuwuity will serve these 3 JSON files:
 
-- `.well-known/matrix/client`: for Client-Server discovery
-- `.well-known/matrix/server`: for Server-Server (federation) discovery
-- `.well-known/matrix/support`: admin contact details (strongly recommended to have)
+- `/.well-known/matrix/client`: for Client-Server discovery
+- `/.well-known/matrix/server`: for Server-Server (federation) discovery
+- `/.well-known/matrix/support`: admin contact details (strongly recommended to have)
 
 To enable full discovery, you will need to reverse proxy these paths from the base domain back to Continuwuity.
 
@@ -122,7 +122,7 @@ Restart Continuwuity and your reverse proxy. Once that's done, visit these route
 
 ### Cannot log in with web clients
 
-Make sure there is an `Access-Control-Allow-Origin: *` header in your `.well-known/matrix/client` path. While Continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
+Make sure there is an `Access-Control-Allow-Origin: *` header in your `/.well-known/matrix/client` path. While Continuwuity serves this header by default, it may be dropped by reverse proxies or other middlewares.
 
 ---
 
@@ -138,7 +138,7 @@ The following methods uses SRV DNS records and only work with federation traffic
 
 <summary>Using only SRV records</summary>
 
-If you can't set up `.well-known/matrix/server` for some reason, you can set up a SRV record (via your DNS provider) as below:
+If you can't set up `/.well-known/matrix/server` on :443 for some reason, you can set up a SRV record (via your DNS provider) as below:
 
 - Service and name: `_matrix-fed._tcp.example.com.`
 - Priority: `10` (can be any number)
@@ -146,7 +146,7 @@ If you can't set up `.well-known/matrix/server` for some reason, you can set up 
 - Port: `443`
 - Target: `matrix.example.com.`
 
-However, on the target's IP, you must configure a valid route and cert for the base domain, `example.com`. Therefore, this method only works to redirect traffic into the right port number.
+On the target's IP at port 443, you must configure a valid route and cert for your server name, `example.com`. Therefore, this method only works to redirect traffic into the right IP/port combo, and can not delegate your federation to a different domain.
 
 </details>
 
@@ -154,7 +154,7 @@ However, on the target's IP, you must configure a valid route and cert for the b
 
 <summary>Using SRV records + .well-known</summary>
 
-You can also set up `.well-known/matrix/server` with a delegated domain but no ports:
+You can also set up `/.well-known/matrix/server` with a delegated domain but no ports:
 
 ```toml
 [global.well_known]
@@ -169,7 +169,32 @@ Then, set up a SRV record (via your DNS provider) to announce the port number as
 - Port: `443`
 - Target: `matrix.example.com.`
 
-On the target's IP, you'll need to provide a valid route and cert for `matrix.example.com`. It provides the same feature as pure `.well-known` delegation, albeit with more parts to handle.
+On the target's IP at port 443, you'll need to provide a valid route and cert for `matrix.example.com`. It provides the same feature as pure `.well-known` delegation, albeit with more parts to handle.
+
+</details>
+
+<details>
+
+<summary>Using SRV records as a fallback for .well-known delegation</summary>
+
+Assume your delegation is as below:
+
+```toml
+[global.well_known]
+server = "example.com:443"
+```
+
+If your Continuwuity instance becomes temporarily unreachable, other servers will not be able to find your `/.well-known/matrix/server` file, and defaults to using `server_name:8448`. This incorrect cache can persist for a long time, and would hinder re-federation when your server eventually comes back online.
+
+If you want other servers to default to using port :443 even when it is offline, you could set up a SRV record (via your DNS provider) as follows:
+
+- Service and name: `_matrix-fed._tcp.example.com.`
+- Priority: `10` (can be any number)
+- Weight: `10` (can be any number)
+- Port: `443`
+- Target: `example.com.`
+
+On the target's IP at port 443, you'll need to provide a valid route and cert for `example.com`.
 
 </details>
 
