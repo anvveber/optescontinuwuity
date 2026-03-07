@@ -173,7 +173,7 @@ pub struct Config {
 	/// announcements or major updates. This is not an update check endpoint.
 	///
 	/// default: true
-	#[serde(alias = "allow_check_for_updates", default = "true_fn")]
+	#[serde(alias = "allow_check_for_updates", default)]
 	pub allow_announcements_check: bool,
 
 	/// Set this to any float value to multiply continuwuity's in-memory LRU

@@ -48,6 +48,7 @@ sender_timeout = 300
 sender_idle_timeout = 300
 sender_retry_backoff_limit = 300
 force_disable_first_run_mode = true
+allow_announcements_check = true
 
 [global.tls]
 dual_protocol = true
