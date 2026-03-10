@@ -6,21 +6,30 @@ use std::{collections::HashMap, sync::Arc};
 use conduwuit::{
 	Pdu, Result, SyncRwLock, implement,
 	result::LogErr,
-	utils::{ReadyExt, stream::TryIgnore},
+	utils::{ReadyExt, math::usize_from_f64, stream::TryIgnore},
 	warn,
 };
 use database::{Deserialized, Ignore, Interfix, Map};
 use futures::{Stream, StreamExt, future::join5, pin_mut};
+use lru_cache::LruCache;
 use ruma::{
 	OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
+	api::federation::space::SpaceHierarchyParentSummary,
 	events::{AnyStrippedStateEvent, room::member::MembershipState},
 	serde::Raw,
 };
+use tokio::sync::Mutex;
 
 use crate::{Dep, account_data, appservice::RegistrationInfo, config, globals, rooms, users};
 
+/// Cached space hierarchy summary wrapper.
+pub struct CachedSpaceHierarchySummary {
+	pub summary: SpaceHierarchyParentSummary,
+}
+
 pub struct Service {
 	appservice_in_room_cache: AppServiceInRoomCache,
+	pub roomid_spacehierarchy_cache: SpaceHierarchyCache,
 	services: Services,
 	db: Data,
 }
@@ -54,12 +63,18 @@ struct Data {
 }
 
 type AppServiceInRoomCache = SyncRwLock<HashMap<OwnedRoomId, HashMap<String, bool>>>;
+type SpaceHierarchyCache = Mutex<LruCache<OwnedRoomId, Option<CachedSpaceHierarchySummary>>>;
 type StrippedStateEventItem = (OwnedRoomId, Vec<Raw<AnyStrippedStateEvent>>);
 
 impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
+		let config = &args.server.config;
+		let cache_size = f64::from(config.roomid_spacehierarchy_cache_capacity);
+		let cache_size = cache_size * config.cache_capacity_modifier;
+
 		Ok(Arc::new(Self {
 			appservice_in_room_cache: SyncRwLock::new(HashMap::new()),
+			roomid_spacehierarchy_cache: Mutex::new(LruCache::new(usize_from_f64(cache_size)?)),
 			services: Services {
 				account_data: args.depend::<account_data::Service>("account_data"),
 				config: args.depend::<config::Service>("config"),
@@ -140,6 +155,17 @@ pub fn get_appservice_in_room_cache_usage(&self) -> (usize, usize) {
 #[implement(Service)]
 #[tracing::instrument(level = "debug", skip_all)]
 pub fn clear_appservice_in_room_cache(&self) { self.appservice_in_room_cache.write().clear(); }
+
+#[implement(Service)]
+pub async fn roomid_spacehierarchy_cache_len(&self) -> usize {
+	self.roomid_spacehierarchy_cache.lock().await.len()
+}
+
+#[implement(Service)]
+#[tracing::instrument(level = "debug", skip_all)]
+pub async fn clear_roomid_spacehierarchy_cache(&self) {
+	self.roomid_spacehierarchy_cache.lock().await.clear();
+}
 
 /// Returns an iterator of all servers participating in this room.
 #[implement(Service)]

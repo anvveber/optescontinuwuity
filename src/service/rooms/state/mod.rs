@@ -42,7 +42,6 @@ pub struct Service {
 struct Services {
 	globals: Dep<globals::Service>,
 	short: Dep<rooms::short::Service>,
-	spaces: Dep<rooms::spaces::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
 	state_accessor: Dep<rooms::state_accessor::Service>,
 	state_compressor: Dep<rooms::state_compressor::Service>,
@@ -66,7 +65,6 @@ impl crate::Service for Service {
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
-				spaces: args.depend::<rooms::spaces::Service>("rooms::spaces"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				state_accessor: args
 					.depend::<rooms::state_accessor::Service>("rooms::state_accessor"),
@@ -133,7 +131,7 @@ impl Service {
 				},
 				| TimelineEventType::SpaceChild => {
 					self.services
-						.spaces
+						.state_cache
 						.roomid_spacehierarchy_cache
 						.lock()
 						.await

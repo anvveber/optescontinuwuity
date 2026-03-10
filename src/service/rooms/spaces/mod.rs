@@ -10,7 +10,6 @@ use conduwuit_core::{
 	utils::{
 		IterStream,
 		future::{BoolExt, TryExtExt},
-		math::usize_from_f64,
 		stream::{BroadbandExt, ReadyExt},
 	},
 };
@@ -32,14 +31,13 @@ use ruma::{
 	serde::Raw,
 	space::SpaceRoomJoinRule,
 };
-use tokio::sync::{Mutex, MutexGuard};
+use tokio::sync::MutexGuard;
 
 pub use self::pagination_token::PaginationToken;
-use crate::{Dep, rooms, sending};
+use crate::{Dep, rooms, rooms::state_cache::CachedSpaceHierarchySummary, sending};
 
 pub struct Service {
 	services: Services,
-	pub roomid_spacehierarchy_cache: Mutex<Cache>,
 }
 
 struct Services {
@@ -49,10 +47,6 @@ struct Services {
 	event_handler: Dep<rooms::event_handler::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 	sending: Dep<sending::Service>,
-}
-
-pub struct CachedSpaceHierarchySummary {
-	summary: SpaceHierarchyParentSummary,
 }
 
 #[allow(clippy::large_enum_variant)]
@@ -68,14 +62,9 @@ pub enum Identifier<'a> {
 	ServerName(&'a ServerName),
 }
 
-type Cache = LruCache<OwnedRoomId, Option<CachedSpaceHierarchySummary>>;
-
 #[async_trait]
 impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
-		let config = &args.server.config;
-		let cache_size = f64::from(config.roomid_spacehierarchy_cache_capacity);
-		let cache_size = cache_size * config.cache_capacity_modifier;
 		Ok(Arc::new(Self {
 			services: Services {
 				state_accessor: args
@@ -87,19 +76,27 @@ impl crate::Service for Service {
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 				sending: args.depend::<sending::Service>("sending"),
 			},
-			roomid_spacehierarchy_cache: Mutex::new(LruCache::new(usize_from_f64(cache_size)?)),
 		}))
 	}
 
 	async fn memory_usage(&self, out: &mut (dyn Write + Send)) -> Result {
-		let roomid_spacehierarchy_cache = self.roomid_spacehierarchy_cache.lock().await.len();
+		let roomid_spacehierarchy_cache = self
+			.services
+			.state_cache
+			.roomid_spacehierarchy_cache_len()
+			.await;
 
 		writeln!(out, "roomid_spacehierarchy_cache: {roomid_spacehierarchy_cache}")?;
 
 		Ok(())
 	}
 
-	async fn clear_cache(&self) { self.roomid_spacehierarchy_cache.lock().await.clear(); }
+	async fn clear_cache(&self) {
+		self.services
+			.state_cache
+			.clear_roomid_spacehierarchy_cache()
+			.await;
+	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
 }
@@ -112,6 +109,8 @@ pub async fn get_summary_and_children_local(
 	identifier: &Identifier<'_>,
 ) -> Result<Option<SummaryAccessibility>> {
 	match self
+		.services
+		.state_cache
 		.roomid_spacehierarchy_cache
 		.lock()
 		.await
@@ -154,10 +153,15 @@ pub async fn get_summary_and_children_local(
 		return Ok(None);
 	};
 
-	self.roomid_spacehierarchy_cache.lock().await.insert(
-		current_room.to_owned(),
-		Some(CachedSpaceHierarchySummary { summary: summary.clone() }),
-	);
+	self.services
+		.state_cache
+		.roomid_spacehierarchy_cache
+		.lock()
+		.await
+		.insert(
+			current_room.to_owned(),
+			Some(CachedSpaceHierarchySummary { summary: summary.clone() }),
+		);
 
 	Ok(Some(SummaryAccessibility::Accessible(summary)))
 }
@@ -187,7 +191,9 @@ async fn get_summary_and_children_federation(
 		.collect();
 
 	let Some(Ok(response)) = requests.next().await else {
-		self.roomid_spacehierarchy_cache
+		self.services
+			.state_cache
+			.roomid_spacehierarchy_cache
 			.lock()
 			.await
 			.insert(current_room.to_owned(), None);
@@ -196,17 +202,24 @@ async fn get_summary_and_children_federation(
 	};
 
 	let summary = response.room;
-	self.roomid_spacehierarchy_cache.lock().await.insert(
-		current_room.to_owned(),
-		Some(CachedSpaceHierarchySummary { summary: summary.clone() }),
-	);
+	self.services
+		.state_cache
+		.roomid_spacehierarchy_cache
+		.lock()
+		.await
+		.insert(
+			current_room.to_owned(),
+			Some(CachedSpaceHierarchySummary { summary: summary.clone() }),
+		);
 
 	response
 		.children
 		.into_iter()
 		.stream()
 		.then(|child| {
-			self.roomid_spacehierarchy_cache
+			self.services
+				.state_cache
+				.roomid_spacehierarchy_cache
 				.lock()
 				.map(|lock| (child, lock))
 		})
@@ -479,7 +492,7 @@ pub fn get_parent_children_via(
 #[implement(Service)]
 async fn cache_insert(
 	&self,
-	mut cache: MutexGuard<'_, Cache>,
+	mut cache: MutexGuard<'_, LruCache<OwnedRoomId, Option<CachedSpaceHierarchySummary>>>,
 	current_room: &RoomId,
 	child: SpaceHierarchyChildSummary,
 ) {

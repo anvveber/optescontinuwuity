@@ -329,7 +329,7 @@ where
 		| TimelineEventType::SpaceChild =>
 			if let Some(_state_key) = pdu.state_key() {
 				self.services
-					.spaces
+					.state_cache
 					.roomid_spacehierarchy_cache
 					.lock()
 					.await
