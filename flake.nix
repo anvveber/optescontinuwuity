@@ -7,6 +7,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # for rust via nix
+    # pinned until upstream fixes https://github.com/ipetkov/crane/issues/991
     crane.url = "github:ipetkov/crane?ref=2510f2cbc3ccd237f700bb213756a8f35c32d8d7";
     fenix = {
       url = "github:nix-community/fenix";
