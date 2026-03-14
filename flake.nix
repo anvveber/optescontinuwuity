@@ -7,7 +7,7 @@
     nixpkgs.url = "github:NixOS/nixpkgs/nixos-unstable";
 
     # for rust via nix
-    crane.url = "github:ipetkov/crane";
+    crane.url = "github:ipetkov/crane?ref=2510f2cbc3ccd237f700bb213756a8f35c32d8d7";
     fenix = {
       url = "github:nix-community/fenix";
       inputs.nixpkgs.follows = "nixpkgs";
