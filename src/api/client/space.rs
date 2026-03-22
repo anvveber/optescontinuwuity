@@ -1,7 +1,4 @@
-use std::{
-	collections::{BTreeSet, VecDeque},
-	str::FromStr,
-};
+use std::{collections::VecDeque, str::FromStr};
 
 use axum::extract::State;
 use conduwuit::{
@@ -14,7 +11,7 @@ use conduwuit_service::{
 		PaginationToken, SummaryAccessibility, get_parent_children_via, summary_to_chunk,
 	},
 };
-use futures::{StreamExt, TryFutureExt, future::OptionFuture};
+use futures::{StreamExt, future::OptionFuture};
 use ruma::{
 	OwnedRoomId, OwnedServerName, RoomId, UInt, UserId, api::client::space::get_hierarchy,
 };
@@ -80,11 +77,13 @@ where
 	ShortRoomIds: Iterator<Item = &'a u64> + Clone + Send + Sync + 'a,
 {
 	type Via = Vec<OwnedServerName>;
-	type Entry = (OwnedRoomId, Via);
+	type Entry = (Vec<OwnedRoomId>, Via);
 	type Rooms = VecDeque<Entry>;
 
+	let short_room_ids = short_room_ids.collect::<Vec<_>>();
+
 	let mut queue: Rooms = [(
-		room_id.to_owned(),
+		vec![room_id.to_owned()],
 		room_id
 			.server_name()
 			.map(ToOwned::to_owned)
@@ -94,12 +93,15 @@ where
 	.into();
 
 	let mut rooms = Vec::with_capacity(limit);
-	let mut parents = BTreeSet::new();
-	while let Some((current_room, via)) = queue.pop_front() {
+	let mut start_populating = short_room_ids.is_empty();
+	while let Some((path, via)) = queue.pop_front() {
+		let current_room = path
+			.last()
+			.expect("the path should have at least one room ID");
 		let summary = services
 			.rooms
 			.spaces
-			.get_summary_and_children_client(&current_room, suggested_only, sender_user, &via)
+			.get_summary_and_children_client(current_room, suggested_only, sender_user, &via)
 			.await?;
 
 		match (summary, current_room == room_id) {
@@ -113,50 +115,56 @@ where
 				return Err!(Request(Forbidden("The requested room is inaccessible")));
 			},
 			| (Some(SummaryAccessibility::Accessible(summary)), _) => {
-				let populate = parents.len() >= short_room_ids.clone().count();
+				if path.len() > max_depth.saturating_add(1) {
+					continue;
+				}
 
-				let mut children: Vec<Entry> = get_parent_children_via(&summary, suggested_only)
-					.filter(|(room, _)| !parents.contains(room))
-					.rev()
-					.map(|(key, val)| (key, val.collect()))
+				if !start_populating {
+					if path.len() > short_room_ids.len() {
+						// Not interested - we've gone too deep and we haven't hit the last room
+						// that was sent yet, so we can skip this tree of rooms
+						continue;
+					}
+
+					if path.len() == short_room_ids.len() {
+						let is_last_sent_room = path
+							.iter()
+							.stream()
+							.all(async |parent_room| {
+								let parent_short_room_id = services
+									.rooms
+									.short
+									.get_shortroomid(parent_room)
+									.await
+									.expect("rooms should have a short room ID");
+								short_room_ids.contains(&&parent_short_room_id)
+							})
+							.await;
+						if is_last_sent_room {
+							start_populating = true;
+						}
+					}
+				}
+
+				let children: Vec<Entry> = get_parent_children_via(&summary, suggested_only)
+					.filter(|(room, _)| !path.contains(room))
+					.map(|(key, val)| {
+						let mut path = path.clone();
+						path.push(key);
+						(path, val.collect())
+					})
 					.collect();
 
-				if populate {
-					rooms.push(summary_to_chunk(summary.clone()));
-				} else {
-					children = children
-						.iter()
-						.rev()
-						.stream()
-						.skip_while(|(room, _)| {
-							services
-								.rooms
-								.short
-								.get_shortroomid(room)
-								.map_ok(|short| {
-									Some(&short) != short_room_ids.clone().nth(parents.len())
-								})
-								.unwrap_or_else(|_| false)
-						})
-						.map(Clone::clone)
-						.collect::<Vec<Entry>>()
-						.await
-						.into_iter()
-						.rev()
-						.collect();
+				if start_populating {
+					rooms.push(summary_to_chunk(summary));
 				}
 
-				if !populate && queue.is_empty() && children.is_empty() {
+				if !start_populating && queue.is_empty() && children.is_empty() {
 					break;
 				}
 
-				parents.insert(current_room.clone());
 				if rooms.len() >= limit {
 					break;
-				}
-
-				if parents.len() > max_depth {
-					continue;
 				}
 
 				queue.extend(children);
@@ -166,10 +174,8 @@ where
 
 	let next_batch: OptionFuture<_> = queue
 		.pop_front()
-		.map(|(room, _)| async move {
-			parents.insert(room);
-
-			let next_short_room_ids: Vec<_> = parents
+		.map(|(path, _)| async move {
+			let next_short_room_ids: Vec<_> = path
 				.iter()
 				.stream()
 				.filter_map(|room_id| services.rooms.short.get_shortroomid(room_id).ok())
