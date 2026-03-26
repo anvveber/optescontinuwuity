@@ -60,6 +60,7 @@ impl crate::Service for Service {
 			extern_media: base(config)?
 				.dns_resolver(resolver.resolver.clone())
 				.redirect(redirect::Policy::limited(3))
+				.user_agent(conduwuit::version::user_agent_bot())
 				.build()?,
 
 			well_known: base(config)?
