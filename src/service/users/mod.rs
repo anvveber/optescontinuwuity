@@ -1289,7 +1289,7 @@ impl Service {
 	async fn create_ldap_connection(
 		config: &conduwuit_core::config::LdapConfig,
 		uri: &str,
-	) -> Result<(LdapConnAsync, ldap3::Ldap)> {
+	) -> Result<(LdapConnAsync, ldap3::Ldap), ldap3::LdapError> {
 		let mut settings = LdapConnSettings::new();
 
 		if config.use_starttls {
@@ -1300,9 +1300,7 @@ impl Service {
 			settings = settings.set_no_tls_verify(true);
 		}
 
-		LdapConnAsync::with_settings(settings, uri)
-			.await
-			.map_err(|e| err!(Ldap(error!("LDAP connection setup error: {e}"))))
+		LdapConnAsync::with_settings(settings, uri).await
 	}
 
 	#[cfg(not(feature = "ldap"))]
@@ -1324,7 +1322,7 @@ impl Service {
 		debug!(?uri, "LDAP creating connection...");
 		let (conn, mut ldap) = Self::create_ldap_connection(config, uri.as_str())
 			.await
-			.map_err(|e| err!(Ldap(error!(%user_id, "{e}"))))?;
+			.map_err(|e| err!(Ldap(error!(%user_id, "LDAP connection setup error: {e}"))))?;
 
 		let driver = self.services.server.runtime().spawn(async move {
 			match conn.drive().await {
@@ -1433,7 +1431,7 @@ impl Service {
 		debug!(?uri, "LDAP creating connection...");
 		let (conn, mut ldap) = Self::create_ldap_connection(config, uri.as_str())
 			.await
-			.map_err(|e| err!(Ldap(error!(%user_dn, "{e}"))))?;
+			.map_err(|e| err!(Ldap(error!(%user_dn, "LDAP connection setup error: {e}"))))?;
 
 		let driver = self.services.server.runtime().spawn(async move {
 			match conn.drive().await {

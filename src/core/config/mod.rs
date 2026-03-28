@@ -2330,7 +2330,7 @@ pub struct LdapConfig {
 	#[serde(default)]
 	pub use_starttls: bool,
 
-	/// Skip TLS certificate verification.
+	/// Skip TLS certificate verification, possibly dangerous.
 	///
 	/// default: "false"
 	#[serde(default)]
