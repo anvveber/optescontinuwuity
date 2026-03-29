@@ -195,6 +195,14 @@ bindgen-runtime = [
     "conduwuit-database/bindgen-runtime"
 ]
 
+# this gives a small performance boost since urls are no
+# longer matched on runtime.
+# this feature should be removed once critical functionality
+# is added into this matcher
+# currently it is only used to check whether tls errors can be
+# ignored on a host by host basis
+no_client_matcher_based_on_hosts = []
+
 [build-dependencies]
 # bindgen = {version = "0.71.1", default-features = false}
 # clang-sys = {version = "1", default-features = false}

@@ -22,6 +22,9 @@
           pkgs.liburing
           pkgs.rust-jemalloc-sys-unprefixed
           rocksdbAllFeatures
+        ]
+        ++ [
+          (pkgs.rustfmt.override { asNightly = true; })
         ];
         env.LIBCLANG_PATH = lib.makeLibraryPath [ pkgs.llvmPackages.libclang.lib ];
       };
