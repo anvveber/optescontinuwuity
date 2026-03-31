@@ -235,10 +235,35 @@ pub struct Config {
 	#[serde(default = "default_db_write_buffer_capacity_mb")]
 	pub db_write_buffer_capacity_mb: f64,
 
+	/// The maximum number of Persisted Data Units (PDUs) to cache. 
+	/// Accepts any 32-bit integer.
+	/// 
+	/// PDUs are events broadcast from one homeserver to any others that have 
+	/// joined the same room (identified by Room ID). They are persisted in 
+	/// long-term storage and record the history of messages and state 
+	/// for a room.
+	/// 
+	/// An example of a PDU would be a message or joining a room.
+	/// 
+	/// Setting this higher might be useful if the server has a large memory capacity 
+	/// and is noticably I/O limted. 
+	/// 
+	/// This defaults to 100,000 + (10,000 * CPU core count)
 	/// default: varies by system
 	#[serde(default = "default_pdu_cache_capacity")]
 	pub pdu_cache_capacity: u32,
 
+	/// Determines the cache size for auth chain information. 
+	/// Accepts any 32-bit integer.
+	/// 
+	/// When determining is a user is authorized to send an event, 
+	/// the server will first check the auth chain cache. 
+	/// If the auth chain is not present in the cache, 
+	/// The server will reach out to the origin server for
+	/// authorization.
+	/// 
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_auth_chain_cache_capacity")]
 	pub auth_chain_cache_capacity: u32,

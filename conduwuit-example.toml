@@ -178,7 +178,7 @@
 # long-term storage and record the history of messages and state 
 # for a room.
 # 
-# An example of a PDU would be a message or reaction emoji.
+# An example of a PDU would be a message or joining a room.
 # 
 # Setting this higher might be useful if the server has a large memory capacity 
 # and is noticably I/O limted. 
