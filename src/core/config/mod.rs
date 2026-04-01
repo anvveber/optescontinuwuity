@@ -268,10 +268,24 @@ pub struct Config {
 	#[serde(default = "default_auth_chain_cache_capacity")]
 	pub auth_chain_cache_capacity: u32,
 
+	/// Determines the cache size for shorteventids data references.
+	/// 
+	/// Each matrix event can be referenced in the database via either 
+	/// an eventid (string) or a shorteventid (64-bit integer). 
+	/// 
+	/// This defaults to 100,000 + (50,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_shorteventid_cache_capacity")]
 	pub shorteventid_cache_capacity: u32,
 
+	/// Determines the cache size for eventids data references.
+	/// 
+	/// Each matrix event can be referenced in the database via either 
+	/// an eventid (string) or a shorteventid (64-bit integer). 
+	/// 
+	/// This defaults to 100,000 + (25,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_eventidshort_cache_capacity")]
 	pub eventidshort_cache_capacity: u32,

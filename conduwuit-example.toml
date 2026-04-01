@@ -200,11 +200,21 @@
 #
 #auth_chain_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for shorteventids data references.
+# 
+# Each matrix event can be referenced in the database via either 
+# an eventid (string) or a shorteventid (64-bit integer). 
+# 
+# This defaults to 100,000 + (50,000 * CPU core count)
 #
 #shorteventid_cache_capacity = varies by system
 
-# This item is undocumented. Please contribute documentation for it.
+# Determines the cache size for eventids data references.
+# 
+# Each matrix event can be referenced in the database via either 
+# an eventid (string) or a shorteventid (64-bit integer). 
+# 
+# This defaults to 100,000 + (25,000 * CPU core count)
 #
 #eventidshort_cache_capacity = varies by system
 
