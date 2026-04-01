@@ -88,6 +88,15 @@ We're working our way through all of the issues in the [Forgejo project](https:/
 
 We haven't written up a guide on migrating from incompatible homeservers yet. Reach out to us if you need to do this!
 
+
+### Who is the mascot of Continuwuity?
+
+Continuwuity's official pet mascot is **Kaesa**. If you see her in the [Flooftopic][flooftopic] room you are obliged to give her headpats and pet her :3
+
+<img title="Kaesa - Continuwuity's official pet mascot" alt="Avatar of Kaesa - Continuwuity's official pet mascot" height="67" src="docs/public/assets/kaesa.png" />
+
+[flooftopic]: https://matrix.to/#/#flooftopic:continuwuity.org
+
 <!-- ANCHOR_END: body -->
 
 ## Contribution
