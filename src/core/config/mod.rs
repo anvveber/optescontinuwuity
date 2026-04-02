@@ -249,11 +249,12 @@ pub struct Config {
 	/// and is noticably I/O limted. 
 	/// 
 	/// This defaults to 100,000 + (10,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_pdu_cache_capacity")]
 	pub pdu_cache_capacity: u32,
 
-	/// Determines the cache size for auth chain information. 
+	/// The maximum number of auth chains to cache. 
 	/// Accepts any 32-bit integer.
 	/// 
 	/// When determining is a user is authorized to send an event, 
@@ -268,10 +269,12 @@ pub struct Config {
 	#[serde(default = "default_auth_chain_cache_capacity")]
 	pub auth_chain_cache_capacity: u32,
 
-	/// Determines the cache size for shorteventids data references.
+	/// Determines the cache size for eventid data references.
+	/// Accepts any 32-bit integer.
 	/// 
 	/// Each matrix event can be referenced in the database via either 
-	/// an eventid (string) or a shorteventid (64-bit integer). 
+	/// an eventid (string) or a shorteventid (64-bit integer).
+	/// This caps the capacity of eventids referenced by their shorteventid.
 	/// 
 	/// This defaults to 100,000 + (50,000 * CPU core count)
 	/// 
@@ -279,10 +282,12 @@ pub struct Config {
 	#[serde(default = "default_shorteventid_cache_capacity")]
 	pub shorteventid_cache_capacity: u32,
 
-	/// Determines the cache size for eventids data references.
+	/// Determines the cache size for eventid data references.
+	/// Accepts any 32-bit integer.
 	/// 
 	/// Each matrix event can be referenced in the database via either 
 	/// an eventid (string) or a shorteventid (64-bit integer). 
+	/// This caps the capacity of shorteventids referenced by their eventid.
 	/// 
 	/// This defaults to 100,000 + (25,000 * CPU core count)
 	/// 
@@ -290,14 +295,47 @@ pub struct Config {
 	#[serde(default = "default_eventidshort_cache_capacity")]
 	pub eventidshort_cache_capacity: u32,
 
+	/// Determines the cache size for pdu data references.
+	/// Accepts any 32-bit integer.
+	/// 
+	/// This caps the capacity of pdus referenced by their eventid.
+	/// 
+	/// This defaults to 100,000 + (25,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_eventid_pdu_cache_capacity")]
 	pub eventid_pdu_cache_capacity: u32,
 
+	/// Determines the cache size for state key data references.
+	/// Accepts any 32-bit integer.
+	/// 
+	/// State keys are used by the server to verify that a token
+	/// from a third-party invite event was actually generated 
+	/// by the server where the room resides.
+	/// 
+	/// These state keys can be referenced in the database via either 
+	/// an statekey (string) or a shortstatekey (64-bit integer).
+	/// This caps the capacity of statekeys referenced by shortstatekeys.
+	/// 
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_shortstatekey_cache_capacity")]
 	pub shortstatekey_cache_capacity: u32,
 
+	/// Determines the cache size for state key data references.
+	/// Accepts any 32-bit integer.
+	/// 
+	/// State keys are used by the server to verify that a token
+	/// from a third-party invite event was actually generated 
+	/// by the server where the room resides.
+	/// 
+	/// These state keys can be referenced in the database via either 
+	/// an statekey (string) or a shortstatekey (64-bit integer).
+	/// This caps the capacity of shortstatekeys referenced by statekeys.
+	/// 
+	/// This defaults to 100,000 + (10,000 * CPU core count)
+	/// 
 	/// default: varies by system
 	#[serde(default = "default_statekeyshort_cache_capacity")]
 	pub statekeyshort_cache_capacity: u32,
