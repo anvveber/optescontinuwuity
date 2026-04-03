@@ -19,10 +19,9 @@
         packages = [
           pkgs.nodejs
           pkgs.pkg-config
-          pkgs.liburing
           pkgs.rust-jemalloc-sys-unprefixed
           rocksdbAllFeatures
-        ];
+        ] ++ (if pkgs.stdenv.isDarwin then [] else [ pkgs.liburing ]);
         env.LIBCLANG_PATH = lib.makeLibraryPath [ pkgs.llvmPackages.libclang.lib ];
       };
     };

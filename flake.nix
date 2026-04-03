@@ -41,6 +41,8 @@
         "x86_64-linux"
         # support untested but theoretically there
         "aarch64-linux"
+        # support untested but theoretically there
+        "aarch64-darwin"
       ];
     };
 }
