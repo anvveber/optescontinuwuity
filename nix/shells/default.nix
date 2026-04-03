@@ -21,7 +21,7 @@
           pkgs.pkg-config
           pkgs.rust-jemalloc-sys-unprefixed
           rocksdbAllFeatures
-        ] ++ (if pkgs.stdenv.isDarwin then [] else [ pkgs.liburing ]);
+        ] ++ lib.optionals pkgs.stdenv.isDarwin [ pkgs.liburing ];
         env.LIBCLANG_PATH = lib.makeLibraryPath [ pkgs.llvmPackages.libclang.lib ];
       };
     };
