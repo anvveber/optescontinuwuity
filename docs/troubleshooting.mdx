@@ -245,11 +245,15 @@ and is not easy for non-developers to understand.
 ### Issues with contacting a server through SRV records
 Normally, [SRV records](https://spec.matrix.org/v1.16/server-server-api/#resolving-server-names) are used as a backup for server-server traffic \(federation\)
 when the standard lookup `https://<homeserver>/.well-known/matrix/server` fails.
+
 If you run an IPv4-only homeserver, it is recommended to set your `ip_lookup_strategy` to 1, since other strategies include looking up IPv6-addresses \(AAAA-records\) which you can't use.
+
 When the DNS lookup fails for `<homeserver>` \(for more information on how the DNS lookup works exactly, see `ip_lookup_strategy` in your configuration file\),
-a retry can happen when a search domain is configured in `/etc/resolv.conf`, such that the following lookup happens: `<homeserver>.<search_domain>`.
+a retry can happen when a search domain is configured in
+`/etc/resolv.conf`, such that the following lookup happens: `<homeserver>.<search_domain>`.
 When this does return, there is an almost 0 chance that traffic will go to the legitimate server, and will almost always loop back into your own environment.
 If the domain `<homeserver>.<search_domain>` resolves, it will no longer correctly look for SRV records, and therefore fail to federate.
 A quick fix is to remove any lines beginning with `search` in `/etc/resolv.conf` on the host \(this will work for most major versions of Linux\).
+
 If you use a program to manage your `/etc/resolv.conf` \(for example netplan or NetworkManager\),
 you might have to set that up in their respective settings. Consult your network manager's documentation for help.
