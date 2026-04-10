@@ -41,7 +41,7 @@ services:
     environment:
       - LIVEKIT_JWT_BIND=:8081
       - LIVEKIT_URL=wss://livekit.example.com # your LiveKit domain
-      - LIVEKIT_FULL_ACCESS_HOMESERVERS=example.com # your server_name
+      - LIVEKIT_FULL_ACCESS_HOMESERVERS=['example.com'] # your server_name, must be an array
       # Replace these with the generated values as above
       - LIVEKIT_KEY=LK_MATRIX_KEY # APIUxUnMnSkuFWV
       - LIVEKIT_SECRET=LK_MATRIX_SECRET # t93ZVjPeoEdyx7Wbet3kG4L3NGZIZVEFvqe0UuiVc22A
