@@ -246,7 +246,7 @@ pub struct Config {
 	/// An example of a PDU would be a message or joining a room.
 	///
 	/// Setting this higher might be useful if the server has a large memory
-	/// capacity and is noticably I/O limted.
+	/// capacity and is noticeably I/O limited.
 	///
 	/// This defaults to 100,000 + (10,000 * CPU core count)
 	///

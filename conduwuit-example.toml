@@ -181,7 +181,7 @@
 # An example of a PDU would be a message or joining a room.
 #
 # Setting this higher might be useful if the server has a large memory
-# capacity and is noticably I/O limted.
+# capacity and is noticeably I/O limited.
 #
 # This defaults to 100,000 + (10,000 * CPU core count)
 #
@@ -1846,16 +1846,16 @@
 
 # A list of flags that modify startup behavior.
 # Accepts an array of strings.
-# 
+#
 # During startup, the program will check for the presence of certain strings
 # in this array. Matching values will modify how the program runs
 # those startup tasks.
-# 
-# If this variable is empty or contains no matches, the server will start 
+#
+# If this variable is empty or contains no matches, the server will start
 # normally.
-# 
+#
 # Currently this only checks for "smoke" which enables "Smoketest mode."
-# This mode exits the program after running startup tasks. 
+# This mode exits the program after running startup tasks.
 #
 #test = false
 
