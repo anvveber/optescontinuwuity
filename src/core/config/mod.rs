@@ -2326,13 +2326,13 @@ pub struct LdapConfig {
 
 	/// StartTLS for LDAP connections.
 	///
-	/// default: "false"
+	/// default: false
 	#[serde(default)]
 	pub use_starttls: bool,
 
 	/// Skip TLS certificate verification, possibly dangerous.
 	///
-	/// default: "false"
+	/// default: false
 	#[serde(default)]
 	pub disable_tls_verification: bool,
 
