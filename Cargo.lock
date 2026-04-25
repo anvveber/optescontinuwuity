@@ -492,6 +492,28 @@ dependencies = [
 
 [[package]]
 name = "axum-server"
+version = "0.7.3"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "c1ab4a3ec9ea8a657c72d99a03a824af695bd0fb5ec639ccbd9cd3543b41a5f9"
+dependencies = [
+ "arc-swap",
+ "bytes",
+ "fs-err",
+ "http",
+ "http-body",
+ "hyper",
+ "hyper-util",
+ "pin-project-lite",
+ "rustls",
+ "rustls-pemfile",
+ "rustls-pki-types",
+ "tokio",
+ "tokio-rustls",
+ "tower-service",
+]
+
+[[package]]
+name = "axum-server"
 version = "0.8.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "b1df331683d982a0b9492b38127151e6453639cd34926eb9c07d4cd8c6d22bfc"
@@ -514,10 +536,10 @@ dependencies = [
 
 [[package]]
 name = "axum-server-dual-protocol"
-version = "0.8.0"
-source = "git+https://github.com/vinchona/axum-server-dual-protocol.git?rev=ca6db055254255b74238673ce4135698e347d71c#ca6db055254255b74238673ce4135698e347d71c"
+version = "0.7.0"
+source = "git+https://github.com/vinchona/axum-server-dual-protocol.git?rev=d7bd17b1489696ca00dba7ef4fa9a7f8c3b2a530#d7bd17b1489696ca00dba7ef4fa9a7f8c3b2a530"
 dependencies = [
- "axum-server",
+ "axum-server 0.7.3",
  "bytes",
  "http",
  "http-body-util",
@@ -1162,7 +1184,7 @@ version = "0.5.8"
 dependencies = [
  "axum",
  "axum-client-ip",
- "axum-server",
+ "axum-server 0.8.0",
  "axum-server-dual-protocol",
  "bytes",
  "conduwuit_admin",
@@ -4959,6 +4981,15 @@ dependencies = [
  "rustls-pki-types",
  "schannel",
  "security-framework",
+]
+
+[[package]]
+name = "rustls-pemfile"
+version = "2.2.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dce314e5fee3f39953d46bb63bb8a46d40c2f8fb7cc5a3b6cab2bde9721d6e50"
+dependencies = [
+ "rustls-pki-types",
 ]
 
 [[package]]

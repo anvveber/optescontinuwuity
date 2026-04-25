@@ -109,7 +109,7 @@ default-features = false
 [workspace.dependencies.axum-server-dual-protocol]
 # version = "0.7"
 git = "https://github.com/vinchona/axum-server-dual-protocol.git"
-rev = "ca6db055254255b74238673ce4135698e347d71c" # feat!: bump axum_server to 0.8.0
+rev = "d7bd17b1489696ca00dba7ef4fa9a7f8c3b2a530" # feat!: bump axum_server to 0.8.0
 default-features = false
 
 [workspace.dependencies.axum-client-ip]
