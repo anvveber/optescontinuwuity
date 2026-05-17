@@ -530,4 +530,16 @@ pub(super) static MAPS: &[Descriptor] = &[
 		name: "websessionid_session",
 		..descriptor::RANDOM_SMALL
 	},
+	Descriptor {
+		name: "delayid_scheduleddelayedevent",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
+		name: "delayid_finalizeddelayedevent",
+		..descriptor::RANDOM_SMALL
+	},
+	Descriptor {
+		name: "userroomdelayid",
+		..descriptor::RANDOM_SMALL
+	},
 ];
