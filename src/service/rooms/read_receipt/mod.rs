@@ -137,6 +137,29 @@ impl Service {
 		self.db.private_read_get_count(room_id, user_id).await
 	}
 
+	/// Returns the public read receipt PDU count, if one exists.
+	#[inline]
+	#[tracing::instrument(skip(self), level = "debug")]
+	pub async fn public_read_get_count(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+	) -> Result<Option<u64>> {
+		let Some(receipt) = self.db.public_read_get(room_id, user_id).await else {
+			return Ok(None);
+		};
+
+		let Some((event_id, _)) = receipt.content.iter().next() else {
+			return Ok(None);
+		};
+
+		let count = self.services.timeline.get_pdu_count(event_id).await?;
+		match count {
+			| PduCount::Normal(count) => Ok(Some(count)),
+			| _ => Ok(None),
+		}
+	}
+
 	/// Returns the PDU count of the last typing update in this room.
 	#[inline]
 	pub async fn last_privateread_update(&self, user_id: &UserId, room_id: &RoomId) -> u64 {

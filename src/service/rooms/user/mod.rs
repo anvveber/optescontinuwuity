@@ -1,8 +1,12 @@
 use std::sync::Arc;
 
-use conduwuit::{Result, implement};
-use database::{Database, Deserialized, Map};
-use ruma::{RoomId, UserId};
+use conduwuit::{Result, implement, utils::stream::TryIgnore};
+use database::{Database, Deserialized, Json, Map};
+use futures::{Stream, StreamExt};
+use ruma::{
+	OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId, events::AnySyncTimelineEvent,
+	push::Action, serde::Raw,
+};
 
 use crate::{Dep, globals, rooms, rooms::short::ShortStateHash};
 
@@ -17,6 +21,7 @@ struct Data {
 	userroomid_highlightcount: Arc<Map>,
 	roomuserid_lastnotificationread: Arc<Map>,
 	roomsynctoken_shortstatehash: Arc<Map>,
+	usernotificationid_notification: Arc<Map>,
 }
 
 struct Services {
@@ -33,6 +38,8 @@ impl crate::Service for Service {
 				userroomid_highlightcount: args.db["userroomid_highlightcount"].clone(),
 				roomuserid_lastnotificationread: args.db["userroomid_highlightcount"].clone(),
 				roomsynctoken_shortstatehash: args.db["roomsynctoken_shortstatehash"].clone(),
+				usernotificationid_notification: args.db["usernotificationid_notification"]
+					.clone(),
 			},
 
 			services: Services {
@@ -43,6 +50,17 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+}
+
+#[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
+pub struct NotificationRecord {
+	pub actions: Vec<Action>,
+	pub event_id: OwnedEventId,
+	pub event_count: u64,
+	pub room_id: OwnedRoomId,
+	pub ts: u64,
+	#[serde(skip_serializing_if = "Option::is_none")]
+	pub event: Option<Raw<AnySyncTimelineEvent>>,
 }
 
 #[implement(Service)]
@@ -126,4 +144,37 @@ pub async fn get_token_shortstatehash(
 		.qry(key)
 		.await
 		.deserialized()
+}
+
+#[implement(Service)]
+pub fn notification_insert(
+	&self,
+	user_id: &UserId,
+	count: u64,
+	notification: &NotificationRecord,
+) {
+	self.db
+		.usernotificationid_notification
+		.put((user_id, count), Json(notification));
+}
+
+#[implement(Service)]
+pub fn notifications_rev<'a>(
+	&'a self,
+	user_id: &'a UserId,
+	from: Option<u64>,
+) -> impl Stream<Item = (u64, NotificationRecord)> + Send + 'a {
+	type Key = (OwnedUserId, u64);
+
+	let from = from.unwrap_or(u64::MAX);
+	let last_possible = (user_id, from);
+
+	self.db
+		.usernotificationid_notification
+		.rev_stream_from(&last_possible)
+		.ignore_err()
+		.take_while(move |((stored_user, _), _): &(Key, NotificationRecord)| {
+			std::future::ready(stored_user == user_id)
+		})
+		.map(|((_, count), notification): (Key, NotificationRecord)| (count, notification))
 }

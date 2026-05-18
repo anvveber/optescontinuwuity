@@ -24,7 +24,10 @@ use ruma::{
 };
 
 use super::{ExtractBody, ExtractRelatesTo, ExtractRelatesToEventId, RoomMutexGuard};
-use crate::{appservice::NamespaceRegex, rooms::state_compressor::CompressedState};
+use crate::{
+	appservice::NamespaceRegex,
+	rooms::{state_compressor::CompressedState, user::NotificationRecord},
+};
 
 /// Append the incoming event setting the state snapshot to the state from
 /// the server that sent the event.
@@ -194,6 +197,10 @@ where
 
 	let count2 = PduCount::Normal(self.services.globals.next_count().unwrap());
 	let pdu_id: RawPduId = PduId { shortroomid, shorteventid: count2 }.into();
+	let event_count = match count2 {
+		| PduCount::Normal(count) => count,
+		| _ => 0,
+	};
 
 	// Insert pdu
 	self.db.append_pdu(&pdu_id, pdu, &pdu_json, count2).await;
@@ -242,15 +249,16 @@ where
 					|ev: PushRulesEvent| ev.content.global,
 				);
 
-			let mut highlight = false;
-			let mut notify = false;
-
-			for action in self
+			let actions = self
 				.services
 				.pusher
 				.get_actions(user, &rules_for_user, power_levels.clone(), &serialized, room_id)
 				.await
-			{
+				.to_vec();
+
+			let mut highlight = false;
+			let mut notify = false;
+			for action in &actions {
 				match action {
 					| Action::Notify => notify = true,
 					| Action::SetTweak(Tweak::Highlight(
@@ -269,6 +277,18 @@ where
 
 			if notify {
 				notifies.push(user.clone());
+
+				let count = self.services.globals.next_count()?;
+				self.services
+					.user
+					.notification_insert(user, count, &NotificationRecord {
+						actions,
+						event_id: pdu.event_id().to_owned(),
+						event_count,
+						room_id: room_id.to_owned(),
+						ts: pdu.origin_server_ts().get().into(),
+						event: Some(serialized.clone()),
+					});
 			}
 
 			if highlight {

@@ -1,11 +1,12 @@
 use axum::extract::State;
-use conduwuit::{Err, Error, Result, err};
+use conduwuit::{Err, Error, Event, Result, err};
 use conduwuit_service::Services;
+use futures::{StreamExt, pin_mut};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue,
+	CanonicalJsonObject, CanonicalJsonValue, MilliSecondsSinceUnixEpoch,
 	api::{
 		client::push::{
-			delete_pushrule, get_pushers, get_pushrule, get_pushrule_actions,
+			delete_pushrule, get_notifications, get_pushers, get_pushrule, get_pushrule_actions,
 			get_pushrule_enabled, get_pushrules_all, get_pushrules_global_scope, set_pusher,
 			set_pushrule, set_pushrule_actions, set_pushrule_enabled,
 		},
@@ -461,6 +462,101 @@ pub(crate) async fn get_pushers_route(
 	let sender_user = body.sender_user();
 
 	Ok(get_pushers::v3::Response::new(services.pusher.get_pushers(sender_user).await))
+}
+
+/// # `GET /_matrix/client/v3/notifications`
+///
+/// Lists notification events for the sender user.
+pub(crate) async fn get_notifications_route(
+	State(services): State<crate::State>,
+	body: Ruma<get_notifications::v3::Request>,
+) -> Result<get_notifications::v3::Response> {
+	let sender_user = body.sender_user();
+	let from = body
+		.from
+		.as_deref()
+		.map(str::parse::<u64>)
+		.transpose()
+		.map_err(|_| Error::BadRequest(ErrorKind::InvalidParam, "Invalid `from` token."))?;
+	let limit = body
+		.limit
+		.map_or(50, |limit| usize::try_from(limit).unwrap_or(50));
+	let highlights_only = body.only.as_deref() == Some("highlight");
+
+	let mut notifications = Vec::with_capacity(limit);
+	let mut next_token = None;
+	let items = services.rooms.user.notifications_rev(sender_user, from);
+	let mut read_up_to = std::collections::BTreeMap::new();
+
+	pin_mut!(items);
+	while let Some((count, notification)) = items.next().await {
+		let is_highlight = notification.actions.iter().any(|action| {
+			matches!(
+				action,
+				ruma::push::Action::SetTweak(ruma::push::Tweak::Highlight(
+					ruma::push::HighlightTweakValue::Yes,
+				))
+			)
+		});
+
+		if highlights_only && !is_highlight {
+			continue;
+		}
+
+		let read = if let Some(read) = read_up_to.get(&notification.room_id) {
+			*read
+		} else {
+			let public = services
+				.rooms
+				.read_receipt
+				.public_read_get_count(&notification.room_id, sender_user)
+				.await?
+				.unwrap_or(0);
+			let private = services
+				.rooms
+				.read_receipt
+				.private_read_get_count(&notification.room_id, sender_user)
+				.await
+				.unwrap_or(0);
+			let read = public.max(private);
+			read_up_to.insert(notification.room_id.clone(), read);
+			read
+		};
+
+		let room_id = notification.room_id.clone();
+		let read = notification.event_count <= read;
+		let event = match notification.event {
+			| Some(event) => event,
+			| None => services
+				.rooms
+				.timeline
+				.get_pdu(&notification.event_id)
+				.await?
+				.to_format(),
+		};
+
+		notifications.push(get_notifications::v3::Notification::new(
+			notification.actions,
+			event,
+			read,
+			room_id,
+			MilliSecondsSinceUnixEpoch(
+				notification
+					.ts
+					.try_into()
+					.expect("stored notification ts fits UInt"),
+			),
+		));
+
+		if notifications.len() == limit {
+			next_token = count.checked_sub(1).map(|count| count.to_string());
+			break;
+		}
+	}
+
+	let mut response = get_notifications::v3::Response::new(notifications);
+	response.next_token = next_token;
+	Ok(response)
 }
 
 /// # `POST /_matrix/client/r0/pushers/set`
