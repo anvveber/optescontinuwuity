@@ -1,0 +1,1 @@
+Implemented the client notifications endpoint at `/_matrix/client/v3/notifications`. Contributed by @RainerZufall187
