@@ -4,7 +4,7 @@ use conduwuit::{
 	utils::{IterStream, stream::BroadbandExt},
 };
 use futures::StreamExt;
-use ruma::{OwnedDeviceId, OwnedUserId};
+use ruma::{OwnedDeviceId, OwnedUserId, api::client::push::PusherIds};
 
 use crate::Context;
 
@@ -19,7 +19,8 @@ pub enum PusherCommand {
 	/// Deletes a specific pusher by ID
 	DeletePusher {
 		user_id: OwnedUserId,
-		pusher_id: String,
+		app_id: String,
+		push_key: String,
 	},
 
 	/// Deletes all pushers for a user
@@ -45,21 +46,22 @@ pub(super) async fn process(subcommand: PusherCommand, context: &Context<'_>) ->
 
 			write!(context, "Query completed in {query_time:?}:\n\n```rs\n{results:#?}\n```")
 		},
-		| PusherCommand::DeletePusher { user_id, pusher_id } => {
-			services.pusher.delete_pusher(&user_id, &pusher_id).await;
-			write!(context, "Deleted pusher {pusher_id} for {user_id}.")
+		| PusherCommand::DeletePusher { user_id, app_id, push_key } => {
+			let pusher_ids = PusherIds::new(push_key, app_id);
+			services.pusher.delete_pusher(&user_id, &pusher_ids).await;
+			write!(context, "Deleted pusher {pusher_ids:?} for {user_id}.")
 		},
 		| PusherCommand::DeleteAllUser { user_id } => {
 			let pushers = services
 				.pusher
-				.get_pushkeys(&user_id)
+				.get_pusher_ids(&user_id)
 				.collect::<Vec<_>>()
 				.await;
 			let pusher_count = pushers.len();
 			pushers
 				.stream()
-				.for_each(async |pushkey| {
-					services.pusher.delete_pusher(&user_id, pushkey).await;
+				.for_each(async |pusher_ids| {
+					services.pusher.delete_pusher(&user_id, &pusher_ids).await;
 				})
 				.await;
 			write!(context, "Deleted {pusher_count} pushers for {user_id}.")
@@ -67,25 +69,24 @@ pub(super) async fn process(subcommand: PusherCommand, context: &Context<'_>) ->
 		| PusherCommand::DeleteAllDevice { user_id, device_id } => {
 			let pushers = services
 				.pusher
-				.get_pushkeys(&user_id)
-				.map(ToOwned::to_owned)
-				.broad_filter_map(async |pushkey| {
+				.get_pusher_ids(&user_id)
+				.broad_filter_map(async |pusher_ids| {
 					services
 						.pusher
-						.get_pusher_device(&pushkey)
+						.get_pusher_device(&pusher_ids)
 						.await
 						.ok()
 						.as_ref()
 						.is_some_and(|pusher_device| pusher_device == &device_id)
-						.then_some(pushkey)
+						.then_some(pusher_ids)
 				})
 				.collect::<Vec<_>>()
 				.await;
 			let pusher_count = pushers.len();
 			pushers
 				.stream()
-				.for_each(async |pushkey| {
-					services.pusher.delete_pusher(&user_id, &pushkey).await;
+				.for_each(async |pusher_ids| {
+					services.pusher.delete_pusher(&user_id, &pusher_ids).await;
 				})
 				.await;
 			write!(context, "Deleted {pusher_count} pushers for {device_id}.")

@@ -11,11 +11,11 @@ use conduwuit_database::{Deserialized, Ignore, Interfix, Json, Map};
 use futures::{Stream, StreamExt};
 use ipaddress::IPAddress;
 use ruma::{
-	DeviceId, OwnedDeviceId, RoomId, UInt, UserId,
+	DeviceId, OwnedDeviceId, OwnedUserId, RoomId, UInt, UserId,
 	api::{
 		IncomingResponse, OutgoingRequest,
 		auth_scheme::NoAuthentication,
-		client::push::{Pusher, PusherKind, set_pusher},
+		client::push::{Pusher, PusherIds, PusherKind, set_pusher},
 		path_builder::SinglePath,
 		push_gateway::send_event_notification::{
 			self,
@@ -86,6 +86,7 @@ impl Service {
 		match pusher {
 			| set_pusher::v3::PusherAction::Post(data) => {
 				let pushkey = data.pusher.ids.pushkey.as_str();
+				let app_id = data.pusher.ids.app_id.as_str();
 
 				if pushkey.len() > 512 {
 					return Err!(Request(InvalidParam(
@@ -114,8 +115,22 @@ impl Service {
 						.all(|&scheme| scheme != url.scheme().to_lowercase())
 					{
 						return Err!(Request(InvalidParam(
-							warn!(%url, "HTTP pusher URL is not a valid HTTP/HTTPS URL")
+							warn!(%url, "HTTP pusher URL is not a valid HTTPS URL")
 						)));
+					}
+
+					if url.scheme() != "https" {
+						return Err!(Request(InvalidParam(
+							warn!(%url, "HTTP pusher URL must use HTTPS")
+						)));
+					}
+
+					if url.path() != self.services.globals.notification_push_path() {
+						return Err!(Request(InvalidParam(warn!(
+							%url,
+							"HTTP pusher URL must target {}",
+							self.services.globals.notification_push_path(),
+						))));
 					}
 
 					if let Ok(ip) =
@@ -129,13 +144,19 @@ impl Service {
 					}
 				}
 
-				let pushkey = data.pusher.ids.pushkey.as_str();
-				let key = (sender, pushkey);
+				if !data.append {
+					self.remove_other_user_pushers(sender, &data.pusher.ids)
+						.await;
+				}
+
+				let key = (sender, app_id, pushkey);
 				self.db.senderkey_pusher.put(key, Json(pusher));
-				self.db.pushkey_deviceid.insert(pushkey, sender_device);
+				self.db
+					.pushkey_deviceid
+					.put((app_id, pushkey), sender_device);
 			},
 			| set_pusher::v3::PusherAction::Delete(ids) => {
-				self.delete_pusher(sender, ids.pushkey.as_str()).await;
+				self.delete_pusher(sender, ids).await;
 			},
 			| _ => return Err!(Request(InvalidParam("Unknown pusher action"))),
 		}
@@ -143,24 +164,30 @@ impl Service {
 		Ok(())
 	}
 
-	pub async fn delete_pusher(&self, sender: &UserId, pushkey: &str) {
-		let key = (sender, pushkey);
+	pub async fn delete_pusher(&self, sender: &UserId, ids: &PusherIds) {
+		let key = (sender, ids.app_id.as_str(), ids.pushkey.as_str());
 		self.db.senderkey_pusher.del(key);
-		self.db.pushkey_deviceid.remove(pushkey);
+		self.db
+			.pushkey_deviceid
+			.del((ids.app_id.as_str(), ids.pushkey.as_str()));
 
 		self.services
 			.sending
-			.cleanup_events(None, Some(sender), Some(pushkey))
+			.cleanup_events(None, Some(sender), Some(&ids.app_id), Some(&ids.pushkey))
 			.await
 			.ok();
 	}
 
-	pub async fn get_pusher_device(&self, pushkey: &str) -> Result<OwnedDeviceId> {
-		self.db.pushkey_deviceid.get(pushkey).await.deserialized()
+	pub async fn get_pusher_device(&self, ids: &PusherIds) -> Result<OwnedDeviceId> {
+		self.db
+			.pushkey_deviceid
+			.qry(&(ids.app_id.as_str(), ids.pushkey.as_str()))
+			.await
+			.deserialized()
 	}
 
-	pub async fn get_pusher(&self, sender: &UserId, pushkey: &str) -> Result<Pusher> {
-		let senderkey = (sender, pushkey);
+	pub async fn get_pusher(&self, sender: &UserId, ids: &PusherIds) -> Result<Pusher> {
+		let senderkey = (sender, ids.app_id.as_str(), ids.pushkey.as_str());
 		self.db
 			.senderkey_pusher
 			.qry(&senderkey)
@@ -179,16 +206,40 @@ impl Service {
 			.await
 	}
 
-	pub fn get_pushkeys<'a>(
+	pub fn get_pusher_ids<'a>(
 		&'a self,
 		sender: &'a UserId,
-	) -> impl Stream<Item = &'a str> + Send + 'a {
+	) -> impl Stream<Item = PusherIds> + Send + 'a {
+		type Key = (OwnedUserId, String, String);
+
 		let prefix = (sender, Interfix);
 		self.db
 			.senderkey_pusher
-			.keys_prefix(&prefix)
+			.stream_prefix(&prefix)
 			.ignore_err()
-			.map(|(_, pushkey): (Ignore, &str)| pushkey)
+			.map(|((_, app_id, pushkey), _): (Key, Ignore)| PusherIds::new(pushkey, app_id))
+	}
+
+	async fn remove_other_user_pushers(&self, sender: &UserId, ids: &PusherIds) {
+		let stale_pushers: Vec<_> = self
+			.db
+			.senderkey_pusher
+			.stream()
+			.ignore_err()
+			.filter_map(
+				|((user_id, app_id, pushkey), _): ((OwnedUserId, String, String), Ignore)| async move {
+					(user_id != sender
+						&& app_id == ids.app_id.as_str()
+						&& pushkey == ids.pushkey.as_str())
+					.then_some((user_id, PusherIds::new(pushkey, app_id)))
+				},
+			)
+			.collect()
+			.await;
+
+		for (stale_user_id, stale_ids) in stale_pushers {
+			self.delete_pusher(&stale_user_id, &stale_ids).await;
+		}
 	}
 
 	#[tracing::instrument(skip(self, dest, request))]

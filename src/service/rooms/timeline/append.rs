@@ -14,7 +14,7 @@ use conduwuit_core::{
 };
 use futures::StreamExt;
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, EventId, RoomVersionId, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, RoomVersionId, UserId,
 	events::{
 		GlobalAccountDataEventType, TimelineEventType,
 		push_rules::PushRulesEvent,
@@ -183,20 +183,27 @@ where
 
 	let insert_lock = self.mutex_insert.lock(room_id).await;
 
-	let count1 = self.services.globals.next_count().unwrap();
+	let count2 = PduCount::Normal(self.services.globals.next_count().unwrap());
+	let PduCount::Normal(count2_value) = count2 else {
+		unreachable!("newly allocated timeline event count is never backfilled");
+	};
+	let pdu_id: RawPduId = PduId { shortroomid, shorteventid: count2 }.into();
 
-	// Mark as read first so the sending client doesn't get a notification even if
-	// appending fails
+	// Mark as read before fanout so the sending client doesn't get a notification
+	// for its own event.
 	self.services
 		.read_receipt
-		.private_read_set(room_id, pdu.sender(), count1);
+		.private_read_set(room_id, pdu.sender(), count2_value);
 
 	self.services
 		.user
-		.reset_notification_counts(pdu.sender(), room_id);
-
-	let count2 = PduCount::Normal(self.services.globals.next_count().unwrap());
-	let pdu_id: RawPduId = PduId { shortroomid, shorteventid: count2 }.into();
+		.set_notification_read(
+			pdu.sender(),
+			room_id,
+			ruma::events::receipt::ReceiptThread::Unthreaded,
+			count2_value,
+		)
+		.await;
 
 	// Insert pdu
 	self.db.append_pdu(&pdu_id, pdu, &pdu_json, count2).await;
@@ -234,6 +241,7 @@ where
 		}
 
 		let serialized = pdu.to_format();
+		let thread_root = notification_thread_root(pdu);
 		for user in &push_target {
 			let rules_for_user = self
 				.services
@@ -280,6 +288,9 @@ where
 					.notification_insert(user, count, &NotificationRecord {
 						actions,
 						pdu_id: pdu_id.as_bytes().to_vec(),
+						room_id: Some(room_id.to_owned()),
+						pdu_count: Some(count),
+						thread_root: thread_root.clone(),
 					});
 			}
 
@@ -287,16 +298,17 @@ where
 				highlights.push(user.clone());
 			}
 
-			self.services
-				.pusher
-				.get_pushkeys(user)
-				.ready_for_each(|push_key| {
-					self.services
-						.sending
-						.send_pdu_push(&pdu_id, user, push_key.to_owned())
-						.expect("TODO: replace with future");
-				})
-				.await;
+			for pusher in self.services.pusher.get_pushers(user).await {
+				self.services
+					.sending
+					.send_pdu_push(
+						&pdu_id,
+						user,
+						pusher.ids.app_id.clone(),
+						pusher.ids.pushkey.clone(),
+					)
+					.expect("TODO: replace with future");
+			}
 		}
 
 		self.db
@@ -452,4 +464,13 @@ where
 	}
 
 	Ok(pdu_id)
+}
+
+fn notification_thread_root(pdu: &PduEvent) -> Option<OwnedEventId> {
+	pdu.get_content::<ExtractRelatesTo>()
+		.ok()
+		.and_then(|content| match content.relates_to {
+			| Relation::Thread(thread) => Some(thread.event_id),
+			| _ => None,
+		})
 }

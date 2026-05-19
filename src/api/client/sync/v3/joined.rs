@@ -20,7 +20,7 @@ use futures::{
 	future::{OptionFuture, join, join3, join4, try_join, try_join3},
 };
 use ruma::{
-	OwnedRoomId, OwnedUserId, RoomId, UserId,
+	OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	api::client::sync::sync_events::{
 		UnreadNotificationsCount,
 		v3::{
@@ -77,6 +77,7 @@ pub(super) async fn load_joined_room(
 			timeline,
 			summary,
 			notification_counts,
+			thread_notification_counts,
 			device_list_updates,
 		},
 	) = try_join3(
@@ -100,10 +101,10 @@ pub(super) async fn load_joined_room(
 		account_data,
 		summary: summary.unwrap_or_default(),
 		unread_notifications: notification_counts.unwrap_or_default(),
+		unread_thread_notifications: thread_notification_counts.unwrap_or_default(),
 		timeline,
 		state: RoomState::Before(StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect())),
 		ephemeral,
-		unread_thread_notifications: BTreeMap::new(),
 	});
 
 	Ok((joined_room, device_list_updates))
@@ -245,6 +246,7 @@ struct StateAndTimeline {
 	timeline: Timeline,
 	summary: Option<RoomSummary>,
 	notification_counts: Option<UnreadNotificationsCount>,
+	thread_notification_counts: Option<BTreeMap<OwnedEventId, UnreadNotificationsCount>>,
 	device_list_updates: DeviceListUpdates,
 }
 
@@ -326,7 +328,15 @@ async fn build_state_and_timeline(
 			events: filtered_timeline,
 		}),
 		summary,
-		notification_counts,
+		thread_notification_counts: notification_counts.as_ref().and_then(|counts| {
+			sync_context
+				.filter
+				.room
+				.timeline
+				.unread_thread_notifications
+				.then(|| counts.1.clone())
+		}),
+		notification_counts: notification_counts.map(|counts| counts.0),
 		device_list_updates,
 	})
 }
@@ -529,10 +539,16 @@ async fn build_state_events(
 #[tracing::instrument(level = "debug", skip_all)]
 async fn build_notification_counts(
 	services: &Services,
-	SyncContext { syncing_user, last_sync_end_count, .. }: SyncContext<'_>,
+	SyncContext {
+		syncing_user,
+		last_sync_end_count,
+		filter,
+		..
+	}: SyncContext<'_>,
 	room_id: &RoomId,
 	timeline: &TimelinePdus,
-) -> Result<Option<UnreadNotificationsCount>> {
+) -> Result<Option<(UnreadNotificationsCount, BTreeMap<OwnedEventId, UnreadNotificationsCount>)>>
+{
 	// determine whether to actually update the notification counts
 	let should_send_notification_counts = async {
 		// if we're going to sync some timeline events, the notification count has
@@ -564,28 +580,48 @@ async fn build_notification_counts(
 	};
 
 	if should_send_notification_counts.await {
-		let (notification_count, highlight_count) = join(
-			services
+		let include_threads = filter.room.timeline.unread_thread_notifications;
+		let counts = if include_threads {
+			let (unread_notifications, unread_thread_notifications) = services
 				.rooms
 				.user
-				.notification_count(syncing_user, room_id)
-				.map(TryInto::try_into)
-				.unwrap_or(uint!(0)),
-			services
-				.rooms
-				.user
-				.highlight_count(syncing_user, room_id)
-				.map(TryInto::try_into)
-				.unwrap_or(uint!(0)),
-		)
-		.await;
+				.notification_counts_with_threads(syncing_user, room_id)
+				.await;
 
-		trace!(%notification_count, %highlight_count, "syncing new notification counts");
+			(unread_notifications, unread_thread_notifications)
+		} else {
+			let (notification_count, highlight_count) = join(
+				services
+					.rooms
+					.user
+					.notification_count(syncing_user, room_id)
+					.map(TryInto::try_into)
+					.unwrap_or(uint!(0)),
+				services
+					.rooms
+					.user
+					.highlight_count(syncing_user, room_id)
+					.map(TryInto::try_into)
+					.unwrap_or(uint!(0)),
+			)
+			.await;
 
-		Ok(Some(assign!(UnreadNotificationsCount::new(), {
-			notification_count: Some(notification_count),
-			highlight_count: Some(highlight_count),
-		})))
+			(
+				assign!(UnreadNotificationsCount::new(), {
+					notification_count: Some(notification_count),
+					highlight_count: Some(highlight_count),
+				}),
+				BTreeMap::new(),
+			)
+		};
+
+		trace!(
+			notification_counts = ?counts.0,
+			thread_count = counts.1.len(),
+			"syncing new notification counts"
+		);
+
+		Ok(Some(counts))
 	} else {
 		Ok(None)
 	}
@@ -768,7 +804,7 @@ async fn build_device_list_updates(
 	}: SyncContext<'_>,
 	room_id: &RoomId,
 	ShortStateHashes { current_shortstatehash, .. }: ShortStateHashes,
-	state_events: &Vec<PduEvent>,
+	state_events: &[PduEvent],
 	joined_since_last_sync: bool,
 ) -> Result<DeviceListUpdates> {
 	let is_encrypted_room = services

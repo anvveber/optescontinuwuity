@@ -160,9 +160,15 @@ impl crate::Service for Service {
 }
 
 impl Service {
-	#[tracing::instrument(skip(self, pdu_id, user, pushkey), level = "debug")]
-	pub fn send_pdu_push(&self, pdu_id: &RawPduId, user: &UserId, pushkey: String) -> Result {
-		let dest = Destination::Push(user.to_owned(), pushkey);
+	#[tracing::instrument(skip(self, pdu_id, user, app_id, pushkey), level = "debug")]
+	pub fn send_pdu_push(
+		&self,
+		pdu_id: &RawPduId,
+		user: &UserId,
+		app_id: String,
+		pushkey: String,
+	) -> Result {
+		let dest = Destination::Push(user.to_owned(), app_id, pushkey);
 		let event = SendingEvent::Pdu(*pdu_id);
 		let _cork = self.db.db.cork();
 		let keys = self.db.queue_requests(once((&event, &dest)));
@@ -378,20 +384,22 @@ impl Service {
 		&self,
 		appservice_id: Option<&str>,
 		user_id: Option<&UserId>,
+		app_id: Option<&str>,
 		push_key: Option<&str>,
 	) -> Result {
-		match (appservice_id, user_id, push_key) {
-			| (None, Some(user_id), Some(push_key)) => {
+		match (appservice_id, user_id, app_id, push_key) {
+			| (None, Some(user_id), Some(app_id), Some(push_key)) => {
 				self.db
 					.delete_all_requests_for(&Destination::Push(
 						user_id.to_owned(),
+						app_id.to_owned(),
 						push_key.to_owned(),
 					))
 					.await;
 
 				Ok(())
 			},
-			| (Some(appservice_id), None, None) => {
+			| (Some(appservice_id), None, None, None) => {
 				self.db
 					.delete_all_requests_for(&Destination::Appservice(appservice_id.to_owned()))
 					.await;

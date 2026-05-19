@@ -164,20 +164,22 @@ pub(crate) async fn change_password_route(
 		// Remove all pushers except the ones associated with this session
 		services
 			.pusher
-			.get_pushkeys(&sender_user)
-			.map(ToOwned::to_owned)
-			.broad_filter_map(async |pushkey| {
+			.get_pusher_ids(&sender_user)
+			.broad_filter_map(async |pusher_ids| {
 				services
 					.pusher
-					.get_pusher_device(&pushkey)
+					.get_pusher_device(&pusher_ids)
 					.await
 					.ok()
 					.as_ref()
 					.is_some_and(|pusher_device| pusher_device != body.sender_device())
-					.then_some(pushkey)
+					.then_some(pusher_ids)
 			})
-			.for_each(async |pushkey| {
-				services.pusher.delete_pusher(&sender_user, &pushkey).await;
+			.for_each(async |pusher_ids| {
+				services
+					.pusher
+					.delete_pusher(&sender_user, &pusher_ids)
+					.await;
 			})
 			.await;
 	}
@@ -342,9 +344,9 @@ pub async fn full_user_deactivate(
 
 	services
 		.pusher
-		.get_pushkeys(user_id)
-		.for_each(async |pushkey| {
-			services.pusher.delete_pusher(user_id, pushkey).await;
+		.get_pusher_ids(user_id)
+		.for_each(async |pusher_ids| {
+			services.pusher.delete_pusher(user_id, &pusher_ids).await;
 		})
 		.await;
 

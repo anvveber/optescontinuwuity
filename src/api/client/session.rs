@@ -293,20 +293,22 @@ pub(crate) async fn logout_route(
 		.await;
 	services
 		.pusher
-		.get_pushkeys(sender_user)
-		.map(ToOwned::to_owned)
-		.broad_filter_map(async |pushkey| {
+		.get_pusher_ids(sender_user)
+		.broad_filter_map(async |pusher_ids| {
 			services
 				.pusher
-				.get_pusher_device(&pushkey)
+				.get_pusher_device(&pusher_ids)
 				.await
 				.ok()
 				.as_ref()
 				.is_some_and(|pusher_device| pusher_device == sender_device)
-				.then_some(pushkey)
+				.then_some(pusher_ids)
 		})
-		.for_each(async |pushkey| {
-			services.pusher.delete_pusher(sender_user, &pushkey).await;
+		.for_each(async |pusher_ids| {
+			services
+				.pusher
+				.delete_pusher(sender_user, &pusher_ids)
+				.await;
 		})
 		.await;
 
@@ -340,9 +342,12 @@ pub(crate) async fn logout_all_route(
 		.await;
 	services
 		.pusher
-		.get_pushkeys(sender_user)
-		.for_each(async |pushkey| {
-			services.pusher.delete_pusher(sender_user, pushkey).await;
+		.get_pusher_ids(sender_user)
+		.for_each(async |pusher_ids| {
+			services
+				.pusher
+				.delete_pusher(sender_user, &pusher_ids)
+				.await;
 		})
 		.await;
 

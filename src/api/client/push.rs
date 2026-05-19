@@ -537,10 +537,10 @@ async fn build_notification(
 	};
 
 	let room_id = pdu.room_id_or_hash();
-	let last_read = services
+	let read_up_to = services
 		.rooms
 		.user
-		.last_notification_read(sender_user, &room_id)
+		.notification_read_count(sender_user, &room_id, notification.thread_root.as_deref())
 		.await;
 
 	if !services
@@ -574,7 +574,7 @@ async fn build_notification(
 	Ok(Some(get_notifications::v3::Notification::new(
 		notification.actions,
 		pdu.into_format(),
-		count <= last_read,
+		count <= read_up_to,
 		room_id,
 		ts,
 	)))

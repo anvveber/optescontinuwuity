@@ -461,8 +461,9 @@ pub(super) async fn list_invited_rooms(&self, user_id: String) -> Result {
 	let body = rooms
 		.iter()
 		.map(|((id, members, name), sender)| match sender {
-			| Ok(user_id) =>
-				format!("{id}\tInviter: {user_id}\tMembers: {members}\tName: {name}"),
+			| Ok(user_id) => {
+				format!("{id}\tInviter: {user_id}\tMembers: {members}\tName: {name}")
+			},
 			| Err(_) => format!("{id}\tMembers: {members}\tName: {name}"),
 		})
 		.collect::<Vec<_>>()

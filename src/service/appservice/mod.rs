@@ -196,7 +196,7 @@ impl Service {
 		// sending to the URL
 		self.services
 			.sending
-			.cleanup_events(Some(appservice_id), None, None)
+			.cleanup_events(Some(appservice_id), None, None, None)
 			.await
 	}
 

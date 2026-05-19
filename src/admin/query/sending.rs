@@ -30,6 +30,8 @@ pub enum SendingCommand {
 		server_name: Option<OwnedServerName>,
 		#[arg(short, long)]
 		user_id: Option<OwnedUserId>,
+		#[arg(long)]
+		app_id: Option<String>,
 		#[arg(short, long)]
 		push_key: Option<String>,
 	},
@@ -52,6 +54,8 @@ pub enum SendingCommand {
 		server_name: Option<OwnedServerName>,
 		#[arg(short, long)]
 		user_id: Option<OwnedUserId>,
+		#[arg(long)]
+		app_id: Option<String>,
 		#[arg(short, long)]
 		push_key: Option<String>,
 	},
@@ -82,11 +86,13 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 			appservice_id,
 			server_name,
 			user_id,
+			app_id,
 			push_key,
 		} => {
 			if appservice_id.is_none()
 				&& server_name.is_none()
 				&& user_id.is_none()
+				&& app_id.is_none()
 				&& push_key.is_none()
 			{
 				return Err!(
@@ -95,8 +101,8 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 				);
 			}
 			let timer = tokio::time::Instant::now();
-			let results = match (appservice_id, server_name, user_id, push_key) {
-				| (Some(appservice_id), None, None, None) => {
+			let results = match (appservice_id, server_name, user_id, app_id, push_key) {
+				| (Some(appservice_id), None, None, None, None) => {
 					if appservice_id.is_empty() {
 						return Err!(
 							"An appservice ID, server name, or a user ID with push key must be \
@@ -109,33 +115,34 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 						.db
 						.queued_requests(&Destination::Appservice(appservice_id))
 				},
-				| (None, Some(server_name), None, None) => services
+				| (None, Some(server_name), None, None, None) => services
 					.sending
 					.db
 					.queued_requests(&Destination::Federation(server_name)),
-				| (None, None, Some(user_id), Some(push_key)) => {
-					if push_key.is_empty() {
+				| (None, None, Some(user_id), Some(app_id), Some(push_key)) => {
+					if app_id.is_empty() || push_key.is_empty() {
 						return Err!(
-							"An appservice ID, server name, or a user ID with push key must be \
-							 specified via arguments. See --help for more details.",
+							"An appservice ID, server name, or a user ID with app ID and push \
+							 key must be specified via arguments. See --help for more details.",
 						);
 					}
 
 					services
 						.sending
 						.db
-						.queued_requests(&Destination::Push(user_id, push_key))
+						.queued_requests(&Destination::Push(user_id, app_id, push_key))
 				},
-				| (Some(_), Some(_), Some(_), Some(_)) => {
+				| (Some(_), Some(_), Some(_), Some(_), Some(_)) => {
 					return Err!(
-						"An appservice ID, server name, or a user ID with push key must be \
-						 specified via arguments. Not all of them See --help for more details.",
+						"An appservice ID, server name, or a user ID with app ID and push key \
+						 must be specified via arguments. Not all of them See --help for more \
+						 details.",
 					);
 				},
 				| _ => {
 					return Err!(
-						"An appservice ID, server name, or a user ID with push key must be \
-						 specified via arguments. See --help for more details.",
+						"An appservice ID, server name, or a user ID with app ID and push key \
+						 must be specified via arguments. See --help for more details.",
 					);
 				},
 			};
@@ -153,11 +160,13 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 			appservice_id,
 			server_name,
 			user_id,
+			app_id,
 			push_key,
 		} => {
 			if appservice_id.is_none()
 				&& server_name.is_none()
 				&& user_id.is_none()
+				&& app_id.is_none()
 				&& push_key.is_none()
 			{
 				return Err!(
@@ -167,8 +176,8 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 			}
 
 			let timer = tokio::time::Instant::now();
-			let results = match (appservice_id, server_name, user_id, push_key) {
-				| (Some(appservice_id), None, None, None) => {
+			let results = match (appservice_id, server_name, user_id, app_id, push_key) {
+				| (Some(appservice_id), None, None, None, None) => {
 					if appservice_id.is_empty() {
 						return Err!(
 							"An appservice ID, server name, or a user ID with push key must be \
@@ -181,33 +190,34 @@ pub(super) async fn process(subcommand: SendingCommand, context: &Context<'_>) -
 						.db
 						.active_requests_for(&Destination::Appservice(appservice_id))
 				},
-				| (None, Some(server_name), None, None) => services
+				| (None, Some(server_name), None, None, None) => services
 					.sending
 					.db
 					.active_requests_for(&Destination::Federation(server_name)),
-				| (None, None, Some(user_id), Some(push_key)) => {
-					if push_key.is_empty() {
+				| (None, None, Some(user_id), Some(app_id), Some(push_key)) => {
+					if app_id.is_empty() || push_key.is_empty() {
 						return Err!(
-							"An appservice ID, server name, or a user ID with push key must be \
-							 specified via arguments. See --help for more details.",
+							"An appservice ID, server name, or a user ID with app ID and push \
+							 key must be specified via arguments. See --help for more details.",
 						);
 					}
 
 					services
 						.sending
 						.db
-						.active_requests_for(&Destination::Push(user_id, push_key))
+						.active_requests_for(&Destination::Push(user_id, app_id, push_key))
 				},
-				| (Some(_), Some(_), Some(_), Some(_)) => {
+				| (Some(_), Some(_), Some(_), Some(_), Some(_)) => {
 					return Err!(
-						"An appservice ID, server name, or a user ID with push key must be \
-						 specified via arguments. Not all of them See --help for more details.",
+						"An appservice ID, server name, or a user ID with app ID and push key \
+						 must be specified via arguments. Not all of them See --help for more \
+						 details.",
 					);
 				},
 				| _ => {
 					return Err!(
-						"An appservice ID, server name, or a user ID with push key must be \
-						 specified via arguments. See --help for more details.",
+						"An appservice ID, server name, or a user ID with app ID and push key \
+						 must be specified via arguments. See --help for more details.",
 					);
 				},
 			};

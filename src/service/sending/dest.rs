@@ -6,7 +6,7 @@ use ruma::{OwnedServerName, OwnedUserId};
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Destination {
 	Appservice(String),
-	Push(OwnedUserId, String), // user and pushkey
+	Push(OwnedUserId, String, String), // user, app_id, and pushkey
 	Federation(OwnedServerName),
 }
 
@@ -32,11 +32,13 @@ pub(super) fn get_prefix(&self) -> Vec<u8> {
 			p.push(0xFF);
 			p
 		},
-		| Self::Push(user, pushkey) => {
+		| Self::Push(user, app_id, pushkey) => {
 			let sigil = b"$";
 			let len = sigil
 				.len()
 				.saturating_add(user.as_bytes().len())
+				.saturating_add(1)
+				.saturating_add(app_id.len())
 				.saturating_add(1)
 				.saturating_add(pushkey.len())
 				.saturating_add(1);
@@ -44,6 +46,8 @@ pub(super) fn get_prefix(&self) -> Vec<u8> {
 			let mut p = Vec::with_capacity(len);
 			p.extend_from_slice(sigil);
 			p.extend_from_slice(user.as_bytes());
+			p.push(0xFF);
+			p.extend_from_slice(app_id.as_bytes());
 			p.push(0xFF);
 			p.extend_from_slice(pushkey.as_bytes());
 			p.push(0xFF);

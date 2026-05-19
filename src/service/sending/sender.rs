@@ -646,8 +646,9 @@ impl Service {
 			| Destination::Federation(server) =>
 				self.send_events_dest_federation(server, events).boxed(),
 			| Destination::Appservice(id) => self.send_events_dest_appservice(id, events).boxed(),
-			| Destination::Push(user_id, pushkey) =>
-				self.send_events_dest_push(user_id, pushkey, events).boxed(),
+			| Destination::Push(user_id, app_id, pushkey) => self
+				.send_events_dest_push(user_id, app_id, pushkey, events)
+				.boxed(),
 		}
 	}
 
@@ -733,13 +734,15 @@ impl Service {
 	async fn send_events_dest_push(
 		&self,
 		user_id: OwnedUserId,
+		app_id: String,
 		pushkey: String,
 		events: Vec<SendingEvent>,
 	) -> SendingResult {
-		let Ok(pusher) = self.services.pusher.get_pusher(&user_id, &pushkey).await else {
+		let pusher_ids = ruma::api::client::push::PusherIds::new(pushkey.clone(), app_id.clone());
+		let Ok(pusher) = self.services.pusher.get_pusher(&user_id, &pusher_ids).await else {
 			return Err((
-				Destination::Push(user_id.clone(), pushkey.clone()),
-				err!(Database(error!(%user_id, ?pushkey, "Missing pusher"))),
+				Destination::Push(user_id.clone(), app_id.clone(), pushkey.clone()),
+				err!(Database(error!(%user_id, ?app_id, ?pushkey, "Missing pusher"))),
 			));
 		};
 
@@ -792,10 +795,12 @@ impl Service {
 				.pusher
 				.send_push_notice(&user_id, unread, &pusher, rules_for_user, &pdu)
 				.await
-				.map_err(|e| (Destination::Push(user_id.clone(), pushkey.clone()), e));
+				.map_err(|e| {
+					(Destination::Push(user_id.clone(), app_id.clone(), pushkey.clone()), e)
+				});
 		}
 
-		Ok(Destination::Push(user_id, pushkey))
+		Ok(Destination::Push(user_id, app_id, pushkey))
 	}
 
 	async fn send_events_dest_federation(

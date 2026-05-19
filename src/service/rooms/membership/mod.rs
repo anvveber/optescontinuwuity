@@ -812,7 +812,7 @@ impl Service {
 						return Ok(true);
 					}
 				},
-				| other if other.rule_type() == "fi.mau.spam_checker" =>
+				| other if other.rule_type() == "fi.mau.spam_checker" => {
 					return match self
 						.services
 						.antispam
@@ -821,7 +821,8 @@ impl Service {
 					{
 						| Ok(()) => Ok(true),
 						| Err(_) => Err!(Request(Forbidden("Antispam rejected join request."))),
-					},
+					};
+				},
 				| _ => {
 					// We don't recognise this join rule, so we cannot satisfy the request.
 					could_satisfy = false;
