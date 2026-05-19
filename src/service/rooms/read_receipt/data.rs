@@ -103,26 +103,6 @@ impl Data {
 		self.roomuserid_privateread.qry(&key).await.deserialized()
 	}
 
-	pub(super) async fn public_read_get(
-		&self,
-		room_id: &RoomId,
-		user_id: &UserId,
-	) -> Option<ReceiptEvent> {
-		type Key = (OwnedRoomId, u64, OwnedUserId);
-
-		let last_possible_key = (room_id, u64::MAX);
-		self.readreceiptid_readreceipt
-			.rev_stream_from(&last_possible_key)
-			.ignore_err()
-			.filter_map(|((stored_room, _, stored_user), event): (Key, ReceiptEvent)| {
-				std::future::ready(
-					(stored_room == room_id && stored_user == user_id).then_some(event),
-				)
-			})
-			.next()
-			.await
-	}
-
 	pub(super) async fn last_privateread_update(
 		&self,
 		user_id: &UserId,

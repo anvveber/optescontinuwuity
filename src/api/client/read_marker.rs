@@ -42,7 +42,10 @@ pub(crate) async fn set_read_marker_route(
 			.await?;
 	}
 
-	if body.private_read_receipt.is_some() || body.read_receipt.is_some() {
+	if body.fully_read.is_some()
+		|| body.private_read_receipt.is_some()
+		|| body.read_receipt.is_some()
+	{
 		services
 			.rooms
 			.user
@@ -126,7 +129,9 @@ pub(crate) async fn create_receipt_route(
 
 	if matches!(
 		&body.receipt_type,
-		create_receipt::v3::ReceiptType::Read | create_receipt::v3::ReceiptType::ReadPrivate
+		create_receipt::v3::ReceiptType::Read
+			| create_receipt::v3::ReceiptType::ReadPrivate
+			| create_receipt::v3::ReceiptType::FullyRead
 	) {
 		services
 			.rooms

@@ -3,10 +3,7 @@ use std::sync::Arc;
 use conduwuit::{Result, implement, utils::stream::TryIgnore};
 use database::{Database, Deserialized, Json, Map};
 use futures::{Stream, StreamExt};
-use ruma::{
-	OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, UserId, events::AnySyncTimelineEvent,
-	push::Action, serde::Raw,
-};
+use ruma::{OwnedUserId, RoomId, UserId, push::Action};
 
 use crate::{Dep, globals, rooms, rooms::short::ShortStateHash};
 
@@ -36,7 +33,8 @@ impl crate::Service for Service {
 				db: args.db.clone(),
 				userroomid_notificationcount: args.db["userroomid_notificationcount"].clone(),
 				userroomid_highlightcount: args.db["userroomid_highlightcount"].clone(),
-				roomuserid_lastnotificationread: args.db["userroomid_highlightcount"].clone(),
+				roomuserid_lastnotificationread: args.db["roomuserid_lastnotificationread"]
+					.clone(),
 				roomsynctoken_shortstatehash: args.db["roomsynctoken_shortstatehash"].clone(),
 				usernotificationid_notification: args.db["usernotificationid_notification"]
 					.clone(),
@@ -55,12 +53,7 @@ impl crate::Service for Service {
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize)]
 pub struct NotificationRecord {
 	pub actions: Vec<Action>,
-	pub event_id: OwnedEventId,
-	pub event_count: u64,
-	pub room_id: OwnedRoomId,
-	pub ts: u64,
-	#[serde(skip_serializing_if = "Option::is_none")]
-	pub event: Option<Raw<AnySyncTimelineEvent>>,
+	pub pdu_id: Vec<u8>,
 }
 
 #[implement(Service)]

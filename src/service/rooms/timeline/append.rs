@@ -197,10 +197,6 @@ where
 
 	let count2 = PduCount::Normal(self.services.globals.next_count().unwrap());
 	let pdu_id: RawPduId = PduId { shortroomid, shorteventid: count2 }.into();
-	let event_count = match count2 {
-		| PduCount::Normal(count) => count,
-		| _ => 0,
-	};
 
 	// Insert pdu
 	self.db.append_pdu(&pdu_id, pdu, &pdu_json, count2).await;
@@ -283,11 +279,7 @@ where
 					.user
 					.notification_insert(user, count, &NotificationRecord {
 						actions,
-						event_id: pdu.event_id().to_owned(),
-						event_count,
-						room_id: room_id.to_owned(),
-						ts: pdu.origin_server_ts().get().into(),
-						event: Some(serialized.clone()),
+						pdu_id: pdu_id.as_bytes().to_vec(),
 					});
 			}
 

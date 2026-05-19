@@ -1,9 +1,9 @@
 use axum::extract::State;
-use conduwuit::{Err, Error, Event, Result, err};
+use conduwuit::{Err, Error, Event, Result, debug_warn, err, matrix::pdu::RawPduId};
 use conduwuit_service::Services;
 use futures::{StreamExt, pin_mut};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, MilliSecondsSinceUnixEpoch,
+	CanonicalJsonObject, CanonicalJsonValue, UserId,
 	api::{
 		client::push::{
 			delete_pushrule, get_notifications, get_pushers, get_pushrule, get_pushrule_actions,
@@ -22,7 +22,7 @@ use ruma::{
 	},
 };
 
-use crate::Ruma;
+use crate::{Ruma, client::is_ignored_pdu};
 
 /// # `GET /_matrix/client/r0/pushrules/`
 ///
@@ -486,7 +486,6 @@ pub(crate) async fn get_notifications_route(
 	let mut notifications = Vec::with_capacity(limit);
 	let mut next_token = None;
 	let items = services.rooms.user.notifications_rev(sender_user, from);
-	let mut read_up_to = std::collections::BTreeMap::new();
 
 	pin_mut!(items);
 	while let Some((count, notification)) = items.next().await {
@@ -503,50 +502,13 @@ pub(crate) async fn get_notifications_route(
 			continue;
 		}
 
-		let read = if let Some(read) = read_up_to.get(&notification.room_id) {
-			*read
-		} else {
-			let public = services
-				.rooms
-				.read_receipt
-				.public_read_get_count(&notification.room_id, sender_user)
-				.await?
-				.unwrap_or(0);
-			let private = services
-				.rooms
-				.read_receipt
-				.private_read_get_count(&notification.room_id, sender_user)
-				.await
-				.unwrap_or(0);
-			let read = public.max(private);
-			read_up_to.insert(notification.room_id.clone(), read);
-			read
+		let Some(notification) =
+			build_notification(&services, sender_user, count, notification).await?
+		else {
+			continue;
 		};
 
-		let room_id = notification.room_id.clone();
-		let read = notification.event_count <= read;
-		let event = match notification.event {
-			| Some(event) => event,
-			| None => services
-				.rooms
-				.timeline
-				.get_pdu(&notification.event_id)
-				.await?
-				.to_format(),
-		};
-
-		notifications.push(get_notifications::v3::Notification::new(
-			notification.actions,
-			event,
-			read,
-			room_id,
-			MilliSecondsSinceUnixEpoch(
-				notification
-					.ts
-					.try_into()
-					.expect("stored notification ts fits UInt"),
-			),
-		));
+		notifications.push(notification);
 
 		if notifications.len() == limit {
 			next_token = count.checked_sub(1).map(|count| count.to_string());
@@ -557,6 +519,65 @@ pub(crate) async fn get_notifications_route(
 	let mut response = get_notifications::v3::Response::new(notifications);
 	response.next_token = next_token;
 	Ok(response)
+}
+
+async fn build_notification(
+	services: &Services,
+	sender_user: &UserId,
+	count: u64,
+	notification: conduwuit_service::rooms::user::NotificationRecord,
+) -> Result<Option<get_notifications::v3::Notification>> {
+	let pdu_id = RawPduId::from(notification.pdu_id.as_slice());
+	let mut pdu = match services.rooms.timeline.get_pdu_from_id(&pdu_id).await {
+		| Ok(pdu) => pdu,
+		| Err(e) => {
+			debug_warn!("Failed to load notification PDU: {e}");
+			return Ok(None);
+		},
+	};
+
+	let room_id = pdu.room_id_or_hash();
+	let last_read = services
+		.rooms
+		.user
+		.last_notification_read(sender_user, &room_id)
+		.await;
+
+	if !services
+		.rooms
+		.state_accessor
+		.user_can_see_event(sender_user, &room_id, pdu.event_id())
+		.await
+	{
+		return Ok(None);
+	}
+
+	if is_ignored_pdu(services, &pdu, sender_user)
+		.await
+		.unwrap_or(true)
+	{
+		return Ok(None);
+	}
+
+	if let Err(e) = services
+		.rooms
+		.pdu_metadata
+		.add_bundled_aggregations_to_pdu(sender_user, &mut pdu)
+		.await
+	{
+		debug_warn!("Failed to add bundled aggregations to notification event: {e}");
+	}
+
+	let ts = pdu.origin_server_ts();
+	pdu.set_unsigned(Some(sender_user));
+
+	Ok(Some(get_notifications::v3::Notification::new(
+		notification.actions,
+		pdu.into_format(),
+		count <= last_read,
+		room_id,
+		ts,
+	)))
 }
 
 /// # `POST /_matrix/client/r0/pushers/set`
@@ -582,7 +603,7 @@ pub(crate) async fn set_pushers_route(
 /// so recreate it and return server default silently
 pub async fn recreate_push_rules_and_return(
 	services: &Services,
-	sender_user: &ruma::UserId,
+	sender_user: &UserId,
 ) -> Result<get_pushrules_all::v3::Response> {
 	let global_ruleset = Ruleset::server_default(sender_user);
 	let event = PushRulesEvent::new(PushRulesEventContent::new(global_ruleset.clone()));
