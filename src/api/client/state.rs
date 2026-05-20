@@ -1,7 +1,11 @@
 #[cfg(test)]
 mod tests;
 use axum::extract::State;
-use conduwuit::{Err, Result, err, matrix::Event};
+use conduwuit::{
+	Err, Result, err,
+	matrix::Event,
+	pdu::{PartialPdu, sticky},
+};
 use futures::{FutureExt, TryStreamExt};
 use ruma::{
 	RoomId,
@@ -10,7 +14,10 @@ use ruma::{
 		get_state_events, send_state_event,
 	},
 };
-use serde_json::{json, value::to_raw_value};
+use serde_json::{
+	json,
+	value::{RawValue, to_raw_value},
+};
 
 use crate::{Ruma, RumaResponse, client_ip::ClientIp};
 
@@ -39,23 +46,28 @@ pub(crate) async fn send_state_event_for_key_route(
 		.lock::<RoomId>(&body.room_id)
 		.await;
 
+	let content: Box<RawValue> = serde_json::from_str(body.body.body.json().get())
+		.map_err(|e| err!(Request(BadJson("Invalid JSON body: {e}"))))?;
+
+	let timestamp = if body.identity.is_appservice() {
+		body.timestamp
+	} else {
+		None
+	};
+
+	let partial_pdu = PartialPdu {
+		event_type: body.event_type.to_string().into(),
+		content,
+		state_key: Some(body.state_key.clone().into()),
+		timestamp,
+		sticky: body.sticky_duration_ms.map(sticky::object),
+		..Default::default()
+	};
+
 	let event_id = services
 		.rooms
 		.timeline
-		.send_state_event_for_key(
-			sender_user,
-			&body.room_id,
-			&state_lock,
-			&body.event_type,
-			&body.body.body,
-			&body.state_key,
-			body.sticky_duration_ms,
-			if body.identity.is_appservice() {
-				body.timestamp
-			} else {
-				None
-			},
-		)
+		.send_timeline_event(sender_user, &body.room_id, &state_lock, partial_pdu)
 		.boxed()
 		.await?;
 

@@ -69,6 +69,7 @@ struct Services {
 	alias: Dep<rooms::alias::Service>,
 	event_handler: Dep<rooms::event_handler::Service>,
 	config: Dep<config::Service>,
+	directory: Dep<rooms::directory::Service>,
 	globals: Dep<globals::Service>,
 	pdu_metadata: Dep<rooms::pdu_metadata::Service>,
 	pusher: Dep<pusher::Service>,
@@ -101,6 +102,7 @@ impl crate::Service for Service {
 				admin: args.depend::<admin::Service>("admin"),
 				alias: args.depend::<rooms::alias::Service>("rooms::alias"),
 				config: args.depend::<config::Service>("config"),
+				directory: args.depend::<rooms::directory::Service>("rooms::directory"),
 				event_handler: args
 					.depend::<rooms::event_handler::Service>("rooms::event_handler"),
 				globals: args.depend::<globals::Service>("globals"),

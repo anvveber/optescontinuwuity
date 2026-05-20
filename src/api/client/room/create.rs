@@ -22,7 +22,7 @@ use ruma::{
 	},
 	assign,
 	events::{
-		AnyStateEventContent, StateEventType, TimelineEventType,
+		StateEventType, TimelineEventType,
 		room::{
 			canonical_alias::RoomCanonicalAliasEventContent,
 			create::RoomCreateEventContent,
@@ -42,7 +42,7 @@ use ruma::{
 };
 use ruminuwuity::invite_permission_config::FilterLevel;
 use serde::Deserialize;
-use serde_json::value::to_raw_value;
+use serde_json::value::{RawValue, to_raw_value};
 
 use crate::{Ruma, client::invite_helper};
 
@@ -525,28 +525,25 @@ pub(crate) async fn create_room_route(
 			))))
 		})?;
 
-		let content: Raw<AnyStateEventContent> =
-			event.get_field("content")?.ok_or_else(|| {
-				err!(Request(InvalidParam(warn!(
-					r#"Invalid initial state event: missing "content" field "#
-				))))
-			})?;
+		let content: Box<RawValue> = event.get_field("content")?.ok_or_else(|| {
+			err!(Request(InvalidParam(warn!(
+				r#"Invalid initial state event: missing "content" field "#
+			))))
+		})?;
 
 		let state_key: String = event.get_field("state_key")?.unwrap_or_default();
+
+		let partial_pdu = PartialPdu {
+			event_type: event_type.to_string().into(),
+			content,
+			state_key: Some(state_key.into()),
+			..Default::default()
+		};
 
 		match services
 			.rooms
 			.timeline
-			.send_state_event_for_key(
-				sender_user,
-				&room_id,
-				&state_lock,
-				&event_type,
-				&content,
-				&state_key,
-				None,
-				None,
-			)
+			.send_timeline_event(sender_user, &room_id, &state_lock, partial_pdu)
 			.boxed()
 			.await
 		{

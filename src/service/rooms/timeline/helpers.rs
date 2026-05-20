@@ -2,13 +2,13 @@
 
 pub(crate) use conduwuit::{
 	Err, Event, Result, err,
-	matrix::pdu::{PartialPdu, UnsignedContext, sticky},
+	matrix::pdu::{PartialPdu, UnsignedContext},
 	trace,
 };
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedEventId, RoomId, UserId,
+	OwnedEventId, RoomId, UserId,
 	events::{
-		AnyStateEventContent, AnyTimelineEvent, StateEventType,
+		AnyTimelineEvent, MessageLikeEventType, StateEventType,
 		room::{
 			canonical_alias::RoomCanonicalAliasEventContent,
 			history_visibility::{HistoryVisibility, RoomHistoryVisibilityEventContent},
@@ -16,56 +16,75 @@ use ruma::{
 			member::{MembershipState, RoomMemberEventContent},
 			server_acl::RoomServerAclEventContent,
 		},
-		sticky::StickyDurationMs,
 	},
 	serde::Raw,
 };
+use serde_json::{from_str, value::RawValue};
 
 use crate::rooms::state::RoomMutexGuard;
 
 impl super::Service {
-	#[allow(clippy::too_many_arguments)]
-	pub async fn send_state_event_for_key(
+	pub async fn send_timeline_event(
 		&self,
 		sender: &UserId,
 		room_id: &RoomId,
 		state_lock: &RoomMutexGuard,
-		event_type: &StateEventType,
-		content: &Raw<AnyStateEventContent>,
-		state_key: &str,
-		sticky_duration_ms: Option<StickyDurationMs>,
-		timestamp: Option<MilliSecondsSinceUnixEpoch>,
+		mut partial_pdu: PartialPdu,
 	) -> Result<OwnedEventId> {
-		let mut content: Raw<AnyStateEventContent> = content.clone();
-		self.assert_allowed_to_send_state_event(room_id, event_type, state_key, &mut content)
-			.await?;
+		match &partial_pdu.state_key {
+			| Some(state_key) => {
+				let modified_content = self
+					.assert_allowed_to_send_state_event(
+						room_id,
+						&partial_pdu.event_type.to_string().into(),
+						state_key,
+						&partial_pdu.content,
+					)
+					.await?;
 
-		let content = serde_json::from_str(content.json().get())
-			.map_err(|e| err!(Request(BadJson("Invalid JSON body: {e}"))))?;
+				if let Some(content) = modified_content {
+					partial_pdu.content = content;
+				}
+			},
+			| None => {
+				self.allowed_to_send_message_event(
+					room_id,
+					&partial_pdu.event_type.to_string().into(),
+				)
+				.await?;
+			},
+		}
+
+		if !self.services.config.allow_sticky_events {
+			partial_pdu.sticky = None;
+		}
 
 		let event_id = self
-			.build_and_append_pdu(
-				PartialPdu {
-					event_type: event_type.to_string().into(),
-					content,
-					sticky: self
-						.services
-						.config
-						.allow_sticky_events
-						.then_some(sticky_duration_ms)
-						.flatten()
-						.map(sticky::object),
-					state_key: Some(state_key.into()),
-					timestamp,
-					..Default::default()
-				},
-				sender,
-				Some(room_id),
-				state_lock,
-			)
+			.build_and_append_pdu(partial_pdu, sender, Some(room_id), state_lock)
 			.await?;
 
 		Ok(event_id)
+	}
+
+	async fn allowed_to_send_message_event(
+		&self,
+		room_id: &RoomId,
+		event_type: &MessageLikeEventType,
+	) -> Result {
+		if *event_type == MessageLikeEventType::CallInvite
+			&& self.services.directory.is_public_room(room_id).await
+		{
+			return Err!(Request(Forbidden("Room call invites are not allowed in public rooms")));
+		}
+
+		// Forbid m.room.encrypted if encryption is disabled
+		if MessageLikeEventType::RoomEncrypted == *event_type
+			&& !self.services.config.allow_encryption
+		{
+			return Err!(Request(Forbidden("Encryption has been disabled")));
+		}
+
+		Ok(())
 	}
 
 	async fn assert_allowed_to_send_state_event(
@@ -73,8 +92,8 @@ impl super::Service {
 		room_id: &RoomId,
 		event_type: &StateEventType,
 		state_key: &str,
-		json: &mut Raw<AnyStateEventContent>,
-	) -> Result {
+		json: &RawValue,
+	) -> Result<Option<Box<RawValue>>> {
 		match event_type {
 			| StateEventType::RoomCreate => {
 				return Err!(Request(BadJson(debug_warn!(
@@ -100,28 +119,28 @@ impl super::Service {
 			| StateEventType::RoomCanonicalAlias =>
 				self.assert_allowed_to_send_room_canonical_alias_event(room_id, json)
 					.await?,
-			| StateEventType::RoomMember =>
-				self.assert_allowed_to_send_room_member_event(room_id, state_key, json)
-					.await?,
+			| StateEventType::RoomMember => {
+				return self
+					.assert_allowed_to_send_room_member_event(room_id, state_key, json)
+					.await;
+			},
 			| _ => (),
 		}
 
-		Ok(())
+		Ok(None)
 	}
 
 	fn assert_allowed_to_send_room_server_acl_event(
 		&self,
 		room_id: &RoomId,
-		json: &Raw<AnyStateEventContent>,
+		json: &RawValue,
 	) -> Result {
 		// prevents common ACL paw-guns as ACL management is difficult and prone
 		// to irreversible mistakes
 
-		let acl_content = json
-			.deserialize_as_unchecked::<RoomServerAclEventContent>()
-			.map_err(|e| {
-				err!(Request(BadJson(debug_warn!("Room server ACL event is invalid: {e}"))))
-			})?;
+		let acl_content: RoomServerAclEventContent = from_str(json.get()).map_err(|e| {
+			err!(Request(BadJson(debug_warn!("Room server ACL event is invalid: {e}"))))
+		})?;
 
 		let allow_has_wildcard = acl_content.allow.iter().any(|entry| entry == "*");
 		let deny_has_wildcard = acl_content.deny.iter().any(|entry| entry == "*");
@@ -177,17 +196,15 @@ impl super::Service {
 	async fn assert_allowed_to_send_room_join_rules_event(
 		&self,
 		room_id: &RoomId,
-		json: &Raw<AnyStateEventContent>,
+		json: &RawValue,
 	) -> Result {
 		// admin room is a sensitive room, it should not ever be made public
 		if let Ok(admin_room_id) = self.services.admin.get_admin_room().await
 			&& admin_room_id == room_id
 		{
-			let join_rule = json
-				.deserialize_as_unchecked::<RoomJoinRulesEventContent>()
-				.map_err(|e| {
-					err!(Request(BadJson(debug_warn!("Room join rules event is invalid: {e}"))))
-				})?;
+			let join_rule: RoomJoinRulesEventContent = from_str(json.get()).map_err(|e| {
+				err!(Request(BadJson(debug_warn!("Room join rules event is invalid: {e}"))))
+			})?;
 
 			if join_rule.join_rule == JoinRule::Public {
 				return Err!(Request(Forbidden(
@@ -202,7 +219,7 @@ impl super::Service {
 	async fn assert_allowed_to_send_room_history_visibility_event(
 		&self,
 		room_id: &RoomId,
-		json: &Raw<AnyStateEventContent>,
+		json: &RawValue,
 	) -> Result {
 		// admin room is a sensitive room, it should not ever be made world
 		// readable
@@ -210,8 +227,7 @@ impl super::Service {
 		if let Ok(admin_room_id) = self.services.admin.get_admin_room().await
 			&& admin_room_id == room_id
 		{
-			let visibility_content = json
-				.deserialize_as_unchecked::<RoomHistoryVisibilityEventContent>()
+			let visibility_content: RoomHistoryVisibilityEventContent = from_str(json.get())
 				.map_err(|e| {
 					err!(Request(BadJson(debug_warn!(
 						"Room history visibility event is invalid: {e}"
@@ -231,10 +247,9 @@ impl super::Service {
 	async fn assert_allowed_to_send_room_canonical_alias_event(
 		&self,
 		room_id: &RoomId,
-		json: &Raw<AnyStateEventContent>,
+		json: &RawValue,
 	) -> Result {
-		let canonical_alias_content = json
-			.deserialize_as_unchecked::<RoomCanonicalAliasEventContent>()
+		let canonical_alias_content: RoomCanonicalAliasEventContent = from_str(json.get())
 			.map_err(|e| {
 				err!(Request(BadJson(debug_warn!("Room canonical alias event is invalid: {e}"))))
 			})?;
@@ -267,11 +282,10 @@ impl super::Service {
 		&self,
 		room_id: &RoomId,
 		state_key: &str,
-		json: &mut Raw<AnyStateEventContent>,
-	) -> Result {
-		let mut membership_content = json
-			.deserialize_as_unchecked::<RoomMemberEventContent>()
-			.map_err(|e| {
+		json: &RawValue,
+	) -> Result<Option<Box<RawValue>>> {
+		let mut membership_content: RoomMemberEventContent =
+			from_str(json.get()).map_err(|e| {
 				err!(Request(BadJson(debug_warn!("Room member event is invalid: {e}"))))
 			})?;
 
@@ -282,7 +296,7 @@ impl super::Service {
 		};
 
 		let Some(authorising_user) = membership_content.join_authorized_via_users_server else {
-			return Ok(());
+			return Ok(None);
 		};
 
 		// join_authorized_via_users_server must be thrown away, if user is
@@ -294,10 +308,10 @@ impl super::Service {
 			.await
 		{
 			membership_content.join_authorized_via_users_server = None;
-			*json = Raw::<AnyStateEventContent>::from_json_string(serde_json::to_string(
-				&membership_content,
-			)?)?;
-			return Ok(());
+			return Ok(Some(
+				RawValue::from_string(serde_json::to_string(&membership_content)?)
+					.expect("json has to be valid we just built it"),
+			));
 		}
 
 		if membership_content.membership != MembershipState::Join {
@@ -324,7 +338,7 @@ impl super::Service {
 			)));
 		}
 
-		Ok(())
+		Ok(None)
 	}
 
 	/// Fetches contextual unsigned information, like prev content, membership,
