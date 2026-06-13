@@ -69,9 +69,11 @@ impl Pdu {
 
 			if context.user_id.is_none_or(|u| u != self.sender()) {
 				unsigned.remove("transaction_id");
+				unsigned.remove("org.matrix.msc4140.delay_id");
 			}
 		} else {
 			unsigned.remove("transaction_id");
+			unsigned.remove("org.matrix.msc4140.delay_id");
 		}
 
 		if let Some(expires_at) = self

@@ -2,7 +2,7 @@ mod submission_queue;
 
 use std::{
 	borrow::Borrow,
-	collections::HashSet,
+	collections::{BTreeMap, HashSet},
 	fmt::Write,
 	sync::{
 		Arc,
@@ -252,11 +252,15 @@ impl Service {
 				let content: Box<RawValue> = serde_json::from_str(event.content.json().get())
 					.map_err(|e| err!(Request(BadJson("Invalid JSON body: {e}"))))?;
 
+				let mut unsigned = BTreeMap::new();
+				unsigned.insert("org.matrix.msc4140.delay_id".to_owned(), delay_id.clone().into());
+
 				let partial_pdu = PartialPdu {
 					event_type: event.event_type.to_string().into(),
 					content,
 					state_key: event.state_key.clone().map(Into::into),
 					timestamp: Some(timestamp),
+					unsigned: Some(unsigned),
 					..Default::default()
 				};
 
