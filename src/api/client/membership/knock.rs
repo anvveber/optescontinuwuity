@@ -1,7 +1,6 @@
 use std::{borrow::Borrow, collections::HashMap, iter::once, sync::Arc};
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug, debug_info, debug_warn, err, info,
 	matrix::{
@@ -45,10 +44,9 @@ use crate::Ruma;
 /// # `POST /_matrix/client/*/knock/{roomIdOrAlias}`
 ///
 /// Tries to knock the room to ask permission to join for the sender user.
-#[tracing::instrument(skip_all, fields(%client), name = "knock", level = "info")]
+#[tracing::instrument(skip_all, name = "knock", level = "info")]
 pub(crate) async fn knock_room_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<knock_room::v3::Request>,
 ) -> Result<knock_room::v3::Response> {
 	let sender_user = body.identity.expect_sender_user()?;
@@ -59,14 +57,8 @@ pub(crate) async fn knock_room_route(
 
 	let (servers, room_id) = match OwnedRoomId::try_from(body.room_id_or_alias.clone()) {
 		| Ok(room_id) => {
-			banned_room_check(
-				&services,
-				sender_user,
-				Some(&room_id),
-				room_id.server_name(),
-				client,
-			)
-			.await?;
+			banned_room_check(&services, sender_user, Some(&room_id), room_id.server_name())
+				.await?;
 
 			let mut servers = body.via.clone();
 			servers.extend(
@@ -109,7 +101,6 @@ pub(crate) async fn knock_room_route(
 				sender_user,
 				Some(&room_id),
 				Some(room_alias.server_name()),
-				client,
 			)
 			.await?;
 

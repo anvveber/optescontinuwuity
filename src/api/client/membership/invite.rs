@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, debug_error, err, info,
 	matrix::{event::gen_event_id_canonical_json, pdu::PartialPdu},
@@ -23,10 +22,9 @@ use crate::Ruma;
 /// # `POST /_matrix/client/r0/rooms/{roomId}/invite`
 ///
 /// Tries to send an invite event into the room.
-#[tracing::instrument(skip_all, fields(%client), name = "invite", level = "info")]
+#[tracing::instrument(skip_all, name = "invite", level = "info")]
 pub(crate) async fn invite_user_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<invite_user::v3::Request>,
 ) -> Result<invite_user::v3::Response> {
 	let sender_user = body.identity.expect_sender_user()?;
@@ -42,14 +40,8 @@ pub(crate) async fn invite_user_route(
 		return Err!(Request(Forbidden("Invites are not allowed on this server.")));
 	}
 
-	banned_room_check(
-		&services,
-		sender_user,
-		Some(&body.room_id),
-		body.room_id.server_name(),
-		client,
-	)
-	.await?;
+	banned_room_check(&services, sender_user, Some(&body.room_id), body.room_id.server_name())
+		.await?;
 
 	match &body.recipient {
 		| invite_user::v3::InvitationRecipient::UserId(InviteUserId {

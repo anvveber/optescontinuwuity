@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{Err, Result, err};
 use ruma::{
 	api::federation::directory::{get_public_rooms, get_public_rooms_filtered},
@@ -12,10 +11,9 @@ use crate::Ruma;
 /// # `POST /_matrix/federation/v1/publicRooms`
 ///
 /// Lists the public rooms on this server.
-#[tracing::instrument(name = "publicrooms", level = "debug", skip_all, fields(%client))]
+#[tracing::instrument(name = "publicrooms", level = "debug", skip_all)]
 pub(crate) async fn get_public_rooms_filtered_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_public_rooms_filtered::v1::Request>,
 ) -> Result<get_public_rooms_filtered::v1::Response> {
 	if !services
@@ -48,10 +46,9 @@ pub(crate) async fn get_public_rooms_filtered_route(
 /// # `GET /_matrix/federation/v1/publicRooms`
 ///
 /// Lists the public rooms on this server.
-#[tracing::instrument(name = "publicrooms", level = "debug", skip_all, fields(%client))]
+#[tracing::instrument(name = "publicrooms", level = "debug", skip_all)]
 pub(crate) async fn get_public_rooms_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_public_rooms::v1::Request>,
 ) -> Result<get_public_rooms::v1::Response> {
 	if !services

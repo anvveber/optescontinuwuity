@@ -1,5 +1,4 @@
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Result, err, info,
 	pdu::PartialPdu,
@@ -43,10 +42,9 @@ pub(crate) mod threepid;
 ///
 /// Note: This will not reserve the username, so the username might become
 /// invalid when trying to register
-#[tracing::instrument(skip_all, fields(%client), name = "register_available", level = "info")]
+#[tracing::instrument(skip_all, name = "register_available", level = "info")]
 pub(crate) async fn get_register_available_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_username_availability::v3::Request>,
 ) -> Result<get_username_availability::v3::Response> {
 	let _ = services
@@ -80,10 +78,9 @@ pub(crate) async fn get_register_available_route(
 ///   last seen ts)
 /// - Forgets to-device events
 /// - Triggers device list updates
-#[tracing::instrument(skip_all, fields(%client), name = "change_password", level = "info")]
+#[tracing::instrument(skip_all, name = "change_password", level = "info")]
 pub(crate) async fn change_password_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<change_password::v3::Request>,
 ) -> Result<change_password::v3::Response> {
 	let identity = if let Some(identity) = body.identity.as_ref() {
@@ -248,10 +245,9 @@ pub(crate) async fn whoami_route(
 /// - Forgets all to-device events
 /// - Triggers device list updates
 /// - Removes ability to log in again
-#[tracing::instrument(skip_all, fields(%client), name = "deactivate", level = "info")]
+#[tracing::instrument(skip_all, name = "deactivate", level = "info")]
 pub(crate) async fn deactivate_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<deactivate::v3::Request>,
 ) -> Result<deactivate::v3::Response> {
 	// Authentication for this endpoint is technically optional,

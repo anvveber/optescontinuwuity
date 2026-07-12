@@ -1,7 +1,6 @@
 use std::collections::{HashMap, hash_map::Entry};
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use base64::{Engine as _, engine::general_purpose};
 use conduwuit::{
 	Err, Error, EventTypeExt, PduEvent, Result, debug, err, error,
@@ -28,10 +27,9 @@ use crate::{Ruma, server::utils::validate_any_membership_event};
 /// # `PUT /_matrix/federation/v2/invite/{roomId}/{eventId}`
 ///
 /// Invites a remote user to a room.
-#[tracing::instrument(skip_all, fields(%client), name = "invite", level = "info")]
+#[tracing::instrument(skip_all, name = "invite", level = "info")]
 pub(crate) async fn create_invite_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<create_invite::v2::Request>,
 ) -> Result<create_invite::v2::Response> {
 	if !services.server.supported_room_version(&body.room_version) {

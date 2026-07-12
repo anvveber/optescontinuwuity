@@ -35,7 +35,7 @@ use crate::{Ruma, RumaResponse};
 /// Sends a state event into the room.
 pub(crate) async fn send_state_event_for_key_route(
 	State(services): State<crate::State>,
-	ClientIp(ip): ClientIp,
+	ClientIp(ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<send_state_event::v3::Request>,
 ) -> Result<send_state_event::v3::Response> {
 	let sender_user = body.identity.expect_sender_user()?;
@@ -72,7 +72,7 @@ pub(crate) async fn send_state_event_for_key_route(
 /// Sends a state event into the room.
 pub(crate) async fn send_state_event_for_empty_key_route(
 	State(services): State<crate::State>,
-	ClientIp(ip): ClientIp,
+	ClientIp(ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<send_state_event::v3::Request>,
 ) -> Result<RumaResponse<send_state_event::v3::Response>> {
 	send_state_event_for_key_route(State(services), ClientIp(ip), body)

@@ -14,7 +14,7 @@ use crate::Ruma;
 /// - TODO: Handle txn id
 pub(crate) async fn redact_event_route(
 	State(services): State<crate::State>,
-	ClientIp(client_ip): ClientIp,
+	ClientIp(client_ip): ClientIp, // NOTE: required for updating device metadata
 	body: Ruma<redact_event::v3::Request>,
 ) -> Result<redact_event::v3::Response> {
 	let sender_user = body.identity.expect_sender_user()?;
