@@ -1,4 +1,8 @@
-use std::{cmp, collections::HashMap, future::ready};
+use std::{
+	cmp,
+	collections::{HashMap, HashSet},
+	future::ready,
+};
 
 use conduwuit::{
 	Err, Event, Pdu, Result, debug, debug_info, debug_warn, err, error, info,
@@ -855,6 +859,14 @@ async fn split_userid_password(services: &Services) -> Result {
 	let userid_password = db["userid_password"].clone();
 	let remoteuserid_remoteuser = db["remoteuserid_remoteuser"].clone();
 	let userid_deactivated = db["userid_deactivated"].clone();
+	let openidsubject_localpart = db["openidsubject_localpart"].clone();
+
+	let openid_localparts: HashSet<OwnedUserId> = openidsubject_localpart
+		.stream::<String, OwnedUserId>()
+		.ignore_err()
+		.map(|(_, localpart)| localpart)
+		.collect()
+		.await;
 
 	let remote_users = userid_password
 		.stream::<OwnedUserId, String>()
@@ -870,8 +882,10 @@ async fn split_userid_password(services: &Services) -> Result {
 				if !(services.appservice.is_user_id(&user_id).await
 					|| user_id == services.globals.server_user)
 				{
-					info!("Marking {user_id} as deactivated");
-					userid_deactivated.insert(&user_id, "");
+					if !openid_localparts.contains(&user_id) {
+						info!("Marking {user_id} as deactivated");
+						userid_deactivated.insert(&user_id, "");
+					}
 				}
 			}
 

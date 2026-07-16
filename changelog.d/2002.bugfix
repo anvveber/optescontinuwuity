@@ -1,0 +1,1 @@
+Fixed OIDC users getting deactivated by the empty password check during migrations. Contributed by @kv318
