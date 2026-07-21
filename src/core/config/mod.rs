@@ -29,7 +29,7 @@ use ruma::{
 	profile::ProfileFieldName,
 	serde::Base64,
 };
-use serde::{Deserialize, Serialize, de::IgnoredAny};
+use serde::{Deserialize, Deserializer, Serialize, de::IgnoredAny};
 use url::Url;
 
 use self::proxy::ProxyConfig;
@@ -148,6 +148,11 @@ pub struct Config {
 	///
 	/// example: "/var/lib/conduwuit"
 	pub database_path: PathBuf,
+
+	/// Type of file storage to use. Available options:
+	/// - `filesystem` - Stores data to the location defined by `database_path`
+	#[serde(default = "default_file_storage_type")]
+	pub file_storage_type: String,
 
 	/// continuwuity supports online database backups using RocksDB's Backup
 	/// engine API. To use this, set a database backup path that continuwuity
@@ -3065,6 +3070,8 @@ fn default_address() -> ListeningAddr {
 fn default_port() -> ListeningPort { ListeningPort { ports: Left(8008) } }
 
 fn default_unix_socket_perms() -> u32 { 660 }
+
+fn default_file_storage_type() -> String { String::from("filesystem") }
 
 fn default_database_backups_to_keep() -> i16 { 1 }
 

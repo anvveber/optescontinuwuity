@@ -133,6 +133,8 @@ pub enum Error {
 	StateRes(#[from] crate::state_res::Error),
 	#[error("uiaa")]
 	Uiaa(ruma::api::client::uiaa::UiaaInfo),
+	#[error("{0}")]
+	Media(Cow<'static, str>),
 
 	// unique / untyped
 	#[error("{0}")]

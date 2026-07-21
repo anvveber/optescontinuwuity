@@ -91,6 +91,11 @@
 #
 #database_path =
 
+# Type of file storage to use. Available options:
+# - `filesystem` - Stores data to the location defined by `database_path`
+#
+#file_storage_type =
+
 # continuwuity supports online database backups using RocksDB's Backup
 # engine API. To use this, set a database backup path that continuwuity
 # can write to.

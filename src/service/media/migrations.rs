@@ -58,7 +58,7 @@ pub(crate) async fn migrate_sha256_media(services: &Services) -> Result<()> {
 /// - Deletion of artifacts in the media directory which will then fall out of
 ///   sync with the database.
 pub(crate) async fn checkup_sha256_media(services: &Services) -> Result<()> {
-	use crate::media::encode_key;
+	use crate::media::base64_encode_key;
 
 	debug!("Checking integrity of media directory");
 	let db = &services.db;
@@ -80,7 +80,7 @@ pub(crate) async fn checkup_sha256_media(services: &Services) -> Result<()> {
 		if let Err(e) = handle_media_check(&dbs, config, &files, &key, &new_path, &old_path).await
 		{
 			error!(
-				media_id = ?encode_key(&key), ?new_path, ?old_path,
+				media_id = ?base64_encode_key(&key), ?new_path, ?old_path,
 				"Failed to resolve media check failure: {e}"
 			);
 		}
@@ -102,7 +102,7 @@ async fn handle_media_check(
 	new_path: &OsStr,
 	old_path: &OsStr,
 ) -> Result<()> {
-	use crate::media::encode_key;
+	use crate::media::base64_encode_key;
 
 	let (mediaid_file, mediaid_user) = dbs;
 
@@ -116,7 +116,7 @@ async fn handle_media_check(
 
 	if config.prune_missing_media && !old_exists && !new_exists {
 		error!(
-			media_id = ?encode_key(key), ?new_path, ?old_path,
+			media_id = ?base64_encode_key(key), ?new_path, ?old_path,
 			"Media is missing at all paths. Removing from database..."
 		);
 
@@ -126,7 +126,7 @@ async fn handle_media_check(
 
 	if config.media_compat_file_link && !old_exists && new_exists {
 		debug_warn!(
-			media_id = ?encode_key(key), ?new_path, ?old_path,
+			media_id = ?base64_encode_key(key), ?new_path, ?old_path,
 			"Media found but missing legacy link. Fixing..."
 		);
 
@@ -135,7 +135,7 @@ async fn handle_media_check(
 
 	if config.media_compat_file_link && !new_exists && old_exists {
 		debug_warn!(
-			media_id = ?encode_key(key), ?new_path, ?old_path,
+			media_id = ?base64_encode_key(key), ?new_path, ?old_path,
 			"Legacy media found without sha256 migration. Fixing..."
 		);
 
@@ -150,7 +150,7 @@ async fn handle_media_check(
 
 	if !config.media_compat_file_link && old_exists && old_is_symlink().await {
 		debug_warn!(
-			media_id = ?encode_key(key), ?new_path, ?old_path,
+			media_id = ?base64_encode_key(key), ?new_path, ?old_path,
 			"Legacy link found but compat disabled. Cleansing symlink..."
 		);
 
