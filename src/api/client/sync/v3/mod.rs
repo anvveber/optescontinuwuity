@@ -476,9 +476,8 @@ async fn process_presence_updates(
 		.presence_since(last_sync_end_count.unwrap_or(0)) // send all presences on initial sync
 		.filter(|(user_id, ..)| {
 			services
-				.rooms
-				.state_cache
-				.user_sees_user(syncing_user, user_id)
+				.presence
+				.can_view_presence(syncing_user, user_id)
 		})
 		.filter_map(|(user_id, _, presence_bytes)| {
 			services

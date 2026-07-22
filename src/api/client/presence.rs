@@ -37,8 +37,6 @@ pub(crate) async fn set_presence_route(
 /// # `GET /_matrix/client/r0/presence/{userId}/status`
 ///
 /// Gets the presence state of the given user.
-///
-/// - Only works if you share a room with the user
 pub(crate) async fn get_presence_route(
 	State(services): State<crate::State>,
 	body: Ruma<get_presence::v3::Request>,
@@ -48,13 +46,13 @@ pub(crate) async fn get_presence_route(
 	}
 
 	let mut presence_event = None;
-	let has_shared_rooms = services
-		.rooms
-		.state_cache
-		.user_sees_user(body.identity.expect_sender_user()?, &body.user_id)
+
+	let can_see_presence = services
+		.presence
+		.can_view_presence(body.identity.expect_sender_user()?, &body.user_id)
 		.await;
 
-	if has_shared_rooms {
+	if can_see_presence {
 		if let Ok(presence) = services.presence.get_presence(&body.user_id).await {
 			presence_event = Some(presence);
 		}
