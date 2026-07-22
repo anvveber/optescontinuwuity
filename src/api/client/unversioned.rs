@@ -31,6 +31,11 @@ pub(crate) async fn get_supported_versions_route(
 		unstable_features.insert("org.matrix.msc4354".to_owned(), true);
 	}
 
+	if services.config.enable_msc4495_selective_presence {
+		// selective presence (https://github.com/matrix-org/matrix-spec-proposals/pull/4495)
+		unstable_features.insert("org.continuwuity.presence_v2.msc4495".to_owned(), true);
+	}
+
 	Ok(assign!(get_supported_versions::Response::new(versions()), {
 		unstable_features
 	}))

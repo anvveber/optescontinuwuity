@@ -1696,6 +1696,18 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub presence_timeout_remote_users: bool,
 
+	/// Whether to enable [MSC4495] Selective Presence.
+	///
+	/// Enabling Selective Presence will disable all forms of presence sharing
+	/// by default. Users will need to use MSC4495-compatible clients to
+	/// explicitly opt in to presence sharing with other users.
+	///
+	/// If this is enabled, you probably also want to set `allow_outgoing_presence`.
+	///
+	/// [MSC4495]: https://github.com/matrix-org/matrix-spec-proposals/pull/4495
+	#[serde(default)]
+	pub enable_msc4495_selective_presence: bool,
+
 	/// Allow local read receipts.
 	///
 	/// Disabling this will effectively also disable outgoing federated read
