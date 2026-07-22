@@ -22,7 +22,7 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use ruma::{
-	CanonicalJsonObject, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
+	CanonicalJsonObject, Int, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 	api::{
 		error::{ErrorKind, LimitExceededErrorData},
 		federation::transactions::{
@@ -401,6 +401,65 @@ async fn handle_edu_presence_update(
 			"received presence EDU for user not belonging to origin"
 		);
 		return;
+	}
+
+	if let Some(stream_id) = update.stream_id {
+		let stream_id: i64 = stream_id.into();
+
+		let current_recipients = services
+			.presence
+			.get_recipients(&update.user_id)
+			.await
+			.unwrap_or_default();
+
+		match update.prev_id {
+			| None if current_recipients.stream_id == stream_id => {
+				// Stream ID matches our last known ID for this user, no changes
+				// needed
+			},
+			| None => {
+				// We don't know this stream ID, fetch the full list from the
+				// origin
+				services
+					.presence
+					.fetch_and_store_remote_recipients(&update.user_id)
+					.await
+					.ok();
+			},
+
+			// Incremental update
+			| Some(prev_id)
+				if current_recipients.stream_id == <Int as Into<i64>>::into(prev_id) =>
+			{
+				// Stream ID matches our last known ID for this user, apply the incremental
+				// update
+				services
+					.presence
+					.apply_recipients_delta(&update.user_id, stream_id, update.recipients)
+					.await
+					.ok();
+			},
+
+			| Some(_prev_id) => {
+				// Stream ID does not match our last known ID for this user, we
+				// have desynced. Fetch the full list from the origin.
+				services
+					.presence
+					.fetch_and_store_remote_recipients(&update.user_id)
+					.await
+					.ok();
+			},
+		}
+	} else {
+		// The sending server is not using MSC4495, we distribute presence to
+		// all local users
+
+		// In the case that a remote server disabled Selective Presence, we
+		// remove this user's recipients tracking data so we can share with
+		// all local users again.
+		if services.presence.has_recipients(&update.user_id).await {
+			services.presence.remove_recipients(&update.user_id).await;
+		}
 	}
 
 	services
