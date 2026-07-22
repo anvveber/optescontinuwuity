@@ -14,8 +14,10 @@ use itertools::Itertools;
 use loole::{Receiver, Sender};
 pub use recipients::PresenceRecipients;
 use ruma::{
-OwnedUserId, UInt, UserId,
-	api::federation::transactions::edu::{PresenceRecipientListUpdates, PresenceUpdate},
+	OwnedUserId, UInt, UserId,
+	api::federation::transactions::edu::{
+		Edu, PresenceContent, PresenceRecipientListUpdates, PresenceUpdate,
+	},
 	events::{
 		GlobalAccountDataEventType, StateEventType,
 		presence::{
@@ -178,7 +180,13 @@ impl Service {
 		};
 
 		self.db
-			.set_presence(user_id, presence_state, currently_active, last_active_ago, status_msg)
+			.set_presence(
+				user_id,
+				presence_state,
+				currently_active,
+				last_active_ago,
+				status_msg.clone(),
+			)
 			.await?;
 
 		if (self.timeout_remote_users || self.services.globals.user_is_local(user_id))
@@ -196,6 +204,100 @@ impl Service {
 					error!("Failed to add presence timer: {}", e);
 					Error::bad_database("Failed to add presence timer")
 				})?;
+		}
+
+		if user_id.server_name() != self.services.globals.server_name()
+			|| !self.services.config.allow_outgoing_presence
+		{
+			return Ok(());
+		}
+
+		let mut update = PresenceUpdate::new(
+			user_id.to_owned(),
+			presence_state.clone(),
+			last_active_ago.unwrap_or_else(|| uint!(0)),
+		);
+		if let Some(currently_active) = currently_active {
+			update.currently_active = currently_active;
+		}
+		update.status_msg = status_msg.clone();
+
+		// The destination servers we send presence to.
+		// For legacy (non MSC4495) presence, we send to all servers that can
+		// see the user.
+		let destinations = if !self.services.config.enable_msc4495_selective_presence {
+			self.services.state_cache.servers_seeing_user(user_id).await
+		} else {
+			let prev_recipients = self.get_recipients(user_id).await.unwrap_or_default();
+
+			// We add the selective presence fields to the update for all
+			// servers, then in a later step we split it by destination
+			// server.
+			match self.calculate_and_persist_recipient_users(user_id).await {
+				| Ok(Some((new_stream_id, delta))) => {
+					update.prev_id = Some(
+						prev_recipients
+							.stream_id
+							.try_into()
+							.expect("js_int overflowed"),
+					);
+					update.stream_id = Some(new_stream_id.try_into().expect("js_int overflowed"));
+					update.recipients = delta;
+				},
+				| Ok(None) => {
+					update.stream_id = Some(
+						prev_recipients
+							.stream_id
+							.try_into()
+							.expect("js_int overflowed"),
+					);
+				},
+				| Err(e) => {
+					warn!("Failed to calculate presence recipients for {user_id}: {e}");
+				},
+			}
+
+			// For MSC4495 selective presence, we send to all servers in the
+			// previous set or the new changed set.
+			prev_recipients
+				.recipient_users
+				.iter()
+				.chain(update.recipients.add.iter())
+				.chain(update.recipients.delete.iter())
+				.map(|u| u.server_name().to_owned())
+				.dedup()
+				.collect::<Vec<_>>()
+		};
+
+		for server in destinations {
+			if server == self.services.globals.server_name() {
+				continue;
+			}
+
+			let mut server_update = update.clone();
+
+			// filter the recipients to only include users on this server
+			server_update
+				.recipients
+				.add
+				.retain(|user_id| user_id.server_name() == server);
+			server_update
+				.recipients
+				.delete
+				.retain(|user_id| user_id.server_name() == server);
+
+			debug!(
+				"Sending presence EDU for {user_id} to server {server} (recipients: +{}, -{})",
+				server_update.recipients.add.len(),
+				server_update.recipients.delete.len()
+			);
+			let mut buf = EduBuf::new();
+			serde_json::to_writer(
+				&mut buf,
+				&Edu::Presence(PresenceContent::new(vec![server_update])),
+			)
+			.expect("PresenceUpdate EDU can be serialized");
+			self.services.sending.send_edu_server(&server, buf)?;
 		}
 
 		Ok(())

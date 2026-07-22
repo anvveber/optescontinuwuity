@@ -13,7 +13,6 @@ use conduwuit::{debug_info, debug_warn, info, trace};
 use conduwuit_core::{
 	Error, Event, Result, at, debug, err, error,
 	matrix::pdu::sticky,
-	result::LogErr,
 	utils::{
 		ReadyExt, calculate_hash,
 		future::TryExtExt,
@@ -34,10 +33,7 @@ use ruma::{
 	api::{
 		appservice::event::push_events::v1::EphemeralData,
 		federation::transactions::{
-			edu::{
-				DeviceListUpdateContent, Edu, PresenceContent, PresenceUpdate, ReceiptContent,
-				ReceiptData, ReceiptMap,
-			},
+			edu::{DeviceListUpdateContent, Edu, ReceiptContent, ReceiptData, ReceiptMap},
 			send_transaction_message,
 		},
 	},
@@ -67,7 +63,6 @@ type SendingFuture<'a> = BoxFuture<'a, SendingResult>;
 type SendingFutures<'a> = FuturesUnordered<SendingFuture<'a>>;
 type CurTransactionStatus = HashMap<Destination, TransactionStatus>;
 
-const SELECT_PRESENCE_LIMIT: usize = 256;
 const SELECT_RECEIPT_LIMIT: usize = 256;
 const SELECT_EDU_LIMIT: usize = EDU_LIMIT - 2;
 const DEQUEUE_LIMIT: usize = 48;
@@ -492,17 +487,9 @@ impl Service {
 			.then(|| self.select_edus_receipts(server_name, batch, &max_edu_count))
 			.into();
 
-		let presence: OptionFuture<_> = self
-			.server
-			.config
-			.allow_outgoing_presence
-			.then(|| self.select_edus_presence(server_name, batch, &max_edu_count))
-			.into();
-
-		let (device_changes, receipts, presence) = join!(device_changes, receipts, presence);
+		let (device_changes, receipts) = join!(device_changes, receipts);
 
 		let mut events = device_changes;
-		events.extend(presence.into_iter().flatten());
 		events.extend(receipts.into_iter().flatten());
 
 		// TODO(nex): some EDUs like typing need flattening
@@ -672,82 +659,6 @@ impl Service {
 		}
 
 		ReceiptMap::new(read)
-	}
-
-	/// Look for presence
-	#[tracing::instrument(
-		name = "presence",
-		level = "trace",
-		skip(self, server_name, max_edu_count)
-	)]
-	async fn select_edus_presence(
-		&self,
-		server_name: &ServerName,
-		since: (u64, u64),
-		max_edu_count: &AtomicU64,
-	) -> Option<EduBuf> {
-		let presence_since = self.services.presence.presence_since(since.0);
-
-		pin_mut!(presence_since);
-		let mut presence_updates = HashMap::<OwnedUserId, PresenceUpdate>::new();
-		while let Some((user_id, count, presence_bytes)) = presence_since.next().await {
-			if count > since.1 {
-				break;
-			}
-
-			max_edu_count.fetch_max(count, Ordering::Relaxed);
-			if !self.services.globals.user_is_local(user_id) {
-				continue;
-			}
-
-			if !self
-				.services
-				.state_cache
-				.server_sees_user(server_name, user_id)
-				.await
-			{
-				continue;
-			}
-
-			let Ok(presence_event) = self
-				.services
-				.presence
-				.from_json_bytes_to_event(presence_bytes, user_id)
-				.await
-				.log_err()
-			else {
-				continue;
-			};
-
-			let mut update = PresenceUpdate::new(
-				user_id.to_owned(),
-				presence_event.content.presence,
-				presence_event
-					.content
-					.last_active_ago
-					.unwrap_or_else(|| uint!(0)),
-			);
-			update.currently_active = presence_event.content.currently_active.unwrap_or_default();
-			update.status_msg = presence_event.content.status_msg;
-
-			presence_updates.insert(user_id.into(), update);
-			if presence_updates.len() >= SELECT_PRESENCE_LIMIT {
-				break;
-			}
-		}
-
-		if presence_updates.is_empty() {
-			return None;
-		}
-
-		let presence_content =
-			Edu::Presence(PresenceContent::new(presence_updates.into_values().collect()));
-
-		let mut buf = EduBuf::new();
-		serde_json::to_writer(&mut buf, &presence_content)
-			.expect("failed to serialize Presence EDU to JSON");
-
-		Some(buf)
 	}
 
 	/// Actually sends fetched events to the destination.

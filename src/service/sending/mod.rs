@@ -38,7 +38,7 @@ pub use self::{
 use crate::{
 	Dep, account_data, client,
 	federation::{self, FederationPathBuilderInput},
-	globals, presence, pusher,
+	globals, pusher,
 	rooms::{self, timeline::RawPduId},
 	users,
 };
@@ -56,7 +56,6 @@ struct Services {
 	state_cache: Dep<rooms::state_cache::Service>,
 	user: Dep<rooms::user::Service>,
 	users: Dep<users::Service>,
-	presence: Dep<presence::Service>,
 	read_receipt: Dep<rooms::read_receipt::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 	account_data: Dep<account_data::Service>,
@@ -99,7 +98,6 @@ impl crate::Service for Service {
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				user: args.depend::<rooms::user::Service>("rooms::user"),
 				users: args.depend::<users::Service>("users"),
-				presence: args.depend::<presence::Service>("presence"),
 				read_receipt: args.depend::<rooms::read_receipt::Service>("rooms::read_receipt"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 				account_data: args.depend::<account_data::Service>("account_data"),

@@ -191,6 +191,27 @@ impl Service {
 			.await
 	}
 
+	/// Returns all servers that can see a user by sharing at least one room.
+	pub async fn servers_seeing_user(&self, user_id: &UserId) -> Vec<OwnedServerName> {
+		let rooms = self
+			.rooms_joined(user_id)
+			.collect::<Vec<OwnedRoomId>>()
+			.await;
+		let mut servers = Vec::new();
+
+		for room_id in rooms {
+			servers.extend(
+				self.room_servers(&room_id)
+					.collect::<Vec<OwnedServerName>>()
+					.await,
+			);
+		}
+
+		servers.sort_unstable();
+		servers.dedup();
+		servers
+	}
+
 	/// Returns true if user_a and user_b share at least one room.
 	pub async fn user_sees_user(&self, user_a: &UserId, user_b: &UserId) -> bool {
 		let get_shared_rooms = self.get_shared_rooms(user_a, user_b);
