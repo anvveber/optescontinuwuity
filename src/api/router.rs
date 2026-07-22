@@ -222,6 +222,7 @@ pub fn build(router: Router<State>, state: State) -> Router<State> {
 			.ruma_route(&server::get_devices_route)
 			.ruma_route(&server::get_room_information_route)
 			.ruma_route(&server::get_profile_information_route)
+			.ruma_route(&server::get_presence_recipients_route)
 			.ruma_route(&server::get_keys_route)
 			.ruma_route(&server::claim_keys_route)
 			.ruma_route(&server::get_openid_userinfo_route)

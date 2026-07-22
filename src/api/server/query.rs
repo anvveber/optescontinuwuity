@@ -3,8 +3,10 @@ use conduwuit::{Err, Result, err};
 use futures::StreamExt;
 use rand::seq::SliceRandom;
 use ruma::{
-	OwnedServerName,
-	api::federation::query::{get_profile_information, get_room_information},
+	Int, OwnedServerName,
+	api::federation::query::{
+		get_presence_recipients, get_profile_information, get_room_information,
+	},
 };
 
 use crate::Ruma;
@@ -91,4 +93,36 @@ pub(crate) async fn get_profile_information_route(
 	};
 
 	Ok(response)
+}
+
+/// # `GET /_matrix/federation/unstable/org.continuwuity.presence_v2.msc4495/query/presence_recipients`
+///
+/// Gets the list of users that may access a given local user's presence
+/// information.
+pub(crate) async fn get_presence_recipients_route(
+	State(services): State<crate::State>,
+	body: Ruma<get_presence_recipients::msc4495::Request>,
+) -> Result<get_presence_recipients::msc4495::Response> {
+	if !services.server.config.enable_msc4495_selective_presence {
+		return Err!(Request(Unrecognized("MSC4495 is not enabled on this server.")));
+	}
+
+	if body.user_id.server_name() != services.globals.server_name() {
+		return Err!(Request(InvalidParam("User does not belong to this server.")));
+	}
+
+	let last_recipients_set = services.presence.get_recipients(&body.user_id).await?;
+
+	let recipients = last_recipients_set
+		.recipient_users
+		.into_iter()
+		.filter(|user| user.server_name() == body.identity)
+		.collect();
+
+	// We base our generated stream IDs on `last_count`, but JS Number types
+	// cannot represent 64 bit integers well. We will reasonably never
+	// encounter that here, and if we do, we error.
+	let stream_id = Int::try_from(last_recipients_set.stream_id).expect("js_int overflow!");
+
+	Ok(get_presence_recipients::msc4495::Response::new(stream_id, recipients))
 }
