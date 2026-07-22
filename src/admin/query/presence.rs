@@ -20,6 +20,12 @@ pub enum PresenceCommand {
 		/// UNIX timestamp since (u64)
 		since: u64,
 	},
+
+	/// Returns the list of users allowed to see a given user's presence.
+	GetRecipientUsers {
+		/// Full user ID
+		user_id: OwnedUserId,
+	},
 }
 
 /// All the getters and iterators in key_value/presence.rs
@@ -42,6 +48,19 @@ pub(super) async fn process(subcommand: PresenceCommand, context: &Context<'_>) 
 				.map(|(user_id, count, bytes)| (user_id.to_owned(), count, bytes.to_vec()))
 				.collect()
 				.await;
+			let query_time = timer.elapsed();
+
+			write!(context, "Query completed in {query_time:?}:\n\n```rs\n{results:#?}\n```")
+		},
+		| PresenceCommand::GetRecipientUsers { .. }
+			if !services.config.enable_msc4495_selective_presence =>
+		{
+			write!(context, "This command requires MSC4495 to be enabled.")
+		},
+		| PresenceCommand::GetRecipientUsers { user_id } => {
+			let timer = tokio::time::Instant::now();
+
+			let results = services.presence.get_recipients(&user_id).await;
 			let query_time = timer.elapsed();
 
 			write!(context, "Query completed in {query_time:?}:\n\n```rs\n{results:#?}\n```")

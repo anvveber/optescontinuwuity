@@ -3,7 +3,7 @@ pub(crate) mod tester;
 
 use clap::Subcommand;
 use conduwuit::Result;
-use ruma::{OwnedEventId, OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName};
+use ruma::{OwnedEventId, OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId};
 use service::rooms::short::{ShortEventId, ShortRoomId};
 
 use self::tester::TesterCommand;
@@ -246,6 +246,12 @@ pub enum DebugCommand {
 		room_id: Option<OwnedRoomId>,
 		#[arg(short, long)]
 		name: Option<OwnedServerName>,
+	},
+
+	/// Recalculate a local user's presence recipients list
+	RecalculatePresenceRecipients {
+		/// Full user ID
+		user_id: OwnedUserId,
 	},
 
 	/// Developer test stubs
