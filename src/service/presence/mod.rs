@@ -2,20 +2,42 @@ mod data;
 mod presence;
 mod recipients;
 
-use std::{sync::Arc, time::Duration};
+use std::{borrow::ToOwned, collections::HashSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use conduwuit::{
-	Error, Result, Server, checked, debug, debug_warn, error, result::LogErr, trace,
+	Error, Result, Server, checked, debug, debug_warn, error, result::LogErr, trace, warn,
 };
 use database::Database;
 use futures::{Stream, StreamExt, TryFutureExt, stream::FuturesUnordered};
+use itertools::Itertools;
 use loole::{Receiver, Sender};
-use ruma::{OwnedUserId, UInt, UserId, events::presence::PresenceEvent, presence::PresenceState};
+pub use recipients::PresenceRecipients;
+use ruma::{
+OwnedUserId, UInt, UserId,
+	api::federation::transactions::edu::{PresenceRecipientListUpdates, PresenceUpdate},
+	events::{
+		GlobalAccountDataEventType, StateEventType,
+		presence::{
+			PresenceEvent,
+			sharing::{
+				PresenceSharingEvent, RoomPresenceSharingState, ServerPresenceSharingState,
+				UserPresenceSharingState,
+			},
+		},
+		room::presence_sharing::{PresenceSharingHint, RoomPresenceSharingEventContent},
+	},
+	presence::PresenceState,
+	uint,
+};
 use tokio::time::sleep;
 
 use self::{data::Data, presence::Presence};
-use crate::{Dep, globals, users};
+use crate::{
+	Dep, account_data, config, globals, rooms,
+	sending::{self, EduBuf},
+	users,
+};
 
 pub struct Service {
 	timer_channel: (Sender<TimerType>, Receiver<TimerType>),
@@ -31,6 +53,11 @@ struct Services {
 	db: Arc<Database>,
 	globals: Dep<globals::Service>,
 	users: Dep<users::Service>,
+	account_data: Dep<account_data::Service>,
+	sending: Dep<sending::Service>,
+	state_accessor: Dep<rooms::state_accessor::Service>,
+	state_cache: Dep<rooms::state_cache::Service>,
+	config: Dep<config::Service>,
 }
 
 type TimerType = (OwnedUserId, Duration);
@@ -52,6 +79,12 @@ impl crate::Service for Service {
 				db: args.db.clone(),
 				globals: args.depend::<globals::Service>("globals"),
 				users: args.depend::<users::Service>("users"),
+				account_data: args.depend::<account_data::Service>("account_data"),
+				sending: args.depend::<sending::Service>("sending"),
+				state_accessor: args
+					.depend::<rooms::state_accessor::Service>("rooms::state_accessor"),
+				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
+				config: args.depend::<config::Service>("config"),
 			},
 		}))
 	}
@@ -176,6 +209,64 @@ impl Service {
 		self.db.remove_presence(user_id).await;
 	}
 
+	pub async fn get_recipients(&self, user_id: &UserId) -> Result<PresenceRecipients> {
+		self.db.get_recipients(user_id).await
+	}
+
+	pub async fn set_recipients(
+		&self,
+		user_id: &UserId,
+		recipients: PresenceRecipients,
+	) -> Result<()> {
+		self.db.set_recipients(user_id, recipients).await
+	}
+
+	pub async fn has_recipients(&self, user_id: &UserId) -> bool {
+		self.db.has_recipients(user_id).await
+	}
+
+	pub async fn remove_recipients(&self, user_id: &UserId) -> () {
+		self.db.remove_recipients(user_id).await;
+	}
+
+	/// Checks if some local requesting_user has permission to view the presence
+	/// of a target_user
+	pub async fn can_view_presence(
+		&self,
+		requesting_user: &UserId,
+		target_user: &UserId,
+	) -> bool {
+		debug_assert!(
+			self.services.globals.user_is_local(requesting_user),
+			"can_view_presence called for non-local user {requesting_user}"
+		);
+
+		if !self.services.config.enable_msc4495_selective_presence {
+			return self
+				.services
+				.state_cache
+				.user_sees_user(requesting_user, target_user)
+				.await;
+		}
+
+		requesting_user == target_user
+			|| self
+				.get_recipients(target_user)
+				.await
+				.map_or(true, |recipients| recipients.recipient_users.contains(requesting_user))
+	}
+
+	pub async fn apply_recipients_delta(
+		&self,
+		user_id: &UserId,
+		new_stream_id: i64,
+		delta: PresenceRecipientListUpdates,
+	) -> Result<()> {
+		let mut recipients = self.get_recipients(user_id).await?;
+		recipients.apply_delta(new_stream_id, delta);
+		self.set_recipients(user_id, recipients).await
+	}
+
 	// Unset online/unavailable presence to offline on startup
 	pub async fn unset_all_presence(&self) {
 		let _cork = self.services.db.cork();
@@ -275,6 +366,206 @@ impl Service {
 		}
 
 		Ok(())
+	}
+
+	/// Get a user's `m.presence.sharing` account data, if it exists.
+	async fn get_user_presence_sharing_config(
+		&self,
+		user_id: &UserId,
+	) -> Result<PresenceSharingEvent> {
+		self.services
+			.account_data
+			.get_global(user_id, GlobalAccountDataEventType::PresenceSharing)
+			.await
+	}
+
+	/// Check if a room's `m.room.presence_sharing` state event is set to
+	/// `suggest`.
+	async fn room_allows_presence_sharing(&self, room_id: &ruma::RoomId) -> bool {
+		self.services
+			.state_accessor
+			.room_state_get_content::<RoomPresenceSharingEventContent>(
+				room_id,
+				&StateEventType::RoomPresenceSharing,
+				"",
+			)
+			.await
+			.map_or(PresenceSharingHint::Forbid, |content| content.presence_sharing)
+			== PresenceSharingHint::Suggest
+	}
+
+	/// Determine the recipient user set for a user's presence transition.
+	pub async fn calculate_recipient_users(&self, sending_user: &UserId) -> HashSet<OwnedUserId> {
+		let mut recipient_users: HashSet<OwnedUserId> = HashSet::new();
+
+		// it must be a local user to have a presence sharing config
+		if !self.services.globals.user_is_local(sending_user) {
+			debug_assert!(
+				false,
+				"calculate_recipient_users called for non-local user {sending_user}"
+			);
+			debug!("User {sending_user} is not local, skipping presence recipient calculation");
+			return recipient_users;
+		}
+
+		debug!("Collecting presence recipients for {sending_user}");
+
+		// 1. Include all members of rooms listed as `allow` in the user's
+		//    presence sharing config, if the room's presence sharing state is
+		//    set to `suggest`.
+		let user_presence_sharing_config = self
+			.get_user_presence_sharing_config(sending_user)
+			.await
+			.map(|config| config.content)
+			.unwrap_or_default();
+
+		for (room, sharing_state) in user_presence_sharing_config.rooms {
+			match sharing_state {
+				| RoomPresenceSharingState::Allow
+					if self.room_allows_presence_sharing(&room).await =>
+				{
+					// add all of the room's members to the recipient set
+					let room_members = self
+						.services
+						.state_cache
+						.room_members(&room)
+						.collect::<HashSet<OwnedUserId>>()
+						.await;
+					debug!(
+						"Adding {} members from room {room} to recipients for {sending_user}",
+						room_members.len()
+					);
+					recipient_users.extend(room_members);
+				},
+				| RoomPresenceSharingState::Allow => {
+					debug!("Room {room} is not set to suggest presence sharing, skipping");
+				},
+				| _ => {},
+			}
+		}
+
+		// 2. Exclude any user IDs with a server name corresponding to any server listed as `deny` 
+		//    in the user's m.presence.sharing configuration.
+		for (server, sharing_state) in user_presence_sharing_config.servers {
+			if sharing_state == ServerPresenceSharingState::Deny {
+				debug!("Excluding users from server {server} from recipients for {sending_user}");
+				recipient_users.retain(|user_id| user_id.server_name() != server);
+			}
+		}
+
+		// 3. Include all local users that the user shares a room with if the
+		//    user's m.presence.sharing configuration has `share_locally` set to
+		//    true.
+		if user_presence_sharing_config.share_locally {
+			let local_users_with_mutual_rooms = self
+				.services
+				.users
+				.stream_local_users()
+				.filter(|local_user| {
+					let local_user = local_user.clone();
+					async move {
+						self.services
+							.state_cache
+							.user_sees_user(sending_user, &local_user)
+							.await
+					}
+				})
+				.collect::<HashSet<OwnedUserId>>()
+				.await;
+
+			debug!(
+				"Adding {} local users with mutual rooms to recipients for {sending_user}",
+				local_users_with_mutual_rooms.len()
+			);
+
+			recipient_users.extend(local_users_with_mutual_rooms);
+		}
+
+		for (user, sharing_state) in user_presence_sharing_config.users {
+			match sharing_state {
+				// 4. Include all users listed as `allow` in the user's m.presence.sharing
+				//    configuration.
+				| UserPresenceSharingState::Allow => {
+					debug!("Adding user {user} to recipients for {sending_user}");
+					recipient_users.insert(user);
+				},
+
+				// 5. Exclude any users listed as `deny` in the user's m.presence.sharing
+				//    configuration.
+				| UserPresenceSharingState::Deny => {
+					debug!("Excluding user {user} from recipients for {sending_user}");
+					recipient_users.remove(&user);
+				},
+
+				| _ => {},
+			}
+		}
+
+		debug!("Collected {} recipients for {sending_user}", recipient_users.len());
+		recipient_users
+	}
+
+	pub async fn calculate_and_persist_recipient_users(
+		&self,
+		sending_user: &UserId,
+	) -> Result<Option<(i64, PresenceRecipientListUpdates)>> {
+		let current_recipients = self.get_recipients(sending_user).await.unwrap_or_default();
+		let recipient_users = self.calculate_recipient_users(sending_user).await;
+
+		let delta = current_recipients.delta_to(&recipient_users);
+
+		if delta.is_empty() {
+			debug!("No changes in presence recipients for {sending_user}, using previous stream");
+			return Ok(None);
+		}
+
+		let stream_id = self.services.globals.next_count()?.cast_signed();
+		let recipients = PresenceRecipients::new(stream_id, recipient_users);
+		self.set_recipients(sending_user, recipients).await.ok();
+
+		debug!(
+			"Presence recipients for {} changed (+{}, -{}) stream {}",
+			sending_user,
+			delta.add.len(),
+			delta.delete.len(),
+			stream_id,
+		);
+
+		Ok(Some((stream_id, delta)))
+	}
+
+	/// Ask a remote server for a user's presence recipients.
+	pub async fn ask_remote_server_for_recipients(
+		&self,
+		sending_user: &UserId,
+	) -> Result<PresenceRecipients> {
+		use ruma::api::federation::query::get_presence_recipients::msc4495::Request;
+
+		let server_name = sending_user.server_name();
+
+		debug!("Asking remote server {server_name} for presence recipients for {sending_user}");
+
+		let request = Request::new(sending_user.to_owned());
+
+		self.services
+			.sending
+			.send_federation_request(server_name, request)
+			.await
+			.map(Into::into)
+	}
+
+	/// Ask a remote server for a user's presence recipients, and store it.
+	pub async fn fetch_and_store_remote_recipients(&self, sending_user: &UserId) -> Result<()> {
+		let recipients = self
+			.ask_remote_server_for_recipients(sending_user)
+			.await
+			.unwrap_or_default();
+
+		debug!(
+			"Storing {} presence recipients for {sending_user} from remote server",
+			recipients.recipient_users.len()
+		);
+		self.set_recipients(sending_user, recipients.clone()).await
 	}
 }
 
