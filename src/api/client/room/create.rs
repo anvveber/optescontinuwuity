@@ -32,6 +32,7 @@ use ruma::{
 			member::{MembershipState, RoomMemberEventContent},
 			name::RoomNameEventContent,
 			power_levels::RoomPowerLevelsEventContent,
+			presence_sharing::{PresenceSharingHint, RoomPresenceSharingEventContent},
 			server_acl::RoomServerAclEventContent,
 			topic::RoomTopicEventContent,
 		},
@@ -483,6 +484,26 @@ pub(crate) async fn create_room_route(
 				&RoomGuestAccessEventContent::new(match preset {
 					| RoomPreset::PublicChat => GuestAccess::Forbidden,
 					| _ => GuestAccess::CanJoin,
+				}),
+			),
+			sender_user,
+			Some(&room_id),
+			&state_lock,
+		)
+		.boxed()
+		.await?;
+
+	// 5.4 Presence Sharing
+	services
+		.rooms
+		.timeline
+		.build_and_append_pdu(
+			PartialPdu::state(
+				String::new(),
+				&RoomPresenceSharingEventContent::new(match preset {
+					| RoomPreset::PrivateChat | RoomPreset::TrustedPrivateChat =>
+						PresenceSharingHint::Suggest,
+					| _ => PresenceSharingHint::Forbid,
 				}),
 			),
 			sender_user,
