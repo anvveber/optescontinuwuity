@@ -1702,8 +1702,6 @@ pub struct Config {
 	/// by default. Users will need to use MSC4495-compatible clients to
 	/// explicitly opt in to presence sharing with other users.
 	///
-	/// If this is enabled, you probably also want to set `allow_outgoing_presence`.
-	///
 	/// [MSC4495]: https://github.com/matrix-org/matrix-spec-proposals/pull/4495
 	#[serde(default)]
 	pub enable_msc4495_selective_presence: bool,

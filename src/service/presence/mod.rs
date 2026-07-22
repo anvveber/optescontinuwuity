@@ -546,8 +546,9 @@ impl Service {
 			}
 		}
 
-		// 2. Exclude any user IDs with a server name corresponding to any server listed as `deny` 
-		//    in the user's m.presence.sharing configuration.
+		// 2. Exclude any user IDs with a server name corresponding to any
+		//    server listed as `deny` in the user's m.presence.sharing
+		//    configuration.
 		for (server, sharing_state) in user_presence_sharing_config.servers {
 			if sharing_state == ServerPresenceSharingState::Deny {
 				debug!("Excluding users from server {server} from recipients for {sending_user}");
