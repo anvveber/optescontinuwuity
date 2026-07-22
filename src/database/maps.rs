@@ -166,6 +166,10 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::SEQUENTIAL_SMALL
 	},
 	Descriptor {
+		name: "userid_recipients",
+		..descriptor::RANDOM
+	},
+	Descriptor {
 		name: "readreceiptid_readreceipt",
 		..descriptor::RANDOM
 	},

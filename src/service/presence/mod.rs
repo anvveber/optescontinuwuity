@@ -1,5 +1,6 @@
 mod data;
 mod presence;
+mod recipients;
 
 use std::{sync::Arc, time::Duration};
 
