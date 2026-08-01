@@ -1,6 +1,6 @@
 use std::{convert::TryFrom, path::PathBuf, sync::Arc};
-
-use conduwuit::{Config, Err, Result};
+use ruma::OwnedServerName;
+use conduwuit::{err, Config, Err, Error, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
 
 use crate::media::{
@@ -9,12 +9,32 @@ use crate::media::{
 
 pub mod fs_storage;
 
+/// Where a file originated, to be used for more efficient cleanup and similar
+#[derive(Debug)]
+pub enum FileOrigin {
+	/// A local file, originating from a user on the local server
+	Local,
+	/// A remote file, originating from another server defined by parameter
+	Remote(OwnedServerName),
+	/// A file of unknown origin. Examples include files found on startup but not existing in DB
+	/// AND not in a subfolder of a valid server name (e.g. example.com/filename)
+	Unknown,
+}
+
 pub(crate) trait StorageRepository {
-	async fn create(&self, db_key: &[u8], file_data: &[u8]) -> Result<()>;
-	async fn get(&self, db_key: &[u8]) -> Result<&'_ [u8]>;
-	/// Delete
-	async fn delete(&self, db_key: Vec<&[u8]>) -> Vec<Result<()>>;
-	async fn list<'mxc>(&self) -> Result<Vec<Mxc<'mxc>>>;
+	/// Create a file with a provided db key and file data.
+	async fn create(&self, key: &[u8], file_data: &[u8], origin: Option<FileOrigin>) -> Result<()>;
+
+	/// Get a file based on the full DB key. Returns `Ok(Some())` if the file exists and is non-empty,
+	/// `Ok(None)` if it's empty, and `Err()` if there was any errors reading the file (including if
+	/// it doesn't exist)
+	async fn get(&self, key: &[u8]) -> Result<Option<Vec<u8>>>;
+
+	/// Delete singular file based on a given key.
+	async fn delete(&self, key: &[u8]) -> Result<()>;
+
+	/// List all stored files, relative to root storage location (i.e. "directory/filename")
+	async fn list(&self) -> Vec<String>;
 }
 
 pub enum StorageRepositoryTypes {
@@ -30,18 +50,18 @@ impl StorageRepositoryTypes {
 }
 
 impl TryFrom<&str> for StorageRepositoryTypes {
-	type Error = &'static str;
+	type Error = Error;
 
 	fn try_from(value: &str) -> Result<Self, Self::Error> {
 		match value {
 			| "filesystem" => Ok(StorageRepositoryTypes::FilesystemStorage),
-			| _ => Err("Unknown storage repository type"),
+			| _ => Err(err!("Unknown storage repository type")),
 		}
 	}
 }
 
 impl TryFrom<String> for StorageRepositoryTypes {
-	type Error = &'static str;
+	type Error = Error;
 
 	fn try_from(value: String) -> Result<Self, Self::Error> { Self::try_from(value.as_str()) }
 }
@@ -71,10 +91,11 @@ pub(crate) struct StorageRepositoryFactory {
 
 impl StorageRepositoryFactory {
 	pub fn new(config: &Arc<Config>) -> Arc<Self> {
-		let mut path = PathBuf::new();
-		path.push(config.database_path.clone());
-		path.push("media");
-		let filesystem = Arc::new(FilesystemStorage { path });
+		// Initialize filesystem storage
+		let mut media_path = PathBuf::new();
+		media_path.push(config.database_path.clone());
+		media_path.push("media");
+		let filesystem = Arc::new(FilesystemStorage { path: media_path });
 
 		Arc::new(Self { filesystem })
 	}
