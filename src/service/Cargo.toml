@@ -123,6 +123,7 @@ resolvematrix.workspace = true
 serde_urlencoded.workspace = true
 openidconnect.workspace = true
 rand.workspace = true
+walkdir.workspace = true
 
 [target.'cfg(all(unix, target_os = "linux"))'.dependencies]
 sd-notify.workspace = true

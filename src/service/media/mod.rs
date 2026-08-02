@@ -108,22 +108,70 @@ impl Service {
 	pub async fn delete(&self, mxc: &Mxc<'_>) -> Result<()> {}
 
 	/// Downloads a file via an MXC.
-	pub async fn get(&self, mxc: &Mxc<'_>) -> Result<Option<FileMeta>> {}
+	pub async fn get(&self, mxc: &Mxc<'_>) -> Result<Option<FileMeta>> {
+		match self
+			.db
+			.search_file_metadata(mxc, &ImageDimensions::default())
+			.await
+		{
+			| Ok(Metadata { content_disposition, content_type, key }) => {
+				let storage_repo = self.get_storage_repo()?;
+				let content = storage_repo.get(&key).await?;
+
+				Ok(Some(FileMeta {
+					content,
+					content_type,
+					content_disposition,
+				}))
+			},
+			| _ => Ok(None),
+		}
+	}
 
 	/// Deletes all media by the specified user
 	pub async fn delete_from_user(&self, user: &UserId) -> Result<usize> {}
 
 	/// Gets all the MXC URIs in our media database
-	pub async fn get_all_mxcs(&self) -> Result<Vec<OwnedMxcUri>> {}
+	/// TODO: Update this with new DB format (MXC keys, everything else is in value)
+	pub async fn get_all_mxcs(&self) -> Result<Vec<OwnedMxcUri>> {
+		let all_keys = self.db.get_all_media_keys().await;
 
-	/// Deletes all media files in the given time frame.
-	/// Returns a usize with the amount of media files deleted.
-	pub async fn delete_all_media_within_timeframe(
-		&self,
-		time_boundary: SystemTime,
-		direction: TimeDirection,
-		yes_i_want_to_delete_local_media: bool,
-	) -> Result<usize> {
+		let mut mxcs = Vec::with_capacity(all_keys.len());
+
+		for key in all_keys {
+			trace!("Full MXC key from database: {key:?}");
+
+			let mut parts = key.split(|&b| b == 0xFF);
+			let mxc = parts
+				.next()
+				.map(|bytes| {
+					utils::string_from_bytes(bytes).map_err(|e| {
+						err!(Database(error!(
+							"Failed to parse MXC unicode bytes from our database: {e}"
+						)))
+					})
+				})
+				.transpose()?;
+
+			let Some(mxc_s) = mxc else {
+				debug_warn!(
+					mxc,
+					"Parsed MXC URL unicode bytes from database but is still invalid"
+				);
+				continue;
+			};
+
+			trace!("Parsed MXC key to URL: {mxc_s}");
+			let mxc = OwnedMxcUri::from(mxc_s);
+
+			if mxc.is_valid() {
+				mxcs.push(mxc);
+			} else {
+				debug_warn!("{mxc:?} from database was found to not be valid");
+			}
+		}
+
+		Ok(mxcs)
 	}
 
 	#[inline]
@@ -141,8 +189,9 @@ impl Service {
 
 	#[inline]
 	fn get_storage_repo(&self) -> Result<Arc<impl StorageRepository>> {
-		let storage_destination =
-			StorageRepositoryTypes::try_from(self.services.server.config.file_storage_type)?;
+		let storage_destination = StorageRepositoryTypes::try_from(
+			self.services.server.config.file_storage_type.clone(),
+		)?;
 		let repo = self.storage_factory.get_repository(storage_destination);
 		Ok(repo.clone())
 	}
@@ -150,4 +199,6 @@ impl Service {
 
 #[inline]
 #[must_use]
-pub fn base64_encode_key(key: &[u8]) -> String { general_purpose::URL_SAFE_NO_PAD.encode(key) }
+pub fn base64_encode_key(key: &[u8]) -> String {
+	general_purpose::URL_SAFE_NO_PAD.encode(key)
+}

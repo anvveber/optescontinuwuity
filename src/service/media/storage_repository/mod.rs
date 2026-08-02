@@ -1,7 +1,7 @@
-use std::{convert::TryFrom, path::PathBuf, sync::Arc};
+use conduwuit::{Config, Error, Result, err};
 use ruma::OwnedServerName;
-use conduwuit::{err, Config, Err, Error, Result};
 use serde::{Deserialize, Deserializer, Serialize, Serializer};
+use std::{convert::TryFrom, path::PathBuf, sync::Arc};
 
 use crate::media::{
 	base64_encode_key, mxc::Mxc, storage_repository::fs_storage::FilesystemStorage,
@@ -23,7 +23,7 @@ pub enum FileOrigin {
 
 pub(crate) trait StorageRepository {
 	/// Create a file with a provided db key and file data.
-	async fn create(&self, key: &[u8], file_data: &[u8], origin: Option<FileOrigin>) -> Result<()>;
+	async fn create(&self, key: &[u8], file_data: &[u8]) -> Result<()>;
 
 	/// Get a file based on the full DB key. Returns `Ok(Some())` if the file exists and is non-empty,
 	/// `Ok(None)` if it's empty, and `Err()` if there was any errors reading the file (including if
@@ -63,7 +63,9 @@ impl TryFrom<&str> for StorageRepositoryTypes {
 impl TryFrom<String> for StorageRepositoryTypes {
 	type Error = Error;
 
-	fn try_from(value: String) -> Result<Self, Self::Error> { Self::try_from(value.as_str()) }
+	fn try_from(value: String) -> Result<Self, Self::Error> {
+		Self::try_from(value.as_str())
+	}
 }
 
 impl Serialize for StorageRepositoryTypes {
