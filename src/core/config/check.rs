@@ -3,6 +3,7 @@ use std::{collections::HashSet, env::consts::OS};
 use either::Either;
 use figment::Figment;
 use ruma::{OwnedServerName, events::room::server_acl::RoomServerAclEventContent};
+use url::Url;
 
 use super::DEPRECATED_KEYS;
 use crate::{Config, Err, Result, Server, debug, debug_info, debug_warn, error, warn};
@@ -316,6 +317,51 @@ pub fn check(config: &Config) -> Result {
 		return Err!(
 			"Either `client_secret` or `client_secret_file` must be set if OIDC is configured."
 		);
+	}
+
+	if let Some(livekit) = &config.matrix_rtc.livekit {
+		if livekit.url.trim().is_empty() {
+			return Err!("`matrix_rtc.livekit.url` must not be empty.");
+		}
+
+		if livekit.key.trim().is_empty() {
+			return Err!("`matrix_rtc.livekit.key` must not be empty.");
+		}
+
+		match (&livekit.secret, &livekit.secret_file) {
+			| (None, None) => {
+				return Err!(
+					"Either `matrix_rtc.livekit.secret` or `matrix_rtc.livekit.secret_file` \
+					 must be set if the LiveKit token service is configured."
+				);
+			},
+			| (Some(_), Some(_)) => {
+				warn!(
+					"Both `matrix_rtc.livekit.secret` and `matrix_rtc.livekit.secret_file` are \
+					 set; the file will be used."
+				);
+			},
+			| _ => (),
+		}
+
+		match Url::parse(&livekit.url) {
+			| Err(e) => return Err!("`matrix_rtc.livekit.url` is not a valid URL: {e}"),
+			| Ok(url) if !matches!(url.scheme(), "ws" | "wss" | "http" | "https") => {
+				return Err!(
+					"`matrix_rtc.livekit.url` must be a ws://, wss://, http:// or https:// URL."
+				);
+			},
+			| Ok(_) => (),
+		}
+
+		if livekit.advertise && config.well_known.client.is_none() {
+			return Err!(
+				"`matrix_rtc.livekit.advertise` requires `well_known.client` to be set, as the \
+				 advertised token service URL must be absolute. Set `well_known.client`, or set \
+				 `matrix_rtc.livekit.advertise = false` and advertise the URL yourself via \
+				 `matrix_rtc.foci`."
+			);
+		}
 	}
 
 	if config

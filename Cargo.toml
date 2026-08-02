@@ -346,6 +346,12 @@ version = "0.1.2"
 version = "1.1.1"
 
 # Used for matrix spec type definitions and helpers
+# MSC4195 identifier derivations and LiveKit token minting, shared with the
+# standalone lk-jwt-service replacement so the two cannot drift.
+[workspace.dependencies.jwt-service-core]
+git = "https://github.com/eleboucher/jwt-service-rs.git"
+rev = "1e59875"
+
 [workspace.dependencies.ruma]
 git = "https://github.com/ruma/ruma.git"
 rev = "e7384f01eacd454c593683de50491201e2160fd1"

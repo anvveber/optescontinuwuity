@@ -3,7 +3,7 @@ mod data;
 use std::{collections::HashMap, fmt::Write, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use conduwuit::{Result, Server, SyncRwLock, error, utils::bytes::pretty};
+use conduwuit::{Result, Server, SyncRwLock, err, error, utils::bytes::pretty};
 use data::Data;
 use regex::RegexSet;
 use ruma::{OwnedEventId, OwnedRoomAliasId, OwnedUserId, ServerName, UserId};
@@ -18,6 +18,8 @@ pub struct Service {
 	pub server_user: OwnedUserId,
 	pub admin_alias: OwnedRoomAliasId,
 	pub turn_secret: String,
+	/// `None` when the LiveKit token service is not configured.
+	pub livekit_secret: Option<String>,
 }
 
 type RateLimitState = (Instant, u32); // Time if last failed try, number of failed tries
@@ -40,6 +42,23 @@ impl crate::Service for Service {
 			},
 		);
 
+		// Unlike the TURN secret, a failed read is fatal rather than falling
+		// back, as there is nothing to fall back to.
+		let livekit_secret = config
+			.matrix_rtc
+			.livekit
+			.as_ref()
+			.map(|livekit| match &livekit.secret_file {
+				| Some(path) => std::fs::read_to_string(path)
+					.map(|secret| secret.trim().to_owned())
+					.map_err(|e| err!(Config("livekit.secret_file", "Failed to read: {e}"))),
+				| None => livekit
+					.secret
+					.clone()
+					.ok_or_else(|| err!(Config("livekit.secret", "No secret configured"))),
+			})
+			.transpose()?;
+
 		Ok(Arc::new(Self {
 			db,
 			server: args.server.clone(),
@@ -52,6 +71,7 @@ impl crate::Service for Service {
 			)
 			.expect("@conduit:server_name is valid"),
 			turn_secret,
+			livekit_secret,
 		}))
 	}
 

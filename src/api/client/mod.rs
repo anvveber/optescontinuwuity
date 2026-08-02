@@ -26,6 +26,7 @@ pub(super) mod redact;
 pub(super) mod relations;
 pub(super) mod report;
 pub(super) mod room;
+pub(super) mod rtc;
 pub(super) mod search;
 pub(super) mod send;
 pub(super) mod session;

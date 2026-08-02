@@ -195,6 +195,7 @@ pub fn build(router: Router<State>, state: State) -> Router<State> {
 		.ruma_route(&client::room_initial_sync_route)
 		.ruma_route(&client::get_authorization_server_metadata_route)
 		.merge(client::oauth::router(state))
+		.merge(client::rtc::router(state))
 		.route("/_continuwuity/server_version", get(client::continuwuity_server_version))
 		.ruma_route(&admin::rooms::ban::ban_room)
 		.ruma_route(&admin::rooms::list::list_rooms);
@@ -225,6 +226,7 @@ pub fn build(router: Router<State>, state: State) -> Router<State> {
 			.ruma_route(&server::get_keys_route)
 			.ruma_route(&server::claim_keys_route)
 			.ruma_route(&server::get_openid_userinfo_route)
+			.ruma_route(&server::get_livekit_token_route)
 			.ruma_route(&server::get_hierarchy_route)
 			.ruma_route(&server::well_known_server)
 			.ruma_route(&server::get_content_route)

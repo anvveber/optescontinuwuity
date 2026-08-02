@@ -1,9 +1,12 @@
 use axum::extract::State;
 use conduwuit::{Err, Result};
 use ruma::{
-	api::client::discovery::{
-		discover_homeserver::{self, HomeserverInfo},
-		discover_policy_server, discover_support,
+	api::client::{
+		discovery::{
+			discover_homeserver::{self, HomeserverInfo},
+			discover_policy_server, discover_support,
+		},
+		rtc::RtcTransport,
 	},
 	assign,
 };
@@ -28,12 +31,27 @@ pub(crate) async fn well_known_client(
 	Ok(assign!(discover_homeserver::Response::new(HomeserverInfo::new(client_url)), {
 		identity_server: None,
 		tile_server: None,
-		rtc_foci: services
-			.config
-			.matrix_rtc
-			.foci
-			.clone()
+		rtc_foci: effective_foci(services),
 	}))
+}
+
+/// The configured MatrixRTC transports, plus our own LiveKit token service if
+/// it is enabled. Shared by the well-known file and the transports endpoint.
+fn effective_foci(services: crate::State) -> Vec<RtcTransport> {
+	let mut foci = services.config.matrix_rtc.foci.clone();
+
+	if let Some(livekit) = &services.config.matrix_rtc.livekit
+		&& livekit.advertise
+		&& let Some(client_url) = services.config.well_known.client.as_ref()
+	{
+		foci.push(RtcTransport::livekit(format!(
+			"{}{}",
+			client_url.as_str().trim_end_matches('/'),
+			crate::client::rtc::BASE_PATH
+		)));
+	}
+
+	foci
 }
 
 /// # `GET /_matrix/client/v1/rtc/transports`
@@ -45,9 +63,7 @@ pub(crate) async fn get_rtc_transports(
 	State(services): State<crate::State>,
 	_body: Ruma<ruma::api::client::rtc::transports::v1::Request>,
 ) -> Result<ruma::api::client::rtc::transports::v1::Response> {
-	Ok(ruma::api::client::rtc::transports::v1::Response::new(
-		services.config.matrix_rtc.foci.clone(),
-	))
+	Ok(ruma::api::client::rtc::transports::v1::Response::new(effective_foci(services)))
 }
 
 /// # `GET /.well-known/matrix/support`

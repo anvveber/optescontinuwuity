@@ -2155,6 +2155,54 @@
 #
 #foci = []
 
+#[global.matrix_rtc.livekit]
+
+# The URL clients should connect to the LiveKit SFU on. This is handed
+# back to clients verbatim, so it must be reachable by them.
+#
+# example: "wss://livekit.example.com"
+#
+#url =
+
+# The LiveKit API key.
+#
+#key =
+
+# The LiveKit API secret. Either this or `secret_file` must be set.
+#
+#secret =
+
+# A path to a file which the LiveKit API secret will be read from. If
+# this option is set, it will override `secret`.
+#
+# The server will fail to start if the file cannot be read.
+#
+#secret_file =
+
+# Advertise this server as a LiveKit focus, by adding it to the MSC4143
+# transports served at `/_matrix/client/v1/rtc/transports` and in the
+# client well-known file.
+#
+# Requires `well_known.client` to be set, since the advertised URL must
+# be absolute.
+#
+#advertise = true
+
+# Grant `roomCreate` in issued tokens. This is required when the SFU has
+# `room.auto_create` disabled, as recommended by lk-jwt-service.
+#
+#auto_create = true
+
+# Homeservers whose users may obtain LiveKit tokens from this server.
+# This server's own name is always allowed.
+#
+# Everyone in a call joins the SFU of whoever started it, so restricting
+# this stops remote participants joining calls hosted here. They must
+# still be members of the room either way. Narrow it if you want to cap
+# who can consume your SFU's bandwidth.
+#
+#full_access_homeservers = ["*"]
+
 #[global.antispam]
 
 #[global.antispam.meowlnir]

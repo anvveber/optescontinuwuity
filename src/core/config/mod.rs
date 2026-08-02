@@ -2537,6 +2537,78 @@ pub struct MatrixRtcConfig {
 	/// default: []
 	#[serde(default)]
 	pub foci: Vec<RtcTransport>,
+
+	/// Configuration for the built-in LiveKit token service, which replaces a
+	/// separately deployed lk-jwt-service.
+	/// display: nested
+	pub livekit: Option<LiveKitConfig>,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.matrix_rtc.livekit",
+	optional = "true"
+)]
+pub struct LiveKitConfig {
+	/// The URL clients should connect to the LiveKit SFU on. This is handed
+	/// back to clients verbatim, so it must be reachable by them.
+	///
+	/// example: "wss://livekit.example.com"
+	pub url: String,
+
+	/// The LiveKit API key.
+	pub key: String,
+
+	/// The LiveKit API secret. Either this or `secret_file` must be set.
+	pub secret: Option<String>,
+
+	/// A path to a file which the LiveKit API secret will be read from. If
+	/// this option is set, it will override `secret`.
+	///
+	/// The server will fail to start if the file cannot be read.
+	pub secret_file: Option<PathBuf>,
+
+	/// Advertise this server as a LiveKit focus, by adding it to the MSC4143
+	/// transports served at `/_matrix/client/v1/rtc/transports` and in the
+	/// client well-known file.
+	///
+	/// Requires `well_known.client` to be set, since the advertised URL must
+	/// be absolute.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub advertise: bool,
+
+	/// Grant `roomCreate` in issued tokens. This is required when the SFU has
+	/// `room.auto_create` disabled, as recommended by lk-jwt-service.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub auto_create: bool,
+
+	/// Homeservers whose users may obtain LiveKit tokens from this server.
+	/// This server's own name is always allowed.
+	///
+	/// Everyone in a call joins the SFU of whoever started it, so restricting
+	/// this stops remote participants joining calls hosted here. They must
+	/// still be members of the room either way. Narrow it if you want to cap
+	/// who can consume your SFU's bandwidth.
+	///
+	/// default: ["*"]
+	#[serde(default = "default_livekit_allowed_homeservers")]
+	pub full_access_homeservers: Vec<String>,
+}
+
+impl LiveKitConfig {
+	/// Unlike lk-jwt-service, `*` is honoured wherever it appears in the list
+	/// rather than only when it is the sole entry.
+	#[must_use]
+	pub fn allows_homeserver(&self, server_name: &ruma::ServerName) -> bool {
+		self.full_access_homeservers
+			.iter()
+			.any(|allowed| allowed == "*" || allowed == server_name.as_str())
+	}
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -3220,6 +3292,10 @@ pub fn default_log_span_events() -> String { "none".into() }
 fn default_notification_push_path() -> String { "/_matrix/push/v1/notify".to_owned() }
 
 fn default_openid_token_ttl() -> u64 { 60 * 60 }
+
+/// Any homeserver, matching lk-jwt-service, which does not gate token issuance
+/// at all. Room membership is still required.
+fn default_livekit_allowed_homeservers() -> Vec<String> { vec!["*".to_owned()] }
 
 fn default_login_token_ttl() -> u64 { 2 * 60 * 1000 }
 

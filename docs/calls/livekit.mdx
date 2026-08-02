@@ -22,6 +22,8 @@ Using LiveKit with Matrix requires two services - LiveKit itself, and a brokerin
 
 You must generate a key and secret to allow the Matrix service to authenticate with LiveKit. `LK_MATRIX_KEY` should be around 20 random characters, and `LK_MATRIX_SECRET` should be around 64. Remember to replace these with the actual values!
 
+If you are using the built-in token service, omit the `lk-jwt-service` container from the compose file below. You only need the `livekit` service.
+
 :::tip Generating the secrets
 LiveKit provides a utility to generate secure random keys
 ```bash
@@ -71,6 +73,8 @@ Next, we need to configure LiveKit. In the same directory, create `livekit.yaml`
 port: 7880
 bind_addresses:
   - ""
+room:
+  auto_create: false
 rtc:
   tcp_port: 7881
   port_range_start: 50100
@@ -123,7 +127,11 @@ This will expose LiveKit information on the following endpoints for clients to d
 
 Reverse proxies can be configured in many different ways - so we can't provide a step by step for this.
 
-All paths should be forwarded to LiveKit by default, with the exception of the following path prefixes, which should be forwarded to the JWT/Authentication service:
+:::tip
+If you are using the built-in token service, forward everything on `livekit.example.com` to LiveKit. The token endpoints live on your Continuwuity domain, not the LiveKit one, so there is nothing to split out.
+:::
+
+If you are running an external `lk-jwt-service`, all paths should be forwarded to LiveKit by default, with the exception of the following path prefixes, which should be forwarded to the JWT/Authentication service:
 
 - `/sfu/get`
 - `/healthz`
@@ -357,6 +365,16 @@ forbidden_remote_server_names = [".*"]
 ```
 
 Subscribe to issue [!1440](https://forgejo.ellis.link/continuwuation/continuwuity/issues/1440) for future updates on this matter.
+
+#### Room creation
+
+The supplied LiveKit configuration sets `room.auto_create: false`, as recommended by `lk-jwt-service`. The built-in token service grants `roomCreate` by default, so the first participant can create the room. Set `auto_create = false` under `[global.matrix_rtc.livekit]` only if your SFU has `room.auto_create` enabled. With both off, the first participant is refused and Element Call reports "Failed to create call".
+
+## Limitations
+
+Continuwuity does not implement [MSC4140 delayed events](https://github.com/matrix-org/matrix-spec-proposals/pull/4140). Element Call detects this and falls back, so calls still work. Nothing retracts a call membership if a client crashes or loses its network, so a room can show participants who have left until their membership expires four hours later. This applies with or without the built-in token service, since the delayed-event endpoints live on the homeserver either way.
+
+For the same reason the built-in service does not implement `/delegate_delayed_leave` or `/sfu_webhook`, which exist to drive that mechanism.
 
 ## Related Documentation
 
