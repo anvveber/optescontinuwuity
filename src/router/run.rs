@@ -7,7 +7,6 @@ use std::{
 	time::Duration,
 };
 
-use axum_server::{Address, Handle as ServerHandle};
 use conduwuit::{Error, Result, Server, debug, debug_error, debug_info, error, info};
 use futures::FutureExt;
 use service::Services;
@@ -28,16 +27,12 @@ pub(crate) async fn run(services: Arc<Services>) -> Result<()> {
 	admin::init(&services.admin).await;
 
 	// Setup shutdown/signal handling
-	let handle = ServerHandle::new();
-	let (tx, _) = broadcast::channel::<()>(1);
-	let sigs = server
-		.runtime()
-		.spawn(signal(server.clone(), tx.clone(), handle.clone()));
+	let (shutdown_tx, shutdown_rx) = broadcast::channel::<Duration>(1);
+	let sigs = server.runtime().spawn(signal(server.clone(), shutdown_tx));
 
-	let mut listener =
-		server
-			.runtime()
-			.spawn(serve::serve(services.clone(), handle.clone(), tx.subscribe()));
+	let mut listener = server
+		.runtime()
+		.spawn(serve::serve(services.clone(), shutdown_rx));
 
 	// Run startup admin commands.
 	// This has to be done after the admin service is initialized otherwise it
@@ -118,23 +113,15 @@ pub(crate) async fn stop(services: Arc<Services>) -> Result<()> {
 }
 
 #[tracing::instrument(skip_all, level = "info")]
-async fn signal<A: Address>(server: Arc<Server>, tx: Sender<()>, handle: axum_server::Handle<A>) {
+async fn signal(server: Arc<Server>, tx: Sender<Duration>) {
 	server
 		.clone()
 		.until_shutdown()
-		.then(move |()| handle_shutdown(server, tx, handle))
+		.then(move |()| handle_shutdown(server, tx))
 		.await;
 }
 
-async fn handle_shutdown<A: Address>(
-	server: Arc<Server>,
-	tx: Sender<()>,
-	handle: axum_server::Handle<A>,
-) {
-	if let Err(e) = tx.send(()) {
-		error!("failed sending shutdown transaction to channel: {e}");
-	}
-
+async fn handle_shutdown(server: Arc<Server>, tx: Sender<Duration>) {
 	let timeout = server.config.client_shutdown_timeout;
 	let timeout = Duration::from_secs(timeout);
 	debug!(
@@ -143,7 +130,9 @@ async fn handle_shutdown<A: Address>(
 		"Notifying for graceful shutdown"
 	);
 
-	handle.graceful_shutdown(Some(timeout));
+	if let Err(e) = tx.send(timeout) {
+		error!("failed sending router shutdown to channel: {e}");
+	}
 }
 
 async fn handle_services_poll(

@@ -122,9 +122,6 @@ pub struct Config {
 
 	/// The UNIX socket continuwuity will listen on.
 	///
-	/// continuwuity cannot listen on both an IP address and a UNIX socket. If
-	/// listening on a UNIX socket, you MUST remove/comment the `address` key.
-	///
 	/// Remember to make sure that your reverse proxy has access to this socket
 	/// file, either by adding your reverse proxy to the appropriate user group
 	/// or granting world R/W permissions with `unix_socket_perms` (666
@@ -3000,10 +2997,6 @@ impl Config {
 		let config = raw_config
 			.extract::<Self>()
 			.map_err(|e| err!("There was a problem with your configuration file: {e}"))?;
-
-		// don't start if we're listening on both UNIX sockets and TCP at same
-		// time
-		check::is_dual_listening(raw_config)?;
 
 		Ok(config)
 	}
