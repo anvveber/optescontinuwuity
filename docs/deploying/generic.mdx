@@ -102,6 +102,37 @@ You can also [view the file on Foregejo][systemd-file].
 
 [systemd-file]: https://forgejo.ellis.link/continuwuation/continuwuity/src/branch/main/pkg/conduwuit.service
 
+### Socket activation
+
+Continuwuity supports receiving its listening sockets using systemd's socket
+activation feature. A socket unit must be placed next to your service unit
+with a matching name (e.g. `conduwuit.socket` and `conduwuit.service`).
+
+See [`systemd.socket(5)`](https://www.freedesktop.org/software/systemd/man/latest/systemd.socket.html)
+for how to set the listening addresses when using socket activation. Be aware
+that Continuwuity only supports IP and Unix sockets, configured using
+`ListenStream=`, and requires `Accept=no`.
+
+By default, Continuwuity will use any sockets it is passed. If you want to
+exclusively use socket activation, and prevent Continuwuity binding its
+own sockets, set `use_exclusively_socket_activation` to `true` in Continuwuity's
+configuration.
+
+When using socket activation, you must enable the socket unit as well:
+
+```bash
+sudo systemctl enable conduwuit.socket
+```
+
+<details>
+<summary>Click to expand systemd socket file (conduwuit.socket)</summary>
+
+```ini file="../../pkg/conduwuit.socket"
+
+```
+
+</details>
+
 ## Creating the Continuwuity configuration file
 
 Now you need to create the Continuwuity configuration file in
