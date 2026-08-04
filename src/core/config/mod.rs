@@ -120,6 +120,32 @@ pub struct Config {
 	#[serde(default)]
 	pub tls: TlsConfig,
 
+	/// If enabled, sockets passed to the process by systemd's socket activation
+	/// feature will be used to listen for incoming connections, in addition to
+	/// the `address`, `port`, and `unix_socket_path` configured here.
+	///
+	/// If a provided socket is bound to an address also configured here,
+	/// Continuwuity will not bind that address again.
+	///
+	/// Does nothing if Continuwuity was not build with the `systemd` feature.
+	///
+	/// Ignored and treated as `true` if `use_exclusively_socket_activation`
+	/// is set to `true`.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub use_socket_activation: bool,
+
+	/// If enabled, no attempt will be made to bind listening sockets
+	/// configured using `address`, `port`, or `unix_socket_path`.
+	/// Instead, startup will fail unless at least one socket is
+	/// successfully obtained from systemd's socket activation
+	/// mechanism.
+	///
+	/// Startup will fail if not built with the `systemd` feature.
+	#[serde(default)]
+	pub use_exclusively_socket_activation: bool,
+
 	/// The UNIX socket continuwuity will listen on.
 	///
 	/// Remember to make sure that your reverse proxy has access to this socket

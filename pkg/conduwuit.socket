@@ -1,0 +1,7 @@
+[Socket]
+ListenStream=127.0.0.1:8008
+ListenStream=[::1]:8008
+BindIPv6Only=ipv6-only
+
+[Install]
+RequiredBy=conduwuit.service

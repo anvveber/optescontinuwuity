@@ -164,7 +164,8 @@ sentry_telemetry = [
     "conduwuit-router/sentry_telemetry",
 ]
 systemd = [
-    "conduwuit-router/systemd",
+	"conduwuit-core/systemd",
+	"conduwuit-router/systemd",
     "conduwuit-service/systemd"
 ]
 journald = [# This is a stub on non-unix platforms

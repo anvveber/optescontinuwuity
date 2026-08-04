@@ -82,6 +82,7 @@ sentry_telemetry = [
 ]
 systemd = [
 	"dep:sd-notify",
+	"dep:socket2"
 ]
 zstd_compression = [
 	"conduwuit-api/zstd_compression",
@@ -129,6 +130,8 @@ tracing.workspace = true
 [target.'cfg(all(unix, target_os = "linux"))'.dependencies]
 sd-notify.workspace = true
 sd-notify.optional = true
+socket2.workspace = true
+socket2.optional = true
 
 [lints]
 workspace = true

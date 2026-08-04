@@ -1,6 +1,9 @@
 mod tls;
 mod unix;
 
+#[cfg(all(target_os = "linux", feature = "systemd"))]
+mod fd;
+
 use std::{
 	io,
 	net::SocketAddr,
@@ -46,18 +49,46 @@ pub(super) async fn serve(
 
 	let mut listeners = Vec::new();
 
-	populate_tcp_listeners(config, &mut listeners).await?;
+	// Track which addrs/paths we have so we don't bind duplicates
+	let mut bound_ip_addrs = Vec::new();
+	#[cfg(all(target_os = "linux", feature = "systemd"))]
+	let mut bound_unix_socket_paths = Vec::new();
 
-	if cfg!(unix)
-		&& let Some(ref path) = config.unix_socket_path
-	{
-		match unix::bind_unix(path, config.unix_socket_perms.to_string()).await {
-			| Ok(sock) => {
-				listeners.push(Listener::Unix(sock));
-			},
-			| Err(e) => {
-				return Err!(warn!(path = %path.display(), ?e, "Failed to bind Unix socket"));
-			},
+	#[cfg(all(target_os = "linux", feature = "systemd"))]
+	if config.use_socket_activation || config.use_exclusively_socket_activation {
+		fd::populate_listeners_from_socket_activation(
+			&mut listeners,
+			&mut bound_ip_addrs,
+			&mut bound_unix_socket_paths,
+		);
+
+		if config.use_exclusively_socket_activation && listeners.is_empty() {
+			return Err!(error!(
+				"Socket activation provided no usable listening sockets, and \
+				 `use_exclusively_socket_activation` is enabled"
+			));
+		}
+	}
+
+	if !config.use_exclusively_socket_activation {
+		populate_tcp_listeners(config, &mut listeners, &mut bound_ip_addrs).await?;
+
+		if cfg!(unix)
+			&& let Some(ref path) = config.unix_socket_path
+		{
+			#[cfg(all(target_os = "linux", feature = "systemd"))]
+			if bound_unix_socket_paths.contains(path) {
+				info!(path = ?path.display(), "Unix socket path already bound, not binding again");
+			}
+
+			match unix::bind_unix(path, config.unix_socket_perms.to_string()).await {
+				| Ok(sock) => {
+					listeners.push(Listener::Unix(sock));
+				},
+				| Err(e) => {
+					return Err!(warn!(path = %path.display(), ?e, "Failed to bind Unix socket"));
+				},
+			}
 		}
 	}
 
@@ -145,11 +176,21 @@ fn should_use_tls(server: &Arc<Server>) -> Result<bool> {
 }
 
 /// Bind listeners from the `address` and `port` configuration options.
-async fn populate_tcp_listeners(config: &Manager, listeners: &mut Vec<Listener>) -> Result<()> {
+async fn populate_tcp_listeners(
+	config: &Manager,
+	listeners: &mut Vec<Listener>,
+	bound_ip_addrs: &mut Vec<SocketAddr>,
+) -> Result<()> {
 	for addr in config.get_bind_addrs() {
+		if bound_ip_addrs.contains(&addr) {
+			info!(%addr, "IP address already bound, not binding again");
+			continue;
+		}
+
 		match TcpListener::bind(addr).await {
 			| Ok(sock) => {
 				listeners.push(Listener::Tcp(sock));
+				bound_ip_addrs.push(addr);
 			},
 			| Err(e) => {
 				return Err!(warn!(%addr, ?e, "Failed to bind TCP socket"));

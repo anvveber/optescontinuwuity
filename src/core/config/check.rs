@@ -49,6 +49,24 @@ pub fn check(config: &Config) -> Result {
 		);
 	}
 
+	if config.use_exclusively_socket_activation {
+		if cfg!(not(target_os = "linux")) {
+			return Err!(Config(
+				"use_exclusively_socket_activation",
+				"Socket activation support is only available on Linux platforms. Please remove \
+				 'use_exclusively_socket_activation' from your config."
+			));
+		}
+
+		if cfg!(not(feature = "systemd")) {
+			return Err!(Config(
+				"use_exclusively_socket_activation",
+				"continuwuity was not built with socket activation support (\"systemd\"). \
+				 Please remove 'use_exclusively_socket_activation' from your config."
+			));
+		}
+	}
+
 	if cfg!(not(unix)) && config.unix_socket_path.is_some() {
 		return Err!(Config(
 			"unix_socket_path",
@@ -57,15 +75,21 @@ pub fn check(config: &Config) -> Result {
 		));
 	}
 
-	if config.unix_socket_path.is_none() && config.get_bind_hosts().is_empty() {
+	if config.unix_socket_path.is_none()
+		&& !config.use_exclusively_socket_activation
+		&& config.get_bind_hosts().is_empty()
+	{
 		return Err!(Config("address", "No TCP addresses were specified to listen on"));
 	}
 
-	if config.unix_socket_path.is_none() && config.get_bind_ports().is_empty() {
+	if config.unix_socket_path.is_none()
+		&& !config.use_exclusively_socket_activation
+		&& config.get_bind_ports().is_empty()
+	{
 		return Err!(Config("port", "No ports were specified to listen on"));
 	}
 
-	if config.unix_socket_path.is_none() {
+	if config.unix_socket_path.is_none() && !config.use_exclusively_socket_activation {
 		config.get_bind_addrs().iter().for_each(|addr| {
 			use std::path::Path;
 

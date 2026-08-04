@@ -51,6 +51,7 @@ release_max_log_level = [
     "log/release_max_level_info",
 ]
 sentry_telemetry = []
+systemd = []
 zstd_compression = [
     "reqwest/zstd",
 ]

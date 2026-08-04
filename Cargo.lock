@@ -1124,6 +1124,7 @@ dependencies = [
  "sentry-tower",
  "sentry-tracing",
  "serde_json",
+ "socket2",
  "tokio",
  "tower",
  "tower-http 0.7.1",
