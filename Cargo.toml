@@ -377,6 +377,7 @@ features = [
     "unstable-msc4203",
     "unstable-msc4310",
     "unstable-msc4380",
+    "unstable-msc4140",
     "unstable-msc4143",
     "unstable-msc4293",
     "unstable-msc4406",
