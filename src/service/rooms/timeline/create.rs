@@ -14,7 +14,10 @@ use futures::{StreamExt, TryStreamExt, future, future::ready};
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, OwnedEventId, OwnedRoomId, RoomId, RoomVersionId,
 	UserId,
-	events::{StateEventType, TimelineEventType, room::create::RoomCreateEventContent},
+	events::{
+		StateEventType, TimelineEventType,
+		room::{create::RoomCreateEventContent, redaction::RoomRedactionEventContent},
+	},
 	room_version_rules::RoomVersionRules,
 	uint,
 };
@@ -56,6 +59,38 @@ pub fn pdu_fits(owned_obj: &CanonicalJsonObject) -> bool {
 		| Ok(s) => s.len() <= 65535,
 		| Err(_) => false,
 	}
+}
+
+/// Normalizes redaction fields for the room version.
+fn normalize_redaction(
+	event_type: &TimelineEventType,
+	content: Box<RawValue>,
+	redacts: Option<OwnedEventId>,
+	room_version_rules: &RoomVersionRules,
+) -> Result<(Box<RawValue>, Option<OwnedEventId>)> {
+	if *event_type != TimelineEventType::RoomRedaction {
+		return Ok((content, redacts));
+	}
+
+	let mut content: RoomRedactionEventContent = serde_json::from_str(content.get())
+		.map_err(|_| err!(Request(BadJson("Invalid m.room.redaction content."))))?;
+
+	let redacts = redacts.or_else(|| content.redacts.take()).ok_or_else(|| {
+		err!(Request(BadJson("m.room.redaction content must include a redacts field.")))
+	})?;
+
+	if room_version_rules.redaction.content_field_redacts {
+		content.redacts = Some(redacts);
+		return Ok((
+			to_raw_value(&content).expect("Room redaction content is serializable"),
+			None,
+		));
+	}
+
+	Ok((
+		to_raw_value(&content).expect("Room redaction content is serializable"),
+		Some(redacts),
+	))
 }
 
 /// Pulls the room version ID out of the given (create) event.
@@ -128,6 +163,8 @@ impl super::Service {
 		let Some(room_version_rules) = room_version.rules() else {
 			return Err!(Request(UnsupportedRoomVersion("Unsupported room version")));
 		};
+		let (content, redacts) =
+			normalize_redaction(&event_type, content, redacts, &room_version_rules)?;
 
 		let prev_events: Vec<OwnedEventId> = match room_id {
 			| Some(room_id) =>
@@ -376,5 +413,58 @@ impl super::Service {
 
 		trace!("New PDU created: {pdu:?}");
 		Ok((pdu, pdu_json))
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use ruma::{RoomVersionId, event_id};
+	use serde_json::{json, value::to_raw_value};
+
+	use super::*;
+
+	fn redaction_content() -> Box<RawValue> {
+		to_raw_value(&json!({
+			"reason": "spam",
+			"redacts": "$redacted:example.org",
+		}))
+		.expect("valid JSON")
+	}
+
+	#[test]
+	fn redaction_uses_event_field_before_v11() {
+		let (content, redacts) = normalize_redaction(
+			&TimelineEventType::RoomRedaction,
+			redaction_content(),
+			None,
+			&RoomVersionId::V10.rules().expect("supported room version"),
+		)
+		.expect("valid redaction");
+
+		assert_eq!(redacts.as_deref(), Some(event_id!("$redacted:example.org")));
+		assert_eq!(
+			serde_json::from_str::<serde_json::Value>(content.get()).expect("valid JSON"),
+			json!({ "reason": "spam" })
+		);
+	}
+
+	#[test]
+	fn redaction_uses_content_field_in_v11() {
+		let (content, redacts) = normalize_redaction(
+			&TimelineEventType::RoomRedaction,
+			redaction_content(),
+			None,
+			&RoomVersionId::V11.rules().expect("supported room version"),
+		)
+		.expect("valid redaction");
+
+		assert!(redacts.is_none());
+		assert_eq!(
+			serde_json::from_str::<serde_json::Value>(content.get()).expect("valid JSON"),
+			json!({
+				"reason": "spam",
+				"redacts": "$redacted:example.org",
+			})
+		);
 	}
 }
