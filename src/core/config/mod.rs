@@ -249,7 +249,7 @@ pub struct Config {
 	/// An example of a PDU would be a message or joining a room.
 	///
 	/// Setting this higher might be useful if the server has a large memory
-	/// capacity and is noticably I/O limted.
+	/// capacity and is noticeably I/O limited.
 	///
 	/// This defaults to 100,000 + (10,000 * CPU core count)
 	///
@@ -261,10 +261,10 @@ pub struct Config {
 	/// Accepts any 32-bit integer.
 	///
 	/// When determining is a user is authorized to send an event,
-	/// the server will first check the cache for an auth chain.
+	/// the server will first check the auth chain cache.
 	/// If the auth chain is not present in the cache,
-	/// The server will read the auth chain from the database
-	/// and add it to the cache.
+	/// The server will reach out to the origin server for
+	/// authorization.
 	///
 	/// This defaults to 100,000 + (10,000 * CPU core count)
 	///
@@ -552,7 +552,7 @@ pub struct Config {
 	/// response. This can be used for things like backfilling room data and
 	/// getting missing events.
 	///
-	/// default: 192
+	/// default: 1024
 	#[serde(default = "default_max_fetch_prev_events")]
 	pub max_fetch_prev_events: u16,
 
