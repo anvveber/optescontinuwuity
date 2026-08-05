@@ -1,6 +1,6 @@
-pub mod blurhash;
 mod data;
 pub(super) mod migrations;
+pub mod mxc;
 mod preview;
 mod remote;
 mod tests;
@@ -17,7 +17,7 @@ use conduwuit::{
 	},
 	warn,
 };
-use ruma::{Mxc, OwnedMxcUri, UserId, http_headers::ContentDisposition};
+use ruma::{OwnedMxcUri, UserId, http_headers::ContentDisposition};
 use tokio::{
 	fs,
 	io::{AsyncReadExt, AsyncWriteExt, BufReader},
@@ -25,7 +25,7 @@ use tokio::{
 
 use self::data::{Data, Metadata};
 pub use self::thumbnail::Dim;
-use crate::{Dep, client, globals, moderation, sending};
+use crate::{Dep, client, globals, media::mxc::Mxc, moderation, sending};
 
 #[derive(Debug)]
 pub struct FileMeta {
@@ -313,7 +313,7 @@ impl Service {
 		}
 
 		if remote_mxcs.is_empty() {
-			return Err!(Database("Did not found any eligible MXCs to delete."));
+			return Err!(Database("Did not find any eligible MXCs to delete."));
 		}
 
 		debug_info!("Deleting media now {direction:?} {time_boundary:?}");

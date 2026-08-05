@@ -1,15 +1,17 @@
 use std::{borrow::Cow, collections::HashMap, sync::Arc};
 
-use conduwuit::{Err, Error, Result, result::FlatOk};
+use conduwuit::{Err, Error, Result, config::OidcProfileKeyImportMode, result::FlatOk};
 use database::{Deserialized, Map};
 use governor::{DefaultKeyedRateLimiter, Quota, RateLimiter};
 use lettre::{Address, message::Mailbox};
 use nonzero_ext::nonzero;
 use ruma::{
-	ClientSecret, OwnedClientSecret, OwnedSessionId, SessionId, api::client::error::ErrorKind,
+	ClientSecret, OwnedClientSecret, OwnedSessionId, SessionId,
+	api::error::{ErrorKind, LimitExceededErrorData},
 };
+use tokio::sync::MutexGuard;
 
-mod session;
+pub mod session;
 
 use crate::{
 	Args, Dep, config,
@@ -25,12 +27,15 @@ pub struct Service {
 	ratelimiter: DefaultKeyedRateLimiter<Address>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EmailRequirement {
 	/// Users may change their email, but cannot remove it entirely.
 	Required,
 	/// Users may change or remove their email.
 	Optional,
-	/// Users may not change their email at all.
+	/// Users may see their email, but may not change it.
+	Locked,
+	/// Email features are disabled.
 	Unavailable,
 }
 
@@ -40,6 +45,9 @@ impl EmailRequirement {
 
 	#[must_use]
 	pub fn may_remove(&self) -> bool { matches!(self, Self::Optional) }
+
+	#[must_use]
+	pub fn may_view(&self) -> bool { !matches!(self, Self::Unavailable) }
 }
 
 struct Data {
@@ -84,7 +92,14 @@ impl Service {
 	/// Check if users are required to have an email address.
 	pub fn email_requirement(&self) -> EmailRequirement {
 		if let Some(smtp) = &self.services.config.smtp {
-			if smtp.require_email_for_registration || smtp.require_email_for_token_registration {
+			if let Some(oidc) = &self.services.config.oauth.oidc
+				&& matches!(oidc.profile_key_import_mode, OidcProfileKeyImportMode::OnLogin)
+				&& oidc.email_claim.is_some()
+			{
+				EmailRequirement::Locked
+			} else if smtp.require_email_for_registration
+				|| smtp.require_email_for_token_registration
+			{
 				EmailRequirement::Required
 			} else {
 				EmailRequirement::Optional
@@ -121,7 +136,7 @@ impl Service {
 						// Check ratelimiting for the target address.
 						if self.ratelimiter.check_key(&recipient.email).is_err() {
 							return Err(Error::BadRequest(
-								ErrorKind::LimitExceeded { retry_after: None },
+								ErrorKind::LimitExceeded(LimitExceededErrorData::new()),
 								"You're sending emails too fast, try again in a few minutes.",
 							));
 						}
@@ -218,13 +233,12 @@ impl Service {
 		Ok(())
 	}
 
-	/// Consume a validated validation session, removing it from the database
-	/// and returning the newly validated email address.
-	pub async fn consume_valid_session(
+	/// Get a validated validation session.
+	pub async fn get_valid_session(
 		&self,
 		session_id: &SessionId,
 		client_secret: &ClientSecret,
-	) -> Result<Address, Cow<'static, str>> {
+	) -> Result<ValidSession<'_>, Cow<'static, str>> {
 		let mut sessions = self.sessions.lock().await;
 
 		let Some(session) = sessions.get_session(session_id) else {
@@ -234,9 +248,13 @@ impl Service {
 		if session.client_secret == client_secret
 			&& matches!(session.validation_state, ValidationState::Validated)
 		{
-			let session = sessions.remove_session(session_id);
+			let email = session.email.clone();
 
-			Ok(session.email)
+			Ok(ValidSession {
+				email,
+				session_id: session_id.to_owned(),
+				sessions,
+			})
 		} else {
 			Err("This email address has not been validated. Did you use the link that was sent \
 			     to you?"
@@ -310,5 +328,22 @@ impl Service {
 			.await
 			.deserialized()
 			.ok()
+	}
+}
+
+pub struct ValidSession<'lock> {
+	pub email: Address,
+	session_id: OwnedSessionId,
+	sessions: MutexGuard<'lock, ValidationSessions>,
+}
+
+impl ValidSession<'_> {
+	/// Consume this session, removing it from the database and releasing the
+	/// lock it holds.
+	#[must_use]
+	pub fn consume(mut self) -> Address {
+		self.sessions.remove_session(&self.session_id);
+
+		self.email
 	}
 }

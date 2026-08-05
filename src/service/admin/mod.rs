@@ -11,26 +11,29 @@ use std::{
 use async_trait::async_trait;
 use conduwuit::{Err, SyncRwLock, utils};
 use conduwuit_core::{
-	Error, Event, Result, Server, debug, err, error, error::default_log, pdu::PduBuilder,
+	Error, Event, Result, Server, debug, err, error, error::default_log, pdu::PartialPdu,
 };
 pub use create::create_admin_room;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt};
 use loole::{Receiver, Sender};
 use ruma::{
-	Mxc, OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
+	OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
+	api::client::discovery::discover_support::{Contact, ContactRole},
+	assign,
 	events::{
 		Mentions,
-		room::{
-			MediaSource,
-			message::{
-				FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent,
-			},
+		room::message::{
+			FileInfo, FileMessageEventContent, MessageType, Relation, RoomMessageEventContent,
 		},
 	},
 };
 use tokio::sync::RwLock;
 
-use crate::{Dep, account_data, globals, media::MXC_LENGTH, rooms, rooms::state::RoomMutexGuard};
+use crate::{
+	Dep, account_data, config, globals,
+	media::{MXC_LENGTH, mxc::Mxc},
+	rooms::{self, state::RoomMutexGuard},
+};
 
 pub struct Service {
 	services: Services,
@@ -43,6 +46,7 @@ pub struct Service {
 
 struct Services {
 	server: Arc<Server>,
+	config: Dep<config::Service>,
 	globals: Dep<globals::Service>,
 	alias: Dep<rooms::alias::Service>,
 	timeline: Dep<rooms::timeline::Service>,
@@ -61,7 +65,7 @@ pub struct CommandInput {
 	pub command: String,
 	pub reply_id: Option<OwnedEventId>,
 	pub source: InvocationSource,
-	pub sender: Option<Box<UserId>>,
+	pub sender: Option<OwnedUserId>,
 }
 
 /// Where a command is being invoked from.
@@ -114,6 +118,7 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			services: Services {
 				server: args.server.clone(),
+				config: args.depend::<config::Service>("config"),
 				globals: args.depend::<globals::Service>("globals"),
 				alias: args.depend::<rooms::alias::Service>("rooms::alias"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
@@ -200,19 +205,18 @@ impl Service {
 				.await
 				.expect("failed to create text file");
 			let size_u64: u64 = message_content.body().len().try_into().map_or(0, |n| n);
-			let metadata = FileInfo {
-				mimetype: Some("text/markdown".to_owned()),
-				size: Some(UInt::new_saturating(size_u64)),
-				thumbnail_info: None,
-				thumbnail_source: None,
-			};
-			let content = FileMessageEventContent {
-				body: "Output was too large to send as text.".to_owned(),
-				formatted: None,
-				filename: Some("output.md".to_owned()),
-				source: MediaSource::Plain(file),
-				info: Some(Box::new(metadata)),
-			};
+
+			let mut metadata = FileInfo::new();
+			metadata.mimetype = Some("text/markdown".to_owned());
+			metadata.size = Some(UInt::new_saturating(size_u64));
+
+			let mut content = FileMessageEventContent::plain(
+				"Output was too large to send as text.".to_owned(),
+				file,
+			);
+			content.filename = Some("output.md".to_owned());
+			content.info = Some(Box::new(metadata));
+
 			RoomMessageEventContent::new(MessageType::File(content))
 		} else {
 			message_content
@@ -317,7 +321,7 @@ impl Service {
 		command: String,
 		reply_id: Option<OwnedEventId>,
 		source: InvocationSource,
-		sender: Box<UserId>,
+		sender: OwnedUserId,
 	) -> Result<()> {
 		self.channel
 			.0
@@ -395,7 +399,7 @@ impl Service {
 				let mut stream = admin_users;
 
 				while let Some(user_id) = stream.next().await {
-					generated_admin_list.push(user_id.to_owned());
+					generated_admin_list.push(user_id.clone());
 				}
 			}
 		}
@@ -452,13 +456,18 @@ impl Service {
 	}
 
 	async fn handle_response(&self, content: RoomMessageEventContent) -> Result<()> {
-		let Some(Relation::Reply { in_reply_to }) = content.relates_to.as_ref() else {
+		let Some(Relation::Reply(reply)) = content.relates_to.as_ref() else {
 			return Ok(());
 		};
 
-		let Ok(pdu) = self.services.timeline.get_pdu(&in_reply_to.event_id).await else {
+		let Ok(pdu) = self
+			.services
+			.timeline
+			.get_pdu(&reply.in_reply_to.event_id)
+			.await
+		else {
 			error!(
-				event_id = ?in_reply_to.event_id,
+				event_id = ?reply.in_reply_to.event_id,
 				"Missing admin command in_reply_to event"
 			);
 			return Ok(());
@@ -488,7 +497,7 @@ impl Service {
 			.services
 			.timeline
 			.build_and_append_pdu(
-				PduBuilder::timeline(&self.text_or_file(content).await),
+				PartialPdu::timeline(&self.text_or_file(content).await),
 				user_id,
 				Some(room_id),
 				&state_lock,
@@ -520,7 +529,7 @@ impl Service {
 		self.services
 			.timeline
 			.build_and_append_pdu(
-				PduBuilder::timeline(&content),
+				PartialPdu::timeline(&content),
 				user_id,
 				Some(room_id),
 				state_lock,
@@ -544,6 +553,8 @@ impl Service {
 			return None;
 		}
 
+		// Trim leading spaces from commands
+		let trimmed_body: &str = body.trim_start();
 		if let Some(room_id) = event.room_id()
 			&& self.is_admin_room(room_id).await
 		{
@@ -551,7 +562,9 @@ impl Service {
 
 			// Ignore messages which aren't admin commands
 			let server_user = &self.services.globals.server_user;
-			if !(body.starts_with("!admin") || body.starts_with(server_user.as_str())) {
+			if !(trimmed_body.starts_with("!admin")
+				|| trimmed_body.starts_with(server_user.as_str()))
+			{
 				return None;
 			}
 
@@ -567,8 +580,8 @@ impl Service {
 			// This is a message outside the admin room
 
 			// Is it an escaped admin command? i.e. `\!admin --help`
-			let is_public_escape =
-				body.starts_with('\\') && body.trim_start_matches('\\').starts_with("!admin");
+			let is_public_escape = trimmed_body.starts_with('\\')
+				&& trimmed_body.trim_start_matches('\\').starts_with("!admin");
 
 			// Ignore the message if it's not
 			if !is_public_escape {
@@ -613,5 +626,53 @@ impl Service {
 		let receiver = &mut *self.services.services.write();
 		let weak = services.map(Arc::downgrade);
 		*receiver = weak;
+	}
+
+	/// Get the server's configured support contacts.
+	pub async fn get_support_contacts(&self) -> Vec<Contact> {
+		let email_address = self.services.config.well_known.support_email.clone();
+		let matrix_id = self.services.config.well_known.support_mxid.clone();
+		let pgp_key = self.services.config.well_known.support_pgp_key.clone();
+
+		// TODO: support defining multiple contacts in the config
+		let mut contacts: Vec<Contact> = vec![];
+
+		let role = self
+			.services
+			.config
+			.well_known
+			.support_role
+			.clone()
+			.unwrap_or(ContactRole::Admin);
+
+		// Add configured contact if at least one contact method is specified
+		let configured_contact = match (matrix_id, email_address) {
+			| (Some(matrix_id), email_address) =>
+				Some(assign!(Contact::with_matrix_id(role, matrix_id), { email_address })),
+			| (None, Some(email_address)) =>
+				Some(Contact::with_email_address(role, email_address)),
+			| (None, None) => None,
+		};
+
+		if let Some(mut configured_contact) = configured_contact {
+			configured_contact.pgp_key = pgp_key;
+
+			contacts.push(configured_contact);
+		}
+
+		// Try to add admin users as contacts if no contacts are configured
+		if contacts.is_empty() {
+			let admin_users = self.get_admins().await;
+
+			for user_id in &admin_users {
+				if *user_id == self.services.globals.server_user {
+					continue;
+				}
+
+				contacts.push(Contact::with_matrix_id(ContactRole::Admin, user_id.to_owned()));
+			}
+		}
+
+		contacts
 	}
 }

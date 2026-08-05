@@ -1,7 +1,7 @@
-use std::{collections::HashMap, fmt::Write, iter::once, sync::Arc};
+use std::{collections::HashMap, fmt::Write, sync::Arc};
 
 use async_trait::async_trait;
-use conduwuit::{RoomVersion, debug};
+use conduwuit::{debug, utils::stream::WidebandExt};
 use conduwuit_core::{
 	Event, PduEvent, Result, err,
 	result::FlatOk,
@@ -18,19 +18,19 @@ use futures::{
 };
 use ruma::{
 	EventId, OwnedEventId, OwnedRoomId, RoomId, RoomVersionId, UserId,
-	events::{
-		AnyStrippedStateEvent, StateEventType, TimelineEventType,
-		room::create::RoomCreateEventContent,
-	},
-	serde::Raw,
+	api::federation::membership::RawStrippedState,
+	events::{StateEventType, TimelineEventType, room::create::RoomCreateEventContent},
+	room_version_rules::RoomVersionRules,
 };
 
 use crate::{
-	Dep, globals, rooms,
+	Dep, globals,
 	rooms::{
+		self,
 		short::{ShortEventId, ShortStateHash},
 		state_compressor::{CompressedState, parse_compressed_state_event},
 	},
+	sending, sync,
 };
 
 pub struct Service {
@@ -42,10 +42,11 @@ pub struct Service {
 struct Services {
 	globals: Dep<globals::Service>,
 	short: Dep<rooms::short::Service>,
-	spaces: Dep<rooms::spaces::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
 	state_accessor: Dep<rooms::state_accessor::Service>,
 	state_compressor: Dep<rooms::state_compressor::Service>,
+	sending: Dep<sending::Service>,
+	sync: Dep<sync::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 }
 
@@ -66,12 +67,13 @@ impl crate::Service for Service {
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
-				spaces: args.depend::<rooms::spaces::Service>("rooms::spaces"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				state_accessor: args
 					.depend::<rooms::state_accessor::Service>("rooms::state_accessor"),
 				state_compressor: args
 					.depend::<rooms::state_compressor::Service>("rooms::state_compressor"),
+				sending: args.depend::<sending::Service>("sending"),
+				sync: args.depend::<sync::Service>("sync"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},
 			db: Data {
@@ -109,7 +111,7 @@ impl Service {
 			.then(|shorteventid| {
 				self.services
 					.short
-					.get_eventid_from_short::<Box<_>>(shorteventid)
+					.get_eventid_from_short::<OwnedEventId>(shorteventid)
 			})
 			.ignore_err();
 
@@ -128,16 +130,8 @@ impl Service {
 
 					self.services
 						.state_cache
-						.update_membership(room_id, user_id, &pdu, false)
+						.update_membership(room_id, &user_id, &pdu, false)
 						.await?;
-				},
-				| TimelineEventType::SpaceChild => {
-					self.services
-						.spaces
-						.roomid_spacehierarchy_cache
-						.lock()
-						.await
-						.remove(room_id);
 				},
 				| _ => continue,
 			}
@@ -146,6 +140,8 @@ impl Service {
 		self.services.state_cache.update_joined_count(room_id).await;
 
 		self.set_room_state(room_id, shortstatehash, state_lock);
+
+		self.services.sync.wake_all_joined(room_id).await;
 
 		Ok(())
 	}
@@ -308,39 +304,62 @@ impl Service {
 	}
 
 	#[tracing::instrument(skip_all, level = "debug")]
-	pub async fn summary_stripped<'a, E>(
+	pub async fn summary_stripped(
 		&self,
-		event: &'a E,
+		event: &PduEvent,
 		room_id: &RoomId,
-	) -> Vec<Raw<AnyStrippedStateEvent>>
-	where
-		E: Event + Send + Sync,
-		&'a E: Event + Send,
-	{
-		let cells = [
+		target_user: &UserId,
+		federation: bool,
+	) -> Vec<RawStrippedState> {
+		let mut state_events = [
 			(&StateEventType::RoomCreate, ""),
 			(&StateEventType::RoomJoinRules, ""),
 			(&StateEventType::RoomCanonicalAlias, ""),
 			(&StateEventType::RoomName, ""),
 			(&StateEventType::RoomAvatar, ""),
-			(&StateEventType::RoomMember, event.sender().as_str()), // Add recommended events
+			(&StateEventType::RoomMember, event.sender().as_str()),
 			(&StateEventType::RoomEncryption, ""),
 			(&StateEventType::RoomTopic, ""),
-		];
+		]
+		.to_vec();
 
-		let fetches = cells.into_iter().map(|(event_type, state_key)| {
-			self.services
-				.state_accessor
-				.room_state_get(room_id, event_type, state_key)
-		});
+		if target_user != event.sender() {
+			state_events.push((&StateEventType::RoomMember, target_user.as_str()));
+		}
+
+		let fetches = state_events
+			.into_iter()
+			.map(async |(event_type, state_key)| {
+				if event.event_type() == &TimelineEventType::from(event_type.clone())
+					&& event.state_key() == Some(state_key)
+				{
+					Ok(event.clone())
+				} else {
+					self.services
+						.state_accessor
+						.room_state_get(room_id, event_type, state_key)
+						.await
+				}
+			});
 
 		join_all(fetches)
 			.await
 			.into_iter()
 			.filter_map(Result::ok)
-			.map(Event::into_format)
-			.chain(once(event.to_format()))
+			.stream()
+			.wide_then(async |pdu| {
+				let formatted = if federation {
+					self.services
+						.sending
+						.convert_to_outgoing_federation_event(pdu.to_canonical_object())
+						.await
+				} else {
+					serde_json::value::to_raw_value(&pdu).unwrap()
+				};
+				RawStrippedState::Pdu(formatted)
+			})
 			.collect()
+			.await
 	}
 
 	/// Set the state hash to a new version, but does not update state_cache.
@@ -378,16 +397,26 @@ impl Service {
 			.deserialized()
 	}
 
+	pub fn all_forward_extremities(
+		&self,
+	) -> impl Stream<Item = (OwnedRoomId, OwnedEventId)> + Send {
+		self.db
+			.roomid_pduleaves
+			.keys()
+			.map_ok(|(room_id, event_id): (OwnedRoomId, OwnedEventId)| (room_id, event_id))
+			.ignore_err()
+	}
+
 	pub fn get_forward_extremities<'a>(
 		&'a self,
 		room_id: &'a RoomId,
-	) -> impl Stream<Item = &'a EventId> + Send + 'a {
+	) -> impl Stream<Item = OwnedEventId> + Send + 'a {
 		let prefix = (room_id, Interfix);
 
 		self.db
 			.roomid_pduleaves
 			.keys_prefix(&prefix)
-			.map_ok(|(_, event_id): (Ignore, &EventId)| event_id)
+			.map_ok(|(_, event_id): (Ignore, OwnedEventId)| event_id)
 			.ignore_err()
 	}
 
@@ -414,7 +443,7 @@ impl Service {
 	}
 
 	/// This fetches auth events from the current state.
-	#[tracing::instrument(skip(self, content, room_version), level = "trace")]
+	#[tracing::instrument(skip(self, content, room_version_rules), level = "trace")]
 	pub async fn get_auth_events(
 		&self,
 		room_id: &RoomId,
@@ -422,14 +451,19 @@ impl Service {
 		sender: &UserId,
 		state_key: Option<&str>,
 		content: &serde_json::value::RawValue,
-		room_version: &RoomVersion,
+		room_version_rules: &RoomVersionRules,
 	) -> Result<StateMap<PduEvent>> {
 		let Ok(shortstatehash) = self.get_room_shortstatehash(room_id).await else {
 			return Ok(HashMap::new());
 		};
 
-		let auth_types =
-			state_res::auth_types_for_event(kind, sender, state_key, content, room_version)?;
+		let auth_types = state_res::auth_types_for_event(
+			kind,
+			sender,
+			state_key,
+			content,
+			room_version_rules,
+		)?;
 		debug!(?auth_types, "Auth types for event");
 		let sauthevents: HashMap<_, _> = auth_types
 			.iter()

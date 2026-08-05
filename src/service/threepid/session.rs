@@ -8,14 +8,14 @@ use lettre::Address;
 use ruma::{ClientSecret, OwnedClientSecret, OwnedSessionId, SessionId};
 
 #[derive(Default)]
-pub(super) struct ValidationSessions {
+pub struct ValidationSessions {
 	sessions: HashMap<OwnedSessionId, ValidationSession>,
 	client_secrets: HashMap<OwnedClientSecret, OwnedSessionId>,
 }
 
 /// A pending or completed email validation session.
 #[derive(Debug)]
-pub(crate) struct ValidationSession {
+pub struct ValidationSession {
 	/// The session's ID
 	pub session_id: OwnedSessionId,
 	/// The client's supplied client secret
@@ -28,7 +28,7 @@ pub(crate) struct ValidationSession {
 
 /// The state of an email validation session.
 #[derive(Debug)]
-pub(crate) enum ValidationState {
+pub enum ValidationState {
 	/// The session is waiting for this validation token to be provided
 	Pending(ValidationToken),
 	/// The session has been validated
@@ -36,14 +36,14 @@ pub(crate) enum ValidationState {
 }
 
 #[derive(Clone, Debug)]
-pub(crate) struct ValidationToken {
+pub struct ValidationToken {
 	pub token: String,
 	pub issued_at: SystemTime,
 }
 
 impl ValidationToken {
 	// one hour
-	const MAX_TOKEN_AGE: Duration = Duration::from_secs(60 * 60);
+	const MAX_TOKEN_AGE: Duration = Duration::from_hours(1);
 	const RANDOM_TOKEN_LENGTH: usize = 16;
 
 	pub(super) fn new_random() -> Self {
@@ -69,8 +69,8 @@ impl ValidationSessions {
 	const RANDOM_SID_LENGTH: usize = 16;
 
 	#[must_use]
-	pub(super) fn generate_session_id() -> OwnedSessionId {
-		OwnedSessionId::parse(utils::random_string(Self::RANDOM_SID_LENGTH)).unwrap()
+	pub fn generate_session_id() -> OwnedSessionId {
+		SessionId::parse(utils::random_string(Self::RANDOM_SID_LENGTH)).unwrap()
 	}
 
 	pub(super) fn create_session(

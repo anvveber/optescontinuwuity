@@ -4,14 +4,10 @@ use axum::extract::State;
 use conduwuit::{Err, Event, Result, debug, info, trace, utils::to_canonical_object, warn};
 use ruma::{OwnedEventId, api::federation::event::get_missing_events};
 use serde_json::{json, value::RawValue};
+use service::rooms::event_handler::GET_MISSING_EVENTS_MAX_BATCH_SIZE;
 
 use super::AccessCheck;
 use crate::Ruma;
-
-/// arbitrary number but synapse's is 20 and we can handle lots of these anyways
-const LIMIT_MAX: usize = 50;
-/// spec says default is 10
-const LIMIT_DEFAULT: usize = 10;
 
 /// # `POST /_matrix/federation/v1/get_missing_events/{roomId}`
 ///
@@ -22,11 +18,11 @@ pub(crate) async fn get_missing_events_route(
 ) -> Result<get_missing_events::v1::Response> {
 	AccessCheck {
 		services: &services,
-		origin: body.origin(),
+		origin: &body.identity,
 		room_id: &body.room_id,
 		event_id: None,
 	}
-	.check()
+	.assert()
 	.await?;
 
 	if !services
@@ -36,7 +32,7 @@ pub(crate) async fn get_missing_events_route(
 		.await
 	{
 		info!(
-			origin = body.origin().as_str(),
+			origin = body.identity.as_str(),
 			"Refusing to serve state for room we aren't participating in"
 		);
 		return Err!(Request(NotFound("This server is not participating in that room.")));
@@ -45,8 +41,8 @@ pub(crate) async fn get_missing_events_route(
 	let limit = body
 		.limit
 		.try_into()
-		.unwrap_or(LIMIT_DEFAULT)
-		.min(LIMIT_MAX);
+		.unwrap_or(10)
+		.min(GET_MISSING_EVENTS_MAX_BATCH_SIZE);
 
 	let room_version = services.rooms.state.get_room_version(&body.room_id).await?;
 
@@ -78,14 +74,23 @@ pub(crate) async fn get_missing_events_route(
 				body.room_id
 			)));
 		}
+		if services
+			.rooms
+			.pdu_metadata
+			.is_event_rejected(pdu.event_id())
+			.await
+		{
+			debug!(%next_event_id, "event rejected, not traversing");
+			continue;
+		}
 
 		if !services
 			.rooms
 			.state_accessor
-			.server_can_see_event(body.origin(), &body.room_id, pdu.event_id())
+			.server_can_see_event(&body.identity, &body.room_id, pdu.event_id())
 			.await
 		{
-			debug!(%next_event_id, origin = %body.origin(), "redacting event origin cannot see");
+			debug!(%next_event_id, origin = %body.identity, "redacting event origin cannot see");
 			pdu.redact(&room_version, json!({}))?;
 		}
 
@@ -119,5 +124,5 @@ pub(crate) async fn get_missing_events_route(
 		debug!("limit reached before queue was empty");
 	}
 	results.reverse(); // return oldest first
-	Ok(get_missing_events::v1::Response { events: results })
+	Ok(get_missing_events::v1::Response::new(results))
 }

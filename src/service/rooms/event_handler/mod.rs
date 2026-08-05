@@ -1,11 +1,12 @@
 mod acl_check;
 mod fetch_and_handle_outliers;
+mod fetch_auth;
 mod fetch_prev;
 mod fetch_state;
 mod handle_incoming_pdu;
 mod handle_outlier_pdu;
-mod handle_prev_pdu;
 mod parse_incoming_pdu;
+pub mod pdu_checks;
 mod policy_server;
 mod resolve_state;
 mod state_at_incoming;
@@ -14,18 +15,24 @@ mod upgrade_outlier_pdu;
 use std::{collections::HashMap, fmt::Write, sync::Arc, time::Instant};
 
 use async_trait::async_trait;
-use conduwuit::{Err, Event, PduEvent, Result, RoomVersion, Server, SyncRwLock, utils::MutexMap};
-use ruma::{
-	OwnedEventId, OwnedRoomId, RoomId, RoomVersionId,
-	events::room::create::RoomCreateEventContent,
+use conduwuit::{Err, Event, PduEvent, Result, Server, SyncRwLock, utils::MutexMap};
+pub use fetch_and_handle_outliers::{
+	DagBuilderTree, GET_MISSING_EVENTS_MAX_BATCH_SIZE, build_local_dag,
 };
+use ruma::{
+	OwnedEventId, OwnedRoomId, events::room::create::RoomCreateEventContent,
+	room_version_rules::RoomVersionRules,
+};
+use tokio::sync::{Notify, mpsc};
 
 use crate::{Dep, globals, rooms, sending, server_keys};
-
 pub struct Service {
 	pub mutex_federation: RoomMutexMap,
 	pub federation_handletime: SyncRwLock<HandleTimeMap>,
+	pub extremity_squashers: SyncRwLock<HashMap<OwnedRoomId, mpsc::Sender<(usize, bool)>>>,
 	services: Services,
+	server_shutdown: Notify,
+	me: std::sync::Weak<Self>,
 }
 
 struct Services {
@@ -51,9 +58,11 @@ type HandleTimeMap = HashMap<OwnedRoomId, (OwnedEventId, Instant)>;
 #[async_trait]
 impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
-		Ok(Arc::new(Self {
+		Ok(Arc::new_cyclic(|s| Self {
+			me: s.clone(),
 			mutex_federation: RoomMutexMap::new(),
 			federation_handletime: HandleTimeMap::new().into(),
+			extremity_squashers: SyncRwLock::new(HashMap::new()),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				sending: args.depend::<sending::Service>("sending"),
@@ -72,6 +81,7 @@ impl crate::Service for Service {
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 				server: args.server.clone(),
 			},
+			server_shutdown: Notify::new(),
 		}))
 	}
 
@@ -86,42 +96,30 @@ impl crate::Service for Service {
 	}
 
 	fn name(&self) -> &str { crate::service::make_name(std::module_path!()) }
+
+	fn interrupt(&self) { self.server_shutdown.notify_waiters(); }
+
+	async fn clear_cache(&self) {}
 }
 
 impl Service {
+	/// Checks if a single event exists. Alias for
+	/// `self.services.timeline.pdu_exists`.
 	async fn event_exists(&self, event_id: OwnedEventId) -> bool {
 		self.services.timeline.pdu_exists(&event_id).await
 	}
 
+	/// Fetches a single PDU, returning None if there is an error.
 	async fn event_fetch(&self, event_id: OwnedEventId) -> Option<PduEvent> {
 		self.services.timeline.get_pdu(&event_id).await.ok()
 	}
 }
 
-fn check_room_id<Pdu: Event>(room_id: &RoomId, pdu: &Pdu) -> Result {
-	if pdu
-		.room_id()
-		.is_some_and(|claimed_room_id| claimed_room_id != room_id)
-	{
-		return Err!(Request(InvalidParam(error!(
-			pdu_event_id = %pdu.event_id(),
-			pdu_room_id = pdu.room_id().map(tracing::field::display),
-			%room_id,
-			"Found event from room in room",
-		))));
-	}
-
-	Ok(())
-}
-
-fn get_room_version_id<Pdu: Event>(create_event: &Pdu) -> Result<RoomVersionId> {
+fn get_room_version_rules<Pdu: Event>(create_event: &Pdu) -> Result<RoomVersionRules> {
 	let content: RoomCreateEventContent = create_event.get_content()?;
-	let room_version = content.room_version;
+	let Some(room_version_rules) = content.room_version.rules() else {
+		return Err!(Request(UnsupportedRoomVersion("Room version has no defined rules")));
+	};
 
-	Ok(room_version)
-}
-
-#[inline]
-fn to_room_version(room_version_id: &RoomVersionId) -> RoomVersion {
-	RoomVersion::new(room_version_id).expect("room version is supported")
+	Ok(room_version_rules)
 }

@@ -10,7 +10,7 @@ on:
       - "v*.*.*"
   workflow_dispatch:
   schedule:
-    - cron: '30 0 * * *'
+    - cron: '30 0 * * 1'
 
 jobs:
   build:
@@ -18,6 +18,7 @@ jobs:
     strategy:
       matrix:
         container: [ "ubuntu-latest", "ubuntu-previous", "debian-latest", "debian-oldstable" ]
+        arch: [ "amd64", "arm64" ]
     container:
       image: "ghcr.io/tcpipuk/act-runner:${{ matrix.container }}"
 
@@ -41,33 +42,22 @@ jobs:
       #    else
       #      echo "No workaround needed for llvm-project#153385"
       #    fi
-      - name: Pick compatible clang version
-        id: clang-version
-        run: |
-          # both latest need to use clang-23, but oldstable and previous can just use clang
-          if [[ "${{ matrix.container }}" == "ubuntu-latest" ]]; then
-            echo "Using clang-23 package for ${{ matrix.container }}"
-            echo "version=clang-23" >> $GITHUB_OUTPUT
-          else
-            echo "Using default clang package for ${{ matrix.container }}"
-            echo "version=clang" >> $GITHUB_OUTPUT
-          fi
 
       - name: Checkout repository with full history
-        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           ref: ${{ github.ref_name }}
 
       - name: Cache Cargo registry
-        uses: actions/cache@27d5ce7f107fe9357f9df03efb73ab90386fccae # v5
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6
         with:
           path: |
             ~/.cargo/registry
             ~/.cargo/git
-          key: cargo-debian-${{ steps.debian-version.outputs.distribution }}-${{ hashFiles('**/Cargo.lock') }}
+          key: cargo-debian-${{ steps.debian-version.outputs.distribution }}-${{ matrix.arch }}-${{ hashFiles('**/Cargo.lock') }}
           restore-keys: |
-            cargo-debian-${{ steps.debian-version.outputs.distribution }}-
+            cargo-debian-${{ steps.debian-version.outputs.distribution }}-${{ matrix.arch }}-
 
       - name: Setup sccache
         uses: https://git.tomfos.tr/tom/sccache-action@v1
@@ -81,10 +71,54 @@ jobs:
           # Aggressive GC since cache restores don't increment counter
           echo "CARGO_INCREMENTAL_GC_TRIGGER=5" >> $GITHUB_ENV
 
+      - name: Install cross-compilation tools for arm64
+        if: matrix.arch == 'arm64'
+        run: |
+          dpkg --add-architecture arm64
+          if ! apt-get update; then
+            # Older Ubuntu releases (e.g. noble) advertise arm64 in their
+            # Release files but only serve amd64/i386 from archive.ubuntu.com,
+            # so apt update 404s. Restrict the main sources to amd64 and
+            # fetch arm64 from ports.ubuntu.com instead.
+            CODENAME=$(lsb_release -sc)
+            # deb822 sources (noble and newer)
+            if [ -f /etc/apt/sources.list.d/ubuntu.sources ]; then
+              sed -i '/^Components:/a Architectures: amd64' /etc/apt/sources.list.d/ubuntu.sources
+            fi
+            # one-line sources (jammy and older)
+            if [ -f /etc/apt/sources.list ]; then
+              sed -i 's/^deb /deb [arch=amd64] /' /etc/apt/sources.list
+            fi
+            printf 'deb [arch=arm64] http://ports.ubuntu.com/ubuntu-ports %s main restricted universe multiverse\n' \
+              "$CODENAME" "$CODENAME-updates" "$CODENAME-security" \
+              > /etc/apt/sources.list.d/arm64-ports.list
+            apt-get update
+          fi
+          apt-get install -y \
+            gcc-aarch64-linux-gnu \
+            g++-aarch64-linux-gnu \
+            libc6-dev-arm64-cross
+
       - name: Setup Rust
         uses: ./.forgejo/actions/setup-rust
         with:
           github-token: ${{ secrets.GH_PUBLIC_RO }}
+
+      - name: Add Rust target
+        run: |
+          TARGET=${{ matrix.arch == 'arm64' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
+          rustup target add $TARGET
+
+      - name: Configure cross-compilation for arm64
+        if: matrix.arch == 'arm64'
+        run: |
+          echo "CARGO_TARGET_AARCH64_UNKNOWN_LINUX_GNU_LINKER=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CC_aarch64_unknown_linux_gnu=aarch64-linux-gnu-gcc" >> $GITHUB_ENV
+          echo "CXX_aarch64_unknown_linux_gnu=aarch64-linux-gnu-g++" >> $GITHUB_ENV
+          # rust-rocksdb's build script probes liburing via pkg-config, which
+          # refuses to run when host != target unless explicitly allowed
+          echo "PKG_CONFIG_ALLOW_CROSS=1" >> $GITHUB_ENV
+          echo "PKG_CONFIG_PATH_aarch64_unknown_linux_gnu=/usr/lib/aarch64-linux-gnu/pkgconfig" >> $GITHUB_ENV
 
       - name: Get package version and component
         id: package-meta
@@ -93,10 +127,10 @@ jobs:
           # VERSION is the package version, COMPONENT is used in
           # apt's repository config like a git repo branch
           VERSION=$BASE_VERSION
-          if [[ ${{ forge.ref_name }} =~ ^v+[0-9]\.+[0-9]\.+[0-9]$ ]]; then
+          if [[ ${{ forge.ref_name }} =~ ^v+[0-9]+\.+[0-9]+\.+[0-9]+$ ]]; then
             # Use the "stable" component for tagged semver releases
             COMPONENT="stable"
-          elif [[ ${{ forge.ref_name }} =~ ^v+[0-9]\.+[0-9]\.+[0-9] ]]; then
+          elif [[ ${{ forge.ref_name }} =~ ^v+[0-9]+\.+[0-9]+\.+[0-9]+ ]]; then
             # Use the "unstable" component for tagged semver pre-releases
             COMPONENT="unstable"
           else
@@ -130,22 +164,27 @@ jobs:
         run: |
           apt-get update -y
           # Build dependencies for rocksdb
-          apt-get install -y liburing-dev ${{ steps.clang-version.outputs.version }}
+          apt-get install -y liburing-dev clang
+          # For arm64 builds, install cross-compiled dependencies.
+          # libstdc++6:arm64 is needed by dpkg-shlibdeps to resolve the
+          # dynamically-linked libstdc++ when cargo-deb computes $auto depends.
+          if [ "${{ matrix.arch }}" = "arm64" ]; then
+            apt-get install -y liburing-dev:arm64 libstdc++6:arm64
+          fi
 
       - name: Run cargo-deb
         id: cargo-deb
         run: |
-          DEB_PATH=$(cargo deb --deb-version ${{ steps.package-meta.outputs.version }})
+          TARGET=${{ matrix.arch == 'arm64' && 'aarch64-unknown-linux-gnu' || 'x86_64-unknown-linux-gnu' }}
+          DEB_PATH=$(cargo deb --target $TARGET --deb-version ${{ steps.package-meta.outputs.version }})
           echo "path=$DEB_PATH" >> $GITHUB_OUTPUT
 
       - name: Test deb installation
+        if: matrix.arch == 'amd64'
         run: |
           echo "Installing: ${{ steps.cargo-deb.outputs.path }}"
-
           apt-get install -y ${{ steps.cargo-deb.outputs.path }}
-
           dpkg -s continuwuity
-
           [ -f /usr/bin/conduwuit ] && echo "✅ Binary installed successfully"
           [ -f /usr/lib/systemd/system/conduwuit.service ] && echo "✅ Systemd service installed"
           [ -f /etc/conduwuit/conduwuit.toml ] && echo "✅ Config file installed"
@@ -153,7 +192,7 @@ jobs:
       - name: Upload deb artifact
         uses: forgejo/upload-artifact@v4
         with:
-          name: continuwuity-${{ steps.debian-version.outputs.distribution }}
+          name: continuwuity-${{ steps.debian-version.outputs.distribution }}-${{ matrix.arch }}
           path: ${{ steps.cargo-deb.outputs.path }}
 
       - name: Publish to Forgejo package registry

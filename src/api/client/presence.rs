@@ -2,7 +2,10 @@ use std::time::Duration;
 
 use axum::extract::State;
 use conduwuit::{Err, Result};
-use ruma::api::client::presence::{get_presence, set_presence};
+use ruma::{
+	api::client::presence::{get_presence, set_presence},
+	assign,
+};
 
 use crate::Ruma;
 
@@ -13,20 +16,22 @@ pub(crate) async fn set_presence_route(
 	State(services): State<crate::State>,
 	body: Ruma<set_presence::v3::Request>,
 ) -> Result<set_presence::v3::Response> {
+	let sender_user = body.identity.expect_sender_user()?;
+
 	if !services.config.allow_local_presence {
 		return Err!(Request(Forbidden("Presence is disabled on this server")));
 	}
 
-	if body.sender_user() != body.user_id && body.appservice_info.is_none() {
+	if sender_user != body.user_id && !body.identity.is_appservice() {
 		return Err!(Request(InvalidParam("Not allowed to set presence of other users")));
 	}
 
 	services
 		.presence
-		.set_presence(body.sender_user(), &body.presence, None, None, body.status_msg.clone())
+		.set_presence(sender_user, &body.presence, None, None, body.status_msg.clone())
 		.await?;
 
-	Ok(set_presence::v3::Response {})
+	Ok(set_presence::v3::Response::new())
 }
 
 /// # `GET /_matrix/client/r0/presence/{userId}/status`
@@ -46,7 +51,7 @@ pub(crate) async fn get_presence_route(
 	let has_shared_rooms = services
 		.rooms
 		.state_cache
-		.user_sees_user(body.sender_user(), &body.user_id)
+		.user_sees_user(body.identity.expect_sender_user()?, &body.user_id)
 		.await;
 
 	if has_shared_rooms {
@@ -76,13 +81,11 @@ pub(crate) async fn get_presence_route(
 					.map(|millis| Duration::from_millis(millis.into())),
 			};
 
-			Ok(get_presence::v3::Response {
-				// TODO: Should ruma just use the presenceeventcontent type here?
+			Ok(assign!(get_presence::v3::Response::new(presence.content.presence), {
 				status_msg,
 				currently_active: presence.content.currently_active,
 				last_active_ago,
-				presence: presence.content.presence,
-			})
+			}))
 		},
 		| _ => Err!(Request(NotFound("Presence state for this user was not found"))),
 	}

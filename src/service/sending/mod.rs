@@ -19,7 +19,15 @@ use conduwuit::{
 	warn,
 };
 use futures::{FutureExt, Stream, StreamExt};
-use ruma::{RoomId, ServerName, UserId, api::OutgoingRequest};
+use ruma::{
+	OwnedServerName, RoomId, ServerName, UserId,
+	api::{
+		OutgoingRequest,
+		auth_scheme::{NoAccessToken, NoAuthentication, SendAccessToken},
+		federation::authentication::ServerSignatures,
+		path_builder::PathBuilder,
+	},
+};
 use tokio::{task, task::JoinSet};
 
 use self::data::Data;
@@ -28,8 +36,11 @@ pub use self::{
 	sender::{EDU_LIMIT, PDU_LIMIT},
 };
 use crate::{
-	Dep, account_data, client, federation, globals, presence, pusher, rooms,
-	rooms::timeline::RawPduId, users,
+	Dep, account_data, client,
+	federation::{self, FederationPathBuilderInput},
+	globals, presence, pusher,
+	rooms::{self, timeline::RawPduId},
+	users,
 };
 
 pub struct Service {
@@ -42,7 +53,6 @@ pub struct Service {
 struct Services {
 	client: Dep<client::Service>,
 	globals: Dep<globals::Service>,
-	state: Dep<rooms::state::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
 	user: Dep<rooms::user::Service>,
 	users: Dep<users::Service>,
@@ -86,7 +96,6 @@ impl crate::Service for Service {
 			services: Services {
 				client: args.depend::<client::Service>("client"),
 				globals: args.depend::<globals::Service>("globals"),
-				state: args.depend::<rooms::state::Service>("rooms::state"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				user: args.depend::<rooms::user::Service>("rooms::user"),
 				users: args.depend::<users::Service>("users"),
@@ -187,14 +196,12 @@ impl Service {
 	}
 
 	#[tracing::instrument(skip(self, servers, pdu_id), level = "debug")]
-	pub async fn send_pdu_servers<'a, S>(&self, servers: S, pdu_id: &RawPduId) -> Result
+	pub async fn send_pdu_servers<S>(&self, servers: S, pdu_id: &RawPduId) -> Result
 	where
-		S: Stream<Item = &'a ServerName> + Send + 'a,
+		S: Stream<Item = OwnedServerName> + Send,
 	{
 		let requests = servers
-			.map(|server| {
-				(Destination::Federation(server.into()), SendingEvent::Pdu(pdu_id.to_owned()))
-			})
+			.map(|server| (Destination::Federation(server), SendingEvent::Pdu(pdu_id.to_owned())))
 			.collect::<Vec<_>>()
 			.await;
 
@@ -233,16 +240,13 @@ impl Service {
 	}
 
 	#[tracing::instrument(skip(self, servers, serialized), level = "debug")]
-	pub async fn send_edu_servers<'a, S>(&self, servers: S, serialized: EduBuf) -> Result
+	pub async fn send_edu_servers<S>(&self, servers: S, serialized: EduBuf) -> Result
 	where
-		S: Stream<Item = &'a ServerName> + Send + 'a,
+		S: Stream<Item = OwnedServerName> + Send,
 	{
 		let requests = servers
 			.map(|server| {
-				(
-					Destination::Federation(server.to_owned()),
-					SendingEvent::Edu(serialized.clone()),
-				)
+				(Destination::Federation(server), SendingEvent::Edu(serialized.clone()))
 			})
 			.collect::<Vec<_>>()
 			.await;
@@ -269,12 +273,11 @@ impl Service {
 	}
 
 	#[tracing::instrument(skip(self, servers), level = "debug")]
-	pub async fn flush_servers<'a, S>(&self, servers: S) -> Result<()>
+	pub async fn flush_servers<S>(&self, servers: S) -> Result<()>
 	where
-		S: Stream<Item = &'a ServerName> + Send + 'a,
+		S: Stream<Item = OwnedServerName> + Send,
 	{
 		servers
-			.map(ToOwned::to_owned)
 			.map(Destination::Federation)
 			.map(Ok)
 			.ready_try_for_each(|dest| {
@@ -289,30 +292,75 @@ impl Service {
 
 	/// Sends a request to a federation server
 	#[inline]
-	pub async fn send_federation_request<T>(
+	pub async fn send_federation_request<'i, T>(
 		&self,
 		dest: &ServerName,
 		request: T,
 	) -> Result<T::IncomingResponse>
 	where
-		T: OutgoingRequest + Debug + Send,
+		T: OutgoingRequest<
+				Authentication = ServerSignatures,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
 	{
 		self.services.federation.execute(dest, request).await
 	}
 
 	/// Like send_federation_request() but with a very large timeout
 	#[inline]
-	pub async fn send_synapse_request<T>(
+	pub async fn send_slow_federation_request<'i, T>(
 		&self,
 		dest: &ServerName,
 		request: T,
 	) -> Result<T::IncomingResponse>
 	where
-		T: OutgoingRequest + Debug + Send,
+		T: OutgoingRequest<
+				Authentication = ServerSignatures,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
+	{
+		self.services.federation.execute_slow(dest, request).await
+	}
+
+	/// Send an unauthenticated federation request with no X-Matrix header.
+	#[inline]
+	pub async fn send_unauthenticated_request<'i, T>(
+		&self,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = NoAuthentication,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
 	{
 		self.services
 			.federation
-			.execute_synapse(dest, request)
+			.execute_unauthenticated(dest, request)
+			.await
+	}
+
+	/// Send an unauthenticated federation request with no X-Matrix header.
+	#[inline]
+	pub async fn send_legacy_media_request<'i, T>(
+		&self,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = NoAccessToken,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
+	{
+		self.services
+			.federation
+			.execute_on(&self.services.client.federation, dest, request, SendAccessToken::None)
 			.await
 	}
 
@@ -393,10 +441,10 @@ fn num_senders(args: &crate::Args<'_>) -> usize {
 		max_senders = max_senders.min(num_cores);
 	}
 
-	// If the user doesn't override the default 0, this is intended to then default
-	// to 1 for now as multiple senders is experimental.
-	args.server
-		.config
-		.sender_workers
-		.clamp(MIN_SENDERS, max_senders)
+	let worker_count = args.server.config.sender_workers;
+	if worker_count == 0 {
+		max_senders
+	} else {
+		worker_count.clamp(MIN_SENDERS, max_senders)
+	}
 }

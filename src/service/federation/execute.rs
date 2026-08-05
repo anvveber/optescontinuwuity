@@ -1,174 +1,261 @@
-use std::{fmt::Debug, mem};
+use std::{borrow::Cow, fmt::Debug, mem, time::Instant};
 
-use bytes::Bytes;
 use conduwuit::{
-	Err, Error, Result, debug, debug::INFO_SPAN_LEVEL, debug_error, debug_warn, err, implement,
-	trace, utils::response::LimitReadExt,
+	Err, Error, Result, debug, debug_error, debug_info, debug_warn, err, trace,
+	utils::response::LimitReadExt,
 };
-use http::{HeaderValue, header::AUTHORIZATION};
 use ipaddress::IPAddress;
 use reqwest::{Client, Method, Request, Response, Url};
+use resolvematrix::resolution::Resolution;
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, ServerName, ServerSigningKeyId,
+	ServerName,
 	api::{
-		EndpointError, IncomingResponse, MatrixVersion, OutgoingRequest, SendAccessToken,
-		client::error::Error as RumaError, federation::authentication::XMatrix,
+		EndpointError, IncomingResponseExt, OutgoingRequest, OutgoingRequestExt,
+		SupportedVersions,
+		auth_scheme::{AuthScheme, NoAuthentication},
+		error::Error as RumaError,
+		federation::authentication::{ServerSignatures, ServerSignaturesInput},
+		path_builder::PathBuilder,
 	},
-	serde::Base64,
 };
 
-use crate::resolver::actual::ActualDest;
+use crate::SUPPORTED_VERSIONS;
 
-/// Sends a request to a federation server
-#[implement(super::Service)]
-#[tracing::instrument(skip_all, name = "request", level = "debug")]
-pub async fn execute<T>(&self, dest: &ServerName, request: T) -> Result<T::IncomingResponse>
-where
-	T: OutgoingRequest + Debug + Send,
-{
-	let client = &self.services.client.federation;
-	self.execute_on(client, dest, request).await
-}
+impl super::Service {
+	/// Sends a signed request to a remote server over federation.
+	#[tracing::instrument(skip_all, name = "request", level = "debug")]
+	pub async fn execute<'i, T>(
+		&self,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = ServerSignatures,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
+	{
+		let client = &self.services.client.federation;
+		self.execute_signed(client, dest, request).await
+	}
 
-/// Like execute() but with a very large timeout
-#[implement(super::Service)]
-#[tracing::instrument(skip_all, name = "synapse", level = "debug")]
-pub async fn execute_synapse<T>(
-	&self,
-	dest: &ServerName,
-	request: T,
-) -> Result<T::IncomingResponse>
-where
-	T: OutgoingRequest + Debug + Send,
-{
-	let client = &self.services.client.synapse;
-	self.execute_on(client, dest, request).await
-}
+	/// Sends a signed request to a remote server over federation, with a
+	/// significantly higher timeout to account for slow endpoints.
+	#[tracing::instrument(skip_all, name = "request_slow", level = "debug")]
+	pub async fn execute_slow<'i, T>(
+		&self,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = ServerSignatures,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
+	{
+		let client = &self.services.client.federation_slow;
+		self.execute_signed(client, dest, request).await
+	}
 
-#[implement(super::Service)]
-#[tracing::instrument(
+	/// Sends an unsigned (unauthenticated) request to a remote server over
+	/// federation.
+	pub async fn execute_unauthenticated<'i, T>(
+		&self,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = NoAuthentication,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Debug
+			+ Send,
+	{
+		let client = &self.services.client.federation;
+
+		self.execute_on(client, dest, request, ()).await
+	}
+
+	/// Sends a signed request to a remote server over federation, given the
+	/// specific client.
+	pub async fn execute_signed<'i, T>(
+		&self,
+		client: &Client,
+		dest: &ServerName,
+		request: T,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<
+				Authentication = ServerSignatures,
+				PathBuilder: PathBuilder<Input<'i>: FederationPathBuilderInput>,
+			> + Send,
+	{
+		let authentication = ServerSignaturesInput::new(
+			self.services.server.name.clone(),
+			dest.to_owned(),
+			self.services.server_keys.keypair(),
+		);
+
+		self.execute_on(client, dest, request, authentication).await
+	}
+
+	/// Prepares and sends a federation request with the given client.
+	/// If federation is disabled, an error is returned here. Likewise, if the
+	/// destination is forbidden.
+	/// Preparation includes resolving the server before sending the request.
+	#[tracing::instrument(
 		name = "fed",
-		level = INFO_SPAN_LEVEL,
-		skip(self, client, request),
+		level = "info",
+		skip(self, client, request, authentication)
 	)]
-pub async fn execute_on<T>(
-	&self,
-	client: &Client,
-	dest: &ServerName,
-	request: T,
-) -> Result<T::IncomingResponse>
-where
-	T: OutgoingRequest + Send,
-{
-	if !self.services.server.config.allow_federation {
-		return Err!(Config("allow_federation", "Federation is disabled."));
+	pub async fn execute_on<'i, T, PathBuilderInput>(
+		&self,
+		client: &Client,
+		dest: &ServerName,
+		request: T,
+		authentication: <T::Authentication as AuthScheme>::Input<'_>,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest<PathBuilder: PathBuilder<Input<'i> = PathBuilderInput>> + Send,
+		PathBuilderInput: FederationPathBuilderInput,
+	{
+		if !self.services.server.config.allow_federation {
+			return Err!(Config("allow_federation", "Federation is disabled."));
+		}
+
+		if self.services.moderation.is_remote_server_forbidden(dest) {
+			return Err!(Request(Forbidden(debug_warn!(
+				"Federation with {dest} is not allowed."
+			))));
+		}
+
+		let actual = self
+			.services
+			.client
+			.matrix_resolver
+			.resolve_server(dest.as_str())
+			.await?;
+
+		let request = Request::try_from(request.try_into_http_request::<Vec<u8>>(
+			actual.base_url().as_str(),
+			authentication,
+			PathBuilderInput::create(),
+		)?)?;
+		self.validate_url(request.url())?;
+		self.services.server.check_running()?;
+
+		self.perform::<T>(dest, &actual, request, client).await
 	}
 
-	if self.services.moderation.is_remote_server_forbidden(dest) {
-		return Err!(Request(Forbidden(debug_warn!("Federation with {dest} is not allowed."))));
-	}
+	/// Actually sends the federation request, handling the response before
+	/// returning.
+	///
+	/// Timing info and request logs are available when debug logs are enabled.
+	async fn perform<T>(
+		&self,
+		dest: &ServerName,
+		actual: &Resolution,
+		request: Request,
+		client: &Client,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest + Send,
+	{
+		let url = request.url().clone();
+		let method = request.method().clone();
 
-	let actual = self.services.resolver.get_actual_dest(dest).await?;
-	let request = into_http_request::<T>(&actual, request)?;
-	let request = self.prepare(dest, request)?;
-	self.perform::<T>(dest, &actual, request, client).await
-}
-
-#[implement(super::Service)]
-async fn perform<T>(
-	&self,
-	dest: &ServerName,
-	actual: &ActualDest,
-	request: Request,
-	client: &Client,
-) -> Result<T::IncomingResponse>
-where
-	T: OutgoingRequest + Send,
-{
-	let url = request.url().clone();
-	let method = request.method().clone();
-
-	debug!(%method, %url, "Sending request");
-	match client.execute(request).await {
-		| Ok(response) =>
-			self.handle_response::<T>(dest, actual, &method, &url, response)
-				.await,
-		| Err(error) =>
-			Err(handle_error(actual, &method, &url, error).expect_err("always returns error")),
-	}
-}
-
-#[implement(super::Service)]
-fn prepare(&self, dest: &ServerName, mut request: http::Request<Vec<u8>>) -> Result<Request> {
-	self.sign_request(&mut request, dest);
-
-	let request = Request::try_from(request)?;
-	self.validate_url(request.url())?;
-	self.services.server.check_running()?;
-
-	Ok(request)
-}
-
-#[implement(super::Service)]
-fn validate_url(&self, url: &Url) -> Result<()> {
-	if let Some(url_host) = url.host_str() {
-		if let Ok(ip) = IPAddress::parse(url_host) {
-			trace!("Checking request URL IP {ip:?}");
-			self.services.resolver.validate_ip(&ip)?;
+		debug_info!(
+			"Sending request: {} matrix-federation://{dest}{}",
+			method.as_str(),
+			url.path(),
+		);
+		let start = Instant::now();
+		let response = client.execute(request).await;
+		debug_info!(
+			"Request finished in {:?}: {} matrix-federation://{dest}{}",
+			start.elapsed(),
+			method.as_str(),
+			url.path(),
+		);
+		match response {
+			| Ok(response) =>
+				self.handle_response::<T>(dest, actual, &method, &url, response)
+					.await,
+			| Err(error) =>
+				Err(handle_error(actual, &method, &url, error).expect_err("always returns error")),
 		}
 	}
 
-	Ok(())
-}
+	fn validate_url(&self, url: &Url) -> Result<()> {
+		if let Some(url_host) = url.host_str() {
+			if let Ok(ip) = IPAddress::parse(url_host) {
+				trace!("Checking request URL IP {ip:?}");
+				if !self.services.client.valid_cidr_range(&ip) {
+					return Err!(BadServerResponse("Not allowed to send requests to this IP"));
+				}
+			}
+		}
 
-#[implement(super::Service)]
-async fn handle_response<T>(
-	&self,
-	dest: &ServerName,
-	actual: &ActualDest,
-	method: &Method,
-	url: &Url,
-	response: Response,
-) -> Result<T::IncomingResponse>
-where
-	T: OutgoingRequest + Send,
-{
-	const HUGE_ENDPOINTS: [&str; 2] =
-		["/_matrix/federation/v2/send_join/", "/_matrix/federation/v2/state/"];
-	let size_limit: u64 = if HUGE_ENDPOINTS.iter().any(|e| url.path().starts_with(e)) {
-		// Some federation endpoints can return huge response bodies, so we'll bump the
-		// limit for those endpoints specifically.
-		self.services
-			.server
-			.config
-			.max_request_size
-			.saturating_mul(10)
-	} else {
-		self.services.server.config.max_request_size
+		Ok(())
 	}
-	.try_into()
-	.expect("size_limit (usize) should fit within a u64");
-	let response = into_http_response(dest, actual, method, url, response, size_limit).await?;
 
-	T::IncomingResponse::try_from_http_response(response)
+	/// Handles a successful response from a remote server, reading and
+	/// deserializing the response body (if any).
+	async fn handle_response<T>(
+		&self,
+		dest: &ServerName,
+		actual: &Resolution,
+		method: &Method,
+		url: &Url,
+		response: Response,
+	) -> Result<T::IncomingResponse>
+	where
+		T: OutgoingRequest + Send,
+	{
+		const HUGE_ENDPOINTS: [&str; 2] =
+			["/_matrix/federation/v2/send_join/", "/_matrix/federation/v2/state/"];
+		let size_limit: u64 = if HUGE_ENDPOINTS.iter().any(|e| url.path().starts_with(e)) {
+			// Some federation endpoints can return huge response bodies, so we'll bump the
+			// limit for those endpoints specifically.
+			self.services
+				.server
+				.config
+				.max_request_size
+				.saturating_mul(10)
+		} else {
+			self.services.server.config.max_request_size
+		}
+		.try_into()
+		.expect("size_limit (usize) should fit within a u64");
+		let response =
+			into_http_response(dest, actual, method, url, response, size_limit).await?;
+
+		let (parts, body) = response.into_parts();
+		T::IncomingResponse::try_from_http_response(http::Response::from_parts(
+			parts,
+			body.as_ref(),
+		))
 		.map_err(|e| err!(BadServerResponse("Server returned bad 200 response: {e:?}")))
+	}
 }
 
 async fn into_http_response(
 	dest: &ServerName,
-	actual: &ActualDest,
+	actual: &Resolution,
 	method: &Method,
 	url: &Url,
 	mut response: Response,
 	max_size: u64,
-) -> Result<http::Response<Bytes>> {
+) -> Result<http::Response<Vec<u8>>> {
 	let status = response.status();
 	trace!(
 		%status, %method,
 		request_url = %url,
 		response_url = %response.url(),
 		"Received response from {}",
-		actual.string(),
+		actual.base_url(),
 	);
 
 	let mut http_response_builder = http::Response::builder()
@@ -184,20 +271,15 @@ async fn into_http_response(
 
 	trace!("Waiting for response body...");
 	let http_response = http_response_builder
-		.body(
-			response
-				.limit_read(max_size)
-				.await
-				.unwrap_or_default()
-				.into(),
-		)
+		.body(response.limit_read(max_size).await.unwrap_or_default())
 		.expect("reqwest body is valid http body");
 
 	debug!("Got {status:?} for {method} {url}");
 	if !status.is_success() {
+		let (parts, body) = http_response.into_parts();
 		return Err(Error::Federation(
 			dest.to_owned(),
-			RumaError::from_http_response(http_response),
+			RumaError::from_http_response(http::Response::from_parts(parts, body.as_ref())),
 		));
 	}
 
@@ -205,7 +287,7 @@ async fn into_http_response(
 }
 
 fn handle_error(
-	actual: &ActualDest,
+	actual: &Resolution,
 	method: &Method,
 	url: &Url,
 	mut e: reqwest::Error,
@@ -229,90 +311,31 @@ fn handle_error(
 	Err(e.into())
 }
 
-#[implement(super::Service)]
-fn sign_request(&self, http_request: &mut http::Request<Vec<u8>>, dest: &ServerName) {
-	type Member = (String, Value);
-	type Value = CanonicalJsonValue;
-	type Object = CanonicalJsonObject;
-
-	let origin = &self.services.server.name;
-	let body = http_request.body();
-	let uri = http_request
-		.uri()
-		.path_and_query()
-		.expect("http::Request missing path_and_query");
-
-	let mut req: Object = if !body.is_empty() {
-		let content: CanonicalJsonValue =
-			serde_json::from_slice(body).expect("failed to serialize body");
-
-		let authorization: [Member; 5] = [
-			("content".into(), content),
-			("destination".into(), dest.as_str().into()),
-			("method".into(), http_request.method().as_str().into()),
-			("origin".into(), origin.as_str().into()),
-			("uri".into(), uri.to_string().into()),
-		];
-
-		authorization.into()
-	} else {
-		let authorization: [Member; 4] = [
-			("destination".into(), dest.as_str().into()),
-			("method".into(), http_request.method().as_str().into()),
-			("origin".into(), origin.as_str().into()),
-			("uri".into(), uri.to_string().into()),
-		];
-
-		authorization.into()
-	};
-
-	self.services
-		.server_keys
-		.sign_json(&mut req)
-		.expect("request signing failed");
-
-	let signatures = req["signatures"]
-		.as_object()
-		.and_then(|object| object[origin.as_str()].as_object())
-		.expect("origin signatures object");
-
-	let key: &ServerSigningKeyId = signatures
-		.keys()
-		.next()
-		.map(|k| k.as_str().try_into())
-		.expect("at least one signature from this origin")
-		.expect("keyid is json string");
-
-	let sig: Base64 = signatures
-		.values()
-		.next()
-		.map(|s| s.as_str().map(Base64::parse))
-		.expect("at least one signature from this origin")
-		.expect("signature is json string")
-		.expect("signature is valid base64");
-
-	let x_matrix = XMatrix::new(origin.into(), dest.into(), key.into(), sig);
-	let authorization = HeaderValue::from(&x_matrix);
-	let authorization = http_request
-		.headers_mut()
-		.insert(AUTHORIZATION, authorization);
-
-	debug_assert!(authorization.is_none(), "Authorization header already present");
+/// A trait for the input types of acceptable path builders for outgoing
+/// federation requests.
+///
+/// Ruma uses Rust's type system to encode the versioning scheme of endpoints in
+/// the Matrix spec. Every endpoint has a `PathBuilder` associated type, which
+/// has an `Input` associated type. Endpoints with multiple versions have
+/// `VersionHistory` as their `PathBuilder`, which has `SupportedVersions`
+/// as its `Input` type. Endpoints with no version have `SinglePath` as their
+/// `PathBuilder`, which has `()` as its `Input` type. Both `SupportedVersions`
+/// and `()` can be created out of thin air using static data (or no data at
+/// all). This property is what the `FederationPathBuilderInput` trait
+/// represents.
+///
+/// This trait allows the federation sender service's functions to accept
+/// requests for either versioned or unversioned endpoints, by requiring that
+/// the `Input` of the `PathBuilder` of the endpoint implements
+/// `FederationPathBuilderInput`.
+pub trait FederationPathBuilderInput {
+	fn create() -> Self;
 }
 
-fn into_http_request<T>(actual: &ActualDest, request: T) -> Result<http::Request<Vec<u8>>>
-where
-	T: OutgoingRequest + Send,
-{
-	const VERSIONS: [MatrixVersion; 1] = [MatrixVersion::V1_11];
+impl FederationPathBuilderInput for () {
+	fn create() -> Self {}
+}
 
-	let http_request = request
-		.try_into_http_request::<Vec<u8>>(
-			actual.string().as_str(),
-			SendAccessToken::None,
-			&VERSIONS,
-		)
-		.map_err(|e| err!(BadServerResponse("Invalid destination: {e:?}")))?;
-
-	Ok(http_request)
+impl FederationPathBuilderInput for Cow<'_, SupportedVersions> {
+	fn create() -> Self { Cow::Borrowed(&SUPPORTED_VERSIONS) }
 }

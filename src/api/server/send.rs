@@ -1,15 +1,12 @@
 use std::{
-	collections::{BTreeMap, HashMap, HashSet},
-	net::IpAddr,
+	collections::{BTreeMap, HashMap},
 	time::{Duration, Instant},
 };
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
-	Err, Error, Result, debug, debug_warn, err, error,
+	Err, Error, Result, debug, debug_error, debug_warn, err, error,
 	result::LogErr,
-	state_res::lexicographical_topological_sort,
 	trace,
 	utils::{
 		IterStream, ReadyExt, millis_since_unix_epoch,
@@ -25,10 +22,9 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use ruma::{
-	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, OwnedUserId,
-	RoomId, ServerName, UserId,
+	CanonicalJsonObject, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 	api::{
-		client::error::{ErrorKind, ErrorKind::LimitExceeded},
+		error::{ErrorKind, LimitExceededErrorData},
 		federation::transactions::{
 			edu::{
 				DeviceListUpdateContent, DirectDeviceContent, Edu, PresenceContent,
@@ -39,13 +35,12 @@ use ruma::{
 		},
 	},
 	events::receipt::{ReceiptEvent, ReceiptEventContent, ReceiptType},
-	int,
 	serde::Raw,
 	to_device::DeviceIdOrAllDevices,
-	uint,
 };
-use service::transactions::{
-	FederationTxnState, TransactionError, TxnKey, WrappedTransactionResponse,
+use service::{
+	rooms::event_handler::{DagBuilderTree, build_local_dag},
+	transactions::{FederationTxnState, TransactionError, TxnKey, WrappedTransactionResponse},
 };
 use tokio::sync::watch::{Receiver, Sender};
 use tracing::instrument;
@@ -60,10 +55,9 @@ type Pdu = (OwnedRoomId, OwnedEventId, CanonicalJsonObject);
 /// Push EDUs and PDUs to this server.
 pub(crate) async fn send_transaction_message_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<send_transaction_message::v1::Request>,
 ) -> Result<send_transaction_message::v1::Response> {
-	if body.origin() != body.body.origin {
+	if body.identity != body.body.origin {
 		return Err!(Request(Forbidden(
 			"Not allowed to send transactions on behalf of other servers"
 		)));
@@ -81,7 +75,7 @@ pub(crate) async fn send_transaction_message_route(
 		)));
 	}
 
-	let txn_key = (body.origin().to_owned(), body.transaction_id.clone());
+	let txn_key = (body.identity.clone(), body.transaction_id.clone());
 
 	// Atomically check cache, join active, or start new transaction
 	match services
@@ -101,7 +95,7 @@ pub(crate) async fn send_transaction_message_route(
 			services
 				.server
 				.runtime()
-				.spawn(process_inbound_transaction(services, body, client, txn_key, sender));
+				.spawn(process_inbound_transaction(services, body, txn_key, sender));
 			// and wait for it
 			wait_for_result(receiver).await
 		},
@@ -117,7 +111,7 @@ async fn wait_for_result(
 	{
 		// Took too long, return 429 to encourage the sender to try again
 		return Err(Error::BadRequest(
-			LimitExceeded { retry_after: None },
+			ErrorKind::LimitExceeded(LimitExceededErrorData::new()),
 			"Transaction is being still being processed. Please try again later.",
 		));
 	}
@@ -134,16 +128,16 @@ async fn wait_for_result(
 }
 
 #[instrument(
+	name="transaction"
 	skip_all,
 	fields(
 		id = ?body.transaction_id.as_str(),
-		origin = ?body.origin()
+		origin = ?body.identity
 	)
 )]
 async fn process_inbound_transaction(
 	services: crate::State,
 	body: Ruma<send_transaction_message::v1::Request>,
-	client: IpAddr,
 	txn_key: TxnKey,
 	sender: Sender<WrappedTransactionResponse>,
 ) {
@@ -152,7 +146,7 @@ async fn process_inbound_transaction(
 		.pdus
 		.iter()
 		.stream()
-		.broad_then(|pdu| services.rooms.event_handler.parse_incoming_pdu(pdu))
+		.broad_then(|pdu| services.rooms.event_handler.parse_incoming_pdu(pdu, None))
 		.inspect_err(|e| warn!("Could not parse incoming PDU: {e}"))
 		.ready_filter_map(Result::ok);
 
@@ -165,7 +159,7 @@ async fn process_inbound_transaction(
 		.stream();
 
 	debug!(pdus = body.pdus.len(), edus = body.edus.len(), "Processing transaction",);
-	let results = match handle(&services, &client, body.origin(), pdus, edus).await {
+	let results = match handle(&services, &body.identity, pdus, edus).await {
 		| Ok(results) => results,
 		| Err(err) => {
 			fail_federation_txn(services, &txn_key, &sender, err);
@@ -175,8 +169,14 @@ async fn process_inbound_transaction(
 
 	for (id, result) in &results {
 		if let Err(e) = result {
-			if matches!(e, Error::BadRequest(ErrorKind::NotFound, _)) {
-				debug_warn!("Incoming PDU failed {id}: {e:?}");
+			match e {
+				| Error::BadRequest(
+					ErrorKind::Forbidden | ErrorKind::InvalidParam | ErrorKind::BadJson,
+					..,
+				) => {
+					debug_warn!("Incoming PDU {id} failed: {e:?}");
+				},
+				| _ => debug_error!("Incoming PDU {id} failed: {e:?}"),
 			}
 		}
 	}
@@ -188,12 +188,12 @@ async fn process_inbound_transaction(
 		"Finished processing transaction"
 	);
 
-	let response = send_transaction_message::v1::Response {
-		pdus: results
+	let response = send_transaction_message::v1::Response::new(
+		results
 			.into_iter()
 			.map(|(e, r)| (e, r.map_err(error::sanitized_message)))
 			.collect(),
-	};
+	);
 
 	services
 		.transactions
@@ -232,12 +232,11 @@ fn transaction_error_to_response(err: &TransactionError) -> Error {
 }
 async fn handle(
 	services: &Services,
-	client: &IpAddr,
 	origin: &ServerName,
 	pdus: impl Stream<Item = Pdu> + Send,
 	edus: impl Stream<Item = Edu> + Send,
 ) -> std::result::Result<ResolvedMap, TransactionError> {
-	// group pdus by room
+	// Group PDUs by room for parallel processing
 	let pdus = pdus
 		.collect()
 		.map(|mut pdus: Vec<_>| {
@@ -248,12 +247,12 @@ async fn handle(
 		})
 		.await;
 
-	// we can evaluate rooms concurrently
+	// Evaluate rooms in parallel
 	let results: ResolvedMap = pdus
 		.into_iter()
 		.try_stream()
 		.broad_and_then(|(room_id, pdus): (_, Vec<_>)| {
-			handle_room(services, client, origin, room_id, pdus.into_iter())
+			handle_room(services, origin, room_id, pdus.into_iter())
 				.map_ok(Vec::into_iter)
 				.map_ok(IterStream::try_stream)
 		})
@@ -262,54 +261,16 @@ async fn handle(
 		.boxed()
 		.await?;
 
-	// evaluate edus after pdus, at least for now.
-	edus.for_each_concurrent(automatic_width(), |edu| handle_edu(services, client, origin, edu))
+	// Evaluate EDUs after PDUs in case some of the PDUs then forbid some EDUs.
+	edus.for_each_concurrent(automatic_width(), |edu| handle_edu(services, origin, edu))
 		.boxed()
 		.await;
 
 	Ok(results)
 }
 
-/// Attempts to build a localised directed acyclic graph out of the given PDUs,
-/// returning them in a topologically sorted order.
-///
-/// This is used to attempt to process PDUs in an order that respects their
-/// dependencies, however it is ultimately the sender's responsibility to send
-/// them in a processable order, so this is just a best effort attempt. It does
-/// not account for power levels or other tie breaks.
-async fn build_local_dag(
-	pdu_map: &HashMap<OwnedEventId, CanonicalJsonObject>,
-) -> Result<Vec<OwnedEventId>> {
-	debug_assert!(pdu_map.len() >= 2, "needless call to build_local_dag with less than 2 PDUs");
-	let mut dag: HashMap<OwnedEventId, HashSet<OwnedEventId>> = HashMap::new();
-
-	for (event_id, value) in pdu_map {
-		// We already checked that these properties are correct in parse_incoming_pdu,
-		// so it's safe to unwrap here.
-		let prev_events = value
-			.get("prev_events")
-			.unwrap()
-			.as_array()
-			.unwrap()
-			.iter()
-			.map(|v| OwnedEventId::parse(v.as_str().unwrap()).unwrap())
-			.collect();
-
-		dag.insert(event_id.clone(), prev_events);
-	}
-	lexicographical_topological_sort(&dag, &|_| async {
-		// Note: we don't bother fetching power levels because that would massively slow
-		// this function down. This is a best-effort attempt to order events correctly
-		// for processing, however ultimately that should be the sender's job.
-		Ok((int!(0), MilliSecondsSinceUnixEpoch(uint!(0))))
-	})
-	.await
-	.map_err(|e| err!("failed to resolve local graph: {e}"))
-}
-
 async fn handle_room(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	room_id: OwnedRoomId,
 	pdus: impl Iterator<Item = Pdu> + Send,
@@ -318,31 +279,28 @@ async fn handle_room(
 		.rooms
 		.event_handler
 		.mutex_federation
-		.lock(&room_id)
+		.lock(room_id.as_str())
 		.await;
 
 	let room_id = &room_id;
-	let pdu_map: HashMap<OwnedEventId, CanonicalJsonObject> = pdus
+	let mut pdu_map: HashMap<OwnedEventId, CanonicalJsonObject> = pdus
 		.into_iter()
 		.map(|(_, event_id, value)| (event_id, value))
 		.collect();
 	// Try to sort PDUs by their dependencies, but fall back to arbitrary order on
 	// failure (e.g., cycles). This is best-effort; proper ordering is the sender's
 	// responsibility.
-	let sorted_event_ids = if pdu_map.len() >= 2 {
-		build_local_dag(&pdu_map).await.unwrap_or_else(|e| {
+	let sorted_event_ids = build_local_dag(&pdu_map, DagBuilderTree::PrevEvents)
+		.await
+		.unwrap_or_else(|e| {
 			debug_warn!("Failed to build local DAG for room {room_id}: {e}");
 			pdu_map.keys().cloned().collect()
-		})
-	} else {
-		pdu_map.keys().cloned().collect()
-	};
+		});
 	let mut results = Vec::with_capacity(sorted_event_ids.len());
 	for event_id in sorted_event_ids {
 		let value = pdu_map
-			.get(&event_id)
-			.expect("sorted event IDs must be from the original map")
-			.clone();
+			.remove(&event_id)
+			.expect("sorted event IDs must be from the original map");
 		services
 			.server
 			.check_running()
@@ -350,7 +308,8 @@ async fn handle_room(
 		let result = services
 			.rooms
 			.event_handler
-			.handle_incoming_pdu(origin, room_id, &event_id, value, true)
+			.handle_incoming_pdu(origin, room_id, &event_id, value, false)
+			.boxed()
 			.await
 			.map(|_| ());
 		results.push((event_id, result));
@@ -358,25 +317,25 @@ async fn handle_room(
 	Ok(results)
 }
 
-async fn handle_edu(services: &Services, client: &IpAddr, origin: &ServerName, edu: Edu) {
+async fn handle_edu(services: &Services, origin: &ServerName, edu: Edu) {
 	match edu {
 		| Edu::Presence(presence) if services.server.config.allow_incoming_presence =>
-			handle_edu_presence(services, client, origin, presence).await,
+			handle_edu_presence(services, origin, presence).await,
 
 		| Edu::Receipt(receipt) if services.server.config.allow_incoming_read_receipts =>
-			handle_edu_receipt(services, client, origin, receipt).await,
+			handle_edu_receipt(services, origin, receipt).await,
 
 		| Edu::Typing(typing) if services.server.config.allow_incoming_typing =>
-			handle_edu_typing(services, client, origin, typing).await,
+			handle_edu_typing(services, origin, typing).await,
 
 		| Edu::DeviceListUpdate(content) =>
-			handle_edu_device_list_update(services, client, origin, content).await,
+			handle_edu_device_list_update(services, origin, content).await,
 
 		| Edu::DirectToDevice(content) =>
-			handle_edu_direct_to_device(services, client, origin, content).await,
+			handle_edu_direct_to_device(services, origin, content).await,
 
 		| Edu::SigningKeyUpdate(content) =>
-			handle_edu_signing_key_update(services, client, origin, content).await,
+			handle_edu_signing_key_update(services, origin, content).await,
 
 		| Edu::_Custom(ref _custom) => debug_warn!(?edu, "received custom/unknown EDU"),
 
@@ -386,7 +345,6 @@ async fn handle_edu(services: &Services, client: &IpAddr, origin: &ServerName, e
 
 async fn handle_edu_presence(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	presence: PresenceContent,
 ) {
@@ -427,12 +385,7 @@ async fn handle_edu_presence_update(
 		.ok();
 }
 
-async fn handle_edu_receipt(
-	services: &Services,
-	_client: &IpAddr,
-	origin: &ServerName,
-	receipt: ReceiptContent,
-) {
+async fn handle_edu_receipt(services: &Services, origin: &ServerName, receipt: ReceiptContent) {
 	receipt
 		.receipts
 		.into_iter()
@@ -514,21 +467,20 @@ async fn handle_edu_receipt_room_user(
 			services
 				.rooms
 				.read_receipt
-				.readreceipt_update(user_id, room_id, &ReceiptEvent {
-					content: ReceiptEventContent(content.into()),
-					room_id: room_id.to_owned(),
-				})
+				.readreceipt_update(
+					user_id,
+					room_id,
+					&ReceiptEvent::new(
+						room_id.to_owned(),
+						ReceiptEventContent::from_iter(content),
+					),
+				)
 				.await;
 		})
 		.await;
 }
 
-async fn handle_edu_typing(
-	services: &Services,
-	_client: &IpAddr,
-	origin: &ServerName,
-	typing: TypingContent,
-) {
+async fn handle_edu_typing(services: &Services, origin: &ServerName, typing: TypingContent) {
 	if typing.user_id.server_name() != origin {
 		debug_warn!(
 			%typing.user_id, %origin,
@@ -588,7 +540,6 @@ async fn handle_edu_typing(
 
 async fn handle_edu_device_list_update(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: DeviceListUpdateContent,
 ) {
@@ -607,7 +558,6 @@ async fn handle_edu_device_list_update(
 
 async fn handle_edu_direct_to_device(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: DirectDeviceContent,
 ) {
@@ -616,6 +566,7 @@ async fn handle_edu_direct_to_device(
 		ref ev_type,
 		ref message_id,
 		messages,
+		..
 	} = content;
 
 	if sender.server_name() != origin {
@@ -641,6 +592,14 @@ async fn handle_edu_direct_to_device(
 	messages
 		.into_iter()
 		.stream()
+		.broad_filter_map(|(target_user_id, map)| async move {
+			services
+				.users
+				.status(&target_user_id)
+				.await
+				.is_active()
+				.then_some((target_user_id, map))
+		})
 		.for_each_concurrent(automatic_width(), |(target_user_id, map)| {
 			handle_edu_direct_to_device_user(services, target_user_id, sender, &ev_type, map)
 		})
@@ -699,14 +658,17 @@ async fn handle_edu_direct_to_device_event(
 			services
 				.users
 				.all_device_ids(target_user_id)
-				.for_each(|target_device_id| {
-					services.users.add_to_device_event(
-						sender,
-						target_user_id,
-						target_device_id,
-						ev_type,
-						event.clone(),
-					)
+				.for_each(async |target_device_id| {
+					services
+						.users
+						.add_to_device_event(
+							sender,
+							target_user_id,
+							&target_device_id,
+							ev_type,
+							event.clone(),
+						)
+						.await;
 				})
 				.await;
 		},
@@ -715,11 +677,12 @@ async fn handle_edu_direct_to_device_event(
 
 async fn handle_edu_signing_key_update(
 	services: &Services,
-	_client: &IpAddr,
 	origin: &ServerName,
 	content: SigningKeyUpdateContent,
 ) {
-	let SigningKeyUpdateContent { user_id, master_key, self_signing_key } = content;
+	let SigningKeyUpdateContent {
+		user_id, master_key, self_signing_key, ..
+	} = content;
 
 	if user_id.server_name() != origin {
 		debug_warn!(

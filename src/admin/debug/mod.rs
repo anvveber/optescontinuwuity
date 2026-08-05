@@ -17,9 +17,18 @@ pub enum DebugCommand {
 		message: Vec<String>,
 	},
 
-	/// Get the auth_chain of a PDU
+	/// Loads the auth_chain of a PDU, reporting how long it took.
 	GetAuthChain {
 		/// An event ID (the $ character followed by the base64 reference hash)
+		event_id: OwnedEventId,
+	},
+
+	/// Walks & displays the auth_chain of a PDU in a mermaid graph format.
+	///
+	/// This is useless to basically anyone but developers, and is also probably
+	/// slow and memory hungry.
+	ShowAuthChain {
+		/// The root event ID to start walking back from.
 		event_id: OwnedEventId,
 	},
 
@@ -84,6 +93,14 @@ pub enum DebugCommand {
 	GetRoomState {
 		/// Room ID
 		room_id: OwnedRoomOrAliasId,
+	},
+
+	/// Gets all the room state events at the specified event.
+	///
+	/// State at event might not be available for some PDUs, such as rejected
+	/// ones.
+	GetStateAt {
+		event_id: OwnedEventId,
 	},
 
 	/// Get and display signing keys from local cache or remote server.
@@ -227,6 +244,11 @@ pub enum DebugCommand {
 
 	/// Send a test email to the invoking admin's email address
 	SendTestEmail,
+
+	/// Lists room IDs by forward extremity count in descending order
+	RoomsByExtremityCount {
+		page: Option<usize>,
+	},
 
 	/// Developer test stubs
 	#[command(subcommand)]

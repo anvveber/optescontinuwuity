@@ -1,8 +1,6 @@
-# Matrix RTC/Element Call Setup
+# MatrixRTC/Element Call Setup
 
-:::info
-This guide assumes that you are using docker compose for deployment. LiveKit only provides Docker images.
-:::
+This guide assumes that you are using docker compose for deployment.
 
 :::tip
 You can find help setting up MatrixRTC in our dedicated room - [#matrixrtc:continuwuity.org](https://matrix.to/#/%23matrixrtc%3Acontinuwuity.org)
@@ -10,24 +8,24 @@ You can find help setting up MatrixRTC in our dedicated room - [#matrixrtc:conti
 
 ## Instructions
 
-### 1. Domain
+### 1. Set up your domain
 
 LiveKit should live on its own domain or subdomain. In this guide we use `livekit.example.com` - this should be replaced with a domain you control.
 
 Make sure the DNS record for the (sub)domain you plan to use is pointed to your server.
 
-### 2. Services
+### 2. Set up the LiveKit services
 
-Using LiveKit with Matrix requires two services - LiveKit itself, and a service (`lk-jwt-service`) that grants Matrix users permission to connect to it.
+Using LiveKit with Matrix requires two services - LiveKit itself, and a brokering service (`lk-jwt-service`) that grants Matrix users permission to connect to it.
 
 You must generate a key and secret to allow the Matrix service to authenticate with LiveKit. `LK_MATRIX_KEY` should be around 20 random characters, and `LK_MATRIX_SECRET` should be around 64. Remember to replace these with the actual values!
 
 :::tip Generating the secrets
 LiveKit provides a utility to generate secure random keys
 ```bash
-~$ docker run --rm livekit/livekit-server:latest generate-keys
-API Key:  APIUxUnMnSkuFWV
-API Secret:  t93ZVjPeoEdyx7Wbet3kG4L3NGZIZVEFvqe0UuiVc22A
+docker run --rm livekit/livekit-server:latest generate-keys
+# API Key:  APIUxUnMnSkuFWV
+# API Secret:  t93ZVjPeoEdyx7Wbet3kG4L3NGZIZVEFvqe0UuiVc22A
 ```
 :::
 
@@ -81,7 +79,15 @@ keys:
   LK_MATRIX_KEY: LK_MATRIX_SECRET
   # replace these with your key-secret pair. Example:
   # APIUxUnMnSkuFWV: t93ZVjPeoEdyx7Wbet3kG4L3NGZIZVEFvqe0UuiVc22A
+
+# do not create rooms by default
+room:
+  auto_create: false
 ```
+
+Consult [`config-sample.yaml`][livekit-config-sample-yaml] for all LiveKit options.
+
+[livekit-config-sample-yaml]: https://github.com/livekit/livekit/blob/master/config-sample.yaml
 
 #### Firewall hints
 
@@ -89,7 +95,7 @@ You will need to allow ports `7881/tcp` and `50100:50200/udp` through your firew
 
 ### 3. Telling clients where to find LiveKit
 
-To tell clients where to find LiveKit, you need to add the address of your `lk-jwt-service` to the `[global.matrix_rtc]` config section using the `foci` option.
+To tell clients where to find LiveKit, you need to add your `lk-jwt-service`'s address to the `[global.matrix_rtc] > foci` field of your Continuwuity config file.
 
 The variable should be a list of servers serving as MatrixRTC endpoints. Replace the URL with the address you are deploying your instance of lk-jwt-service to:
 
@@ -98,6 +104,12 @@ The variable should be a list of servers serving as MatrixRTC endpoints. Replace
 foci = [
     { type = "livekit", livekit_service_url = "https://livekit.example.com" },
 ]
+```
+
+If you configure Continuwuity via environment variables, use the following:
+
+```bash
+CONTINUWUITY_MATRIX_RTC__FOCI=[{ type = "livekit", livekit_service_url = "https://livekit.example.com" }]
 ```
 
 This will expose LiveKit information on the following endpoints for clients to discover:
@@ -131,6 +143,11 @@ All paths should be forwarded to LiveKit by default, with the exception of the f
         reverse_proxy 127.0.0.1:7880
     }
     ```
+
+    **Note**: if you run Caddy inside a container (e.g. by following the example [here](../deploying/docker.mdx#caddy-using-caddyfile)) instead of on the host, then:
+
+    - Put these containers on the same bridge network as caddy (by defining `networks: [ caddy ]` in each of the services), and
+    - Use appropriate container hostnames (`lk-jwt-service` and `livekit`) instead of `127.0.0.1` in the Caddyfile
 
 </details>
 
@@ -188,88 +205,91 @@ All paths should be forwarded to LiveKit by default, with the exception of the f
 
 </details>
 
+<details>
+   <summary>Example docker compose file with caddy-docker-proxy labels</summary>
+   ```yaml
+   # This setup assumes all containers share the same bridge network
+   services:
+    lk-jwt-service:
+        image: ghcr.io/element-hq/lk-jwt-service:latest
+        container_name: lk-jwt-service
+        # lk-jwt-service environment config here..
+        labels:
+            caddy: livekit.example.com
+            caddy.@lk-jwt-service.path: "/sfu/get* /healthz* /get_token*"
+            caddy.reverse_proxy: "@lk-jwt-service {{upstreams 8081}}"
+
+
+    livekit:
+        image: livekit/livekit-server:latest
+        container_name: livekit
+        command: --config /etc/livekit.yaml
+        restart: unless-stopped
+        labels:
+            caddy: livekit.example.com
+            caddy.reverse_proxy: "{{upstreams 7880}}"
+        volumes:
+            - ./livekit.yaml:/etc/livekit.yaml:ro
+        ports:
+            - "127.0.0.1:7880:7880/tcp"
+            - "7881:7881/tcp"
+            - "50100-50200:50100-50200/udp"
+
+
+    caddy:
+        image: lucaslorentz/caddy-docker-proxy:ci-alpine
+        ports:
+            - 80:80
+            - 443:443
+        environment:
+            - CADDY_INGRESS_NETWORKS=caddy
+        volumes:
+            - /var/run/docker.sock:/var/run/docker.sock
+            - ./data:/data
+        restart: unless-stopped
+        labels:
+            # If you already configured `[global.well_known]` with Continuwuity,
+            # comment out the *_respond labels and add this line
+            # caddy.reverse_proxy: /.well-known/matrix/* homeserver:8008
+            caddy.1_respond: /.well-known/matrix/server {"m.server":"matrix.example.com:443"}
+            caddy.2_respond: /.well-known/matrix/client {"m.server":{"base_url":"https://matrix.example.com"},"m.homeserver":{"base_url":"https://matrix.example.com"},"org.matrix.msc4143.rtc_foci":[{"type":"livekit","livekit_service_url":"https://livekit.example.com"}]}
+
+            # If you are having problems with continuwuity serving headers uncomment
+            # the header section below.
+
+            # caddy: example.com
+            # caddy.0_header: "*"
+            # caddy.0_header.Access-Control-Allow-Origin: "*"
+            # caddy.0_header.Access-Control-Allow-Methods: "GET, POST, OPTIONS"
+            # caddy.0_header.Access-Control-Allow-Headers: "Authorization"
+            # caddy.0_header.Content-Type: "application/json"
+
+    homeserver:
+        image: forgejo.ellis.link/continuwuation/continuwuity:latest
+        restart: unless-stopped
+        # add additional environment, volume, and network config here...
+        labels:
+            caddy: matrix.example.com
+            caddy.reverse_proxy: "{{upstreams 8008}}"
+
+    ```
+</details>
+
 
 ### 6. Start Everything
 
 Start up the services using your usual method - for example `docker compose up -d`.
 
-## Additional TURN configuration
-
-### Using LiveKit's built-in TURN server
-
-LiveKit includes a built-in TURN server which can be used in place of an external option. This TURN server will only work with LiveKit, so you can't use it for legacy Matrix calling or anything else.
-
-If you don't want to set up a separate TURN server, you can enable this with the following changes:
-
-```yaml
-### add this to livekit.yaml ###
-turn:
-  enabled: true
-  udp_port: 3478
-  relay_range_start: 50300
-  relay_range_end: 50400
-  domain: livekit.example.com
-```
-
-```yaml
-### add these to livekit's docker-compose ###
-ports:
-  - "3478:3478/udp"
-  - "50300-50400:50300-50400/udp"
-### if you're using `network_mode: host`, you can skip this part
-```
-
-Recreate the LiveKit container (with `docker-compose up -d livekit`) to apply these changes. Remember to allow the new `3478/udp` and `50300:50400/udp` ports through your firewall.
-
-### Integration with an external TURN server
-
-If you've already [set up coturn](./turn), you can configure Livekit to use it.
-
-:::tip Avoid port clashes between the two services
-
-Before continuing, make sure coturn's `min-port` and `max-port` do not overlap with LiveKit's port range:
-
-```ini
-# in your coturn.conf
-min-port=50201
-max-port=65535
-```
-:::
-
-Generate a long random secret for LiveKit, and add it to your coturn config under the `static-auth-secret` option. You can add as many secrets as you want, so set a different one for LiveKit to use.
-
-Then configure LiveKit, making sure to replace `COTURN_SECRET` with the one you generated:
-
-```yaml
-# livekit.yaml
-rtc:
-  turn_servers:
-    - host: coturn.example.com
-      port: 3478
-      protocol: udp
-      secret: "COTURN_SECRET"
-    - host: coturn.example.com
-      port: 3478
-      protocol: tcp
-      secret: "COTURN_SECRET"
-    - host: coturn.example.com
-      port: 5349
-      protocol: tls # Only if you have already set up TLS in your coturn
-      secret: "COTURN_SECRET"
-```
-
-Restart LiveKit and coturn to apply these changes.
-
 ## Testing
 
-To test that LiveKit is successfully integrated with Continuwuity, you will need to replicate its [Token Exchange Flow](https://github.com/element-hq/lk-jwt-service#%EF%B8%8F-how-it-works--token-exchange-flow).
+To test that LiveKit is successfully integrated with Continuwuity, you will need to replicate its [Token Exchange Flow](https://github.com/element-hq/lk-jwt-service#%EF%B8%8F-how-it-works--token-exchange-flow). Follow the steps below while checking Docker logs (`docker compose logs --follow`), in order to help [troubleshooting](#troubleshooting) any issues.
 
 First, you will need an access token for your current login session. These can be found in your client's settings or obtained via [this website](https://timedout.uk/mxtoken.html).
 
-Then, using that token, fetch the discovery endpoints for MatrixRTC services
+Then, using that token, fetch the discovery endpoints for MatrixRTC services:
 
 ```bash
-curl -X POST -H "Authorization: Bearer <session-access-token>" \
+curl -H "Authorization: Bearer <session-access-token>" \
   https://matrix.example.com/_matrix/client/unstable/org.matrix.msc4143/rtc/transports
 ```
 
@@ -318,7 +338,7 @@ Replace `matrix_server_name` and `claimed_user_id` with your information, and `<
 You can then send this payload to the lk-jwt-service:
 
 ```bash
-~$ curl -X POST -d @payload.json https://livekit.example.com/get_token
+curl -X POST -d @payload.json https://livekit.example.com/get_token
 ```
 
 The lk-jwt-service will, after checking against Continuwuity, answer with a `jwt` token to create a LiveKit media room:
@@ -327,26 +347,38 @@ The lk-jwt-service will, after checking against Continuwuity, answer with a `jwt
 {"url":"wss://livekit.example.com","jwt":"a_really_really_long_string"}
 ```
 
-Use this token to test at the [LiveKit Connection Tester](https://livekit.io/connection-test). If everything works there, then you have set up LiveKit successfully!
+Use this token to test at the [LiveKit Connection Tester][livekit-connection-test]. If everything works there, then you have set up LiveKit successfully!
+
+[livekit-connection-test]: https://livekit.com/webrtc/connection-test
 
 ## Troubleshooting
 
-To debug any issues, you can place a call or redo the Testing instructions, and check the container logs for any specific errors. Use `docker-compose logs --follow` to follow them in real-time.
+To debug any issues, you can place a call or redo the Testing instructions, and check the container logs for any specific errors. Use `docker compose logs --follow` to follow these logs in real-time.
 
 ### Common errors in Element Call UI
 
-- `MISSING_MATRIX_RTC_FOCUS`: LiveKit is missing from Continuwuity's config file
+- `MISSING_MATRIX_RTC_FOCUS`/`MISSING_MATRIX_RTC_TRANSPORT`: LiveKit is missing from Continuwuity's config file
 - "Waiting for media" popup always showing: a LiveKit URL has been configured in Continuwuity, but your client cannot connect to it for some reason
+- `OPEN_ID_ERROR`: Your client can reach out to `lk-jwt-service`, but has problems authenticating with it. In this case, check `lk-jwt-service` logs for more details
+
+For browser-based clients, you can also inspect connections using DevTools' Networking tab, to see which requests are erroring out.
 
 ### Docker loopback networking issues
 
 Some distros do not allow Docker containers to connect to its host's public IP by default. This would cause `lk-jwt-service` to fail connecting to `livekit` or `continuwuity` on the same host. As a result, you would see connection refused/connection timeouts log entries in the JWT service, even when `LIVEKIT_URL` has been configured correctly.
 
+You can also test that this is the case by cURLing from a sidecar container:
+
+```bash
+docker run --rm --net container:lk-jwt-service docker.io/curlimages/curl https://livekit.example.com
+# --- some errors ---
+```
+
 To alleviate this, you can try one of the following workarounds:
 
 - Use `network_mode: host` for the `lk-jwt-service` container (instead of the default bridge networking).
 
-- Add an `extra_hosts` file mapping livekit's (and continuwuity's) domain name to a localhost address:
+- Add an `extra_hosts` file mapping livekit's (and continuwuity's) domain name to a locally-reachable address:
 
     ```diff
     # in docker-compose.yaml
@@ -360,11 +392,19 @@ To alleviate this, you can try one of the following workarounds:
 
 - (**untested, use at your own risk**) Implement an iptables workaround as shown [here](https://forums.docker.com/t/unable-to-connect-to-host-service-from-inside-docker-container/145749/6).
 
-After implementing the changes and restarting your compose, you can test whether the connection works by cURLing from a sidecar container:
+After implementing the changes and restarting your compose, `lk-jwt-service` should now connect to your other services. The sidecar container test above should now return an `OK` from LiveKit.
 
-```bash
-~$ docker run --rm --net container:lk-jwt-service docker.io/curlimages/curl https://livekit.example.com
-OK
+### Incorrect IP address for LiveKit
+
+By default, LiveKit auto-discovers its public IP address(es), which is reflected in the "Establishing WebRTC connection" section of the connection test page. If these IPs are incorrect, you may want to hardcode your own IP by doing the following:
+
+```diff
+### in your livekit.yaml ###
+rtc:
+  # ... other configs here ...
+- use_external_ip: true
++ use_external_ip: false
++ node_ip: "1.2.3.4"
 ```
 
 ### Workaround for non-federating servers
@@ -385,17 +425,156 @@ Subscribe to issue [!1440](https://forgejo.ellis.link/continuwuation/continuwuit
 
 Guides:
 
-- [Element Call self-hosting documentation](https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md)
-- [Community guide with overview of LiveKit's mechanisms](https://tomfos.tr/matrix/livekit/)
-- [Community guide using systemd](https://blog.kimiblock.top/2024/12/24/hosting-element-call/)
+- [Element Call self-hosting documentation from element-hq][element-call-selfhosting]
+- [Community guide with overview of LiveKit's mechanisms][tom-livekit-guide]
+- [Community guide using systemd][kimiblock-livekit-guide]
+
+[element-call-selfhosting]: https://github.com/element-hq/element-call/blob/livekit/docs/self-hosting.md
+[tom-livekit-guide]: https://tomfos.tr/matrix/livekit/
+[kimiblock-livekit-guide]: https://blog.kimiblock.top/2024/12/24/hosting-element-call/
+
+Configurations:
+
+- [Livekit's `config-sample.yaml`][livekit-config-sample-yaml] - LiveKit configuration file with full options
 
 Specifications:
 
-- [MSC4143 - MatrixRTC proposal](https://github.com/matrix-org/matrix-spec-proposals/pull/4143)
-- [MSC4195 - LiveKit proposal](https://github.com/matrix-org/matrix-spec-proposals/pull/4195)
+- [MSC4143 - MatrixRTC proposal][MSC4143]
+- [MSC4195 - LiveKit proposal][MSC4195]
+
+[MSC4143]: https://github.com/matrix-org/matrix-spec-proposals/pull/4143
+[MSC4195]: https://github.com/matrix-org/matrix-spec-proposals/pull/4195
 
 Source code:
 
-- [Element Call](https://github.com/element-hq/element-call)
-- [lk-jwt-service](https://github.com/element-hq/lk-jwt-service)
-- [LiveKit server](https://github.com/livekit/livekit)
+- [Element Call][element-call-github]
+- [lk-jwt-service][lk-jwt-service-github]
+- [LiveKit server][livekit-server-github]
+
+[element-call-github]: https://github.com/element-hq/element-call
+[lk-jwt-service-github]: https://github.com/element-hq/lk-jwt-service
+[livekit-server-github]: https://github.com/livekit/livekit
+
+Other:
+
+- [Matrix VOIP and LiveKit][sspaeth-matrix-voip] - Community member deep dive on current VOIP solutions on Matrix
+
+[sspaeth-matrix-voip]: https://sspaeth.de/2026/04/matrix-voip-and-livekit/
+
+## Appendix
+
+### Additional TURNS-over-443 configuration
+
+Most of the time, LiveKit [**does not need TURN**][sspaeth-matrix-voip-turn] to function. However, there are situations where clients are in very restrictive networks that disallows non-standard ports and UDP. In these cases, a TURN-over-TLS server on port :443 could be employed to relay traffic for them.
+
+[sspaeth-matrix-voip-turn]: https://sspaeth.de/2026/04/matrix-voip-and-livekit/#turn
+
+You can either use LiveKit's built-in TURN server, or integrate LiveKit with [coturn](./turn).
+
+<details>
+
+<summary>Using LiveKit's built-in TURN server</summary>
+
+First, set up LiveKit's built-in TURN server with its own domain - we'll use `livekit-turn.example.com` in our example.
+
+```yaml
+## add this to `livekit.yaml` ##
+turn:
+  enabled: true
+
+  # note: the TLS port will always be advertised as :443
+  tls_port: 5349
+
+  # optional: configure an extra UDP port on :3478
+  # udp_port: 3478
+
+  relay_range_start: 50300
+  relay_range_end: 50400
+
+  domain: livekit-turn.example.com
+
+  # replace these with your actual cert/key files
+  cert_file: /path/to/livekit-turn.example.com.crt
+  key_file: /path/to/livekit-turn.example.com.key
+```
+
+```yaml
+### add these ports to livekit's docker-compose ###
+### if you're using `network_mode: host`, you can skip this part
+ports:
+  - "127.0.0.1:5349:5349/tcp"
+  - "50300-50400:50300-50400/udp"
+  # "3478:3478/udp" # (optional UDP port)
+```
+
+Recreate the LiveKit container (with `docker compose up -d livekit`) to apply these changes. Remember to allow the new `50300:50400/udp` ports through your firewall.
+
+Then, we will configure a route from port 443 of the host back to our `livekit-turn.example.com` service on port 5349. To both **multiplex** this and LiveKit's websocket on the same port, we will use a layer-4 reverse proxy with **SNI routing** capabilities, such as [caddy-l4][caddy-l4] on the host system.
+
+```
+## in your Caddyfile ##
+{
+    servers {
+        listener_wrappers {
+
+            # intercept packets meant for the TURN domain first
+            # before forwarding other packets to "normal" HTTP listeners
+            layer4 {
+                @turn tls sni livekit-turn.example.com
+                route @turn {
+                    proxy 127.0.0.1:5349 # forward to normal TURNS port
+                    }
+                }
+            }
+            tls
+        }
+    }
+}
+
+# livekit stuff
+https://livekit.example.com {
+    @lk-jwt-service path /healthz /get_token /sfu/get
+    route @lk-jwt-service {
+        reverse_proxy 127.0.0.1:8081
+    }
+    reverse_proxy http://127.0.0.1:7880
+}
+```
+
+[caddy-l4]: https://github.com/mholt/caddy-l4
+
+</details>
+
+<details>
+<summary>Using an external TURN server (coturn)</summary>
+
+Before continuing, make sure coturn's `min-port` and `max-port` do not overlap with LiveKit's port range:
+
+```ini
+# in your coturn.conf
+min-port=50201
+max-port=65535
+```
+
+Then, generate a long random secret for LiveKit, and add it to your coturn config under the `static-auth-secret` option. You can add as many secrets as you want, so set a different one for LiveKit to use.
+
+After that, refer to the following [**TURN instructions**](./turn#turns-over-443) to set up coturn with TLS, as well as multiplexing with LiveKit's websocket on port 443.
+
+Then configure LiveKit, making sure to replace `COTURN_SECRET` with the one you generated:
+
+```yaml
+### in your livekit.yaml ###
+rtc:
+  # ... other configs here ...
+  turn_servers:
+    - host: coturn.example.com
+      port: 443
+      protocol: tls
+      secret: "COTURN_SECRET"
+```
+
+Restart LiveKit, coturn, and Caddy-l4 to apply these changes.
+
+</details>
+
+After finishing configuration, you can run the Testing steps again to check that TURN-over-TLS is working. In the LiveKit connection test page, there should be a green tick saying "Can connect to TURN".

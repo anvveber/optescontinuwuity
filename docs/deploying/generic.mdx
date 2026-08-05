@@ -29,52 +29,30 @@ we can't cross-build static binaries - contributions are welcome here.
 
 #### Performance-optimised builds
 
-For x86_64 systems with CPUs from the last ~15 years, use the
-`-haswell-` optimised binaries for best performance. These
-binaries enable hardware-accelerated CRC32 checksumming in
-RocksDB, which significantly improves database performance.
-The haswell instruction set provides an excellent balance of
-compatibility and speed.
+Continuwuity provides `*-maxperf` tagged binaries, which uses the `release-max-perf` build profile with [link-time optimisation (LTO)][lto-rust-docs]. For the x86_64 architecture, these binaries specifically target the Haswell architecture (hence the `-haswell-` name extension), and enables hardware-accelerated CRC32 checksumming in
+RocksDB which significantly improves database performance. If you're using an x86_64 system with CPUs from the last ~15 years, consider using these images for best performance.
 
 If you're using Docker instead, equivalent performance-optimised
 images are available with the `-maxperf` suffix (e.g.
 `forgejo.ellis.link/continuwuation/continuwuity:latest-maxperf`).
-These images use the `release-max-perf` build profile with
-[link-time optimisation (LTO)][lto-rust-docs]
-and, for amd64, target the haswell CPU architecture.
 
 [lto-rust-docs]: https://doc.rust-lang.org/cargo/reference/profiles.html#lto
 
 ### Nix
 
-Theres a Nix package defined in our flake, available for Linux and MacOS. Add continuwuity as an input to your flake, and use `inputs.continuwuity.packages.${system}.default` to get a working Continuwuity package.
+If you wish to generate a static binary, you can do so using Nix: `nix build git+https://forgejo.ellis.link/continuwuation/continuwuity#packageName`, where `packageName` is one of:
 
-If you simply wish to generate a binary using Nix, you can run `nix build git+https://forgejo.ellis.link/continuwuation/continuwuity` to generate a binary in `result/bin/conduwuit`.
+- `default-static-x86_64`
+- `default-static-aarch64`
+- `max-perf-static-x86_64`
+- `max-perf-haswell-static-x86_64`
+- `max-perf-static-aarch64`
+
+`max-perf` takes longer to build, but has more runtime optimizations. Haswell builds are optimized for modern CPUs.
 
 ### Compiling
 
-Alternatively, you may compile the binary yourself.
-
-#### Using Docker
-
-See the [Building Docker Images](../development/index.mdx#building-docker-images)
-section in the development documentation.
-
-#### Manual
-
-##### Dependencies
-
-- Run `nix develop` to get a devshell with everything you need
-- Or, install the following:
-    - (On linux) `liburing-dev` on the compiling machine, and `liburing` on the target host
-    - (On linux) `pkg-config` on the compiling machine to allow finding `liburing`
-    - A C++ compiler and (on linux) `libclang` for RocksDB
-
-##### Build
-
-You can now build Continuwuity using `cargo build --release`.
-
-Continuwuity supports various optional features that can be enabled during compilation. Please see the Cargo.toml file for a comprehensive list, or ask in our rooms.
+Alternatively, you may compile the binary yourself. See the [Appendix subsection](#compiling-continuwuity) for more details.
 
 ## Adding a Continuwuity user
 
@@ -164,7 +142,7 @@ expose these ports on your firewall or router. If you use UFW, the commands to a
 are: `ufw allow 8448/tcp` and `ufw allow 443/tcp`.
 
 :::tip Alternative port/domain setups
-If you would like to use only port 443, a different port, or a subdomain for the homeserver, you will need to set up `.well-known` delegation. Consult the `[global.well_known]` section of the config file, and the [**Delegation/Split-domain**](../advanced/delegation) page to learn more about these kinds of deployments.
+If you would like to use only port 443, a different port, or a subdomain for the homeserver, you will need to set up `.well-known` delegation. Consult the `[global.well_known]` section of the config file, and the [**Delegation/Split-domain**](../guides/delegation) page to learn more about these kinds of deployments.
 :::
 
 ## Setting up the Reverse Proxy
@@ -201,7 +179,7 @@ For more granular controls, you will need to proxy everything under these follow
 
   - `/_matrix/client` - core Client-Server APIs. These should be available on port :443
 
-- `/_conduwuit/` and `/_continuwuity/` - ad-hoc Continuwuity routes for password resets, email verification, and server details such as `/local_user_count` and `/server_version`.
+- `/_continuwuity/` - Continuwuity's integrated account management interface and authentication path for OAuth-compatible clients
 
 You can optionally reverse proxy the following individual routes:
 
@@ -209,7 +187,7 @@ You can optionally reverse proxy the following individual routes:
   Continuwuity to perform delegation (see the `[global.well_known]` config section)
 - `/.well-known/matrix/support` if using Continuwuity to send the homeserver admin
   [contact and support page][well-known-support]
-- `/` and `/_continuwuity/logo.svg` if you would like to see the Continuwuity landing page
+- `/` and `/_continuwuity/resources` if you would like to see the Continuwuity landing page
 
 Refer to the respective software's documentation and online guides on how to do so.
 
@@ -260,7 +238,7 @@ Pick your own username and password!
 ```
 
 You can then open [a Matrix client][matrix-clients],
-enter your homeserver address, and try to register with the provided token.
+enter your homeserver address, and register with the provided token.
 By default, the first user is the instance's first admin. They will be added
 to the `#admin:example.com` room and be able to [issue admin commands](../reference/admin/index.md).
 
@@ -268,18 +246,22 @@ to the `#admin:example.com` room and be able to [issue admin commands](../refere
 
 ## How do I know it works?
 
-To check if your server can communicate with other homeservers, use the
-[Matrix Federation Tester](https://federationtester.mtrnord.blog/). If you can
-register your account but cannot join federated rooms, check your configuration
+To check if your server can communicate with other homeservers,
+use an external testing tool:
+
+- [Matrix Connectivity Tester](https://federationtester.mtrnord.blog/)
+- [Matrix Federation Tester](https://federationtester.matrix.org/)
+
+If you can register your account but cannot join federated rooms, check your configuration
 and verify that your federation endpoints are opened and forwarded correctly.
 
 As a quick health check, you can also use these cURL commands:
 
 ```bash
-curl https://example.com/_conduwuit/server_version
+curl https://example.com/_continuwuity/server_version
 
 # If using port 8448
-curl https://example.com:8448/_conduwuit/server_version
+curl https://example.com:8448/_continuwuity/server_version
 
 # If federation is enabled
 curl https://example.com:8448/_matrix/federation/v1/version
@@ -290,6 +272,33 @@ curl https://example.com/_matrix/client/versions
 
 ## What's next?
 
-- For smooth federation, set up a caching resolver according to the [**DNS tuning guide**](../advanced/dns.mdx) (recommended)
+- For smooth federation, set up a caching resolver according to the [**DNS tuning guide**](../guides/dns.mdx) (recommended)
+- To configure OIDC login with an identity provider, see the [**delegated authentication guide**](../guides/oidc.mdx).
 - For Audio/Video call functionality see the [**Calls**](../calls.md) page.
+- Consult the [Maintenance](../maintenance.mdx) page for guidance on maintaining your homeserver.
 - If you want to set up an appservice, take a look at the [**Appservice Guide**](../appservices.md).
+
+## Appendix
+
+### Compiling Continuwuity
+
+#### Using Docker
+
+See the [Building Docker Images](../development/index.mdx#building-docker-images)
+section in the development documentation.
+
+#### Manual
+
+##### DEPENDENCIES
+
+- Run `nix develop` to get a devshell with everything you need
+- Or, install the following:
+    - (On linux) `liburing-dev` on the compiling machine, and `liburing` on the target host
+    - (On linux) `pkg-config` on the compiling machine to allow finding `liburing`
+    - A C++ compiler and (on linux) `libclang` for RocksDB
+
+##### BUILD
+
+You can now build Continuwuity using `cargo build --release`.
+
+Continuwuity supports various optional features that can be enabled during compilation. Please see the Cargo.toml file for a comprehensive list, or ask in our rooms.

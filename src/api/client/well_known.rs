@@ -1,11 +1,11 @@
-use axum::{Json, extract::State, response::IntoResponse};
-use conduwuit::{Error, Result};
-use ruma::api::client::{
-	discovery::{
+use axum::extract::State;
+use conduwuit::{Err, Result};
+use ruma::{
+	api::client::discovery::{
 		discover_homeserver::{self, HomeserverInfo},
-		discover_support::{self, Contact},
+		discover_policy_server, discover_support,
 	},
-	error::ErrorKind,
+	assign,
 };
 
 use crate::Ruma;
@@ -19,20 +19,21 @@ pub(crate) async fn well_known_client(
 ) -> Result<discover_homeserver::Response> {
 	let client_url = match services.config.well_known.client.as_ref() {
 		| Some(url) => url.to_string(),
-		| None => return Err(Error::BadRequest(ErrorKind::NotFound, "Not found.")),
+		| None =>
+			return Err!(Request(NotFound(
+				"This server is not configured to serve well-known client information."
+			))),
 	};
 
-	Ok(discover_homeserver::Response {
-		homeserver: HomeserverInfo { base_url: client_url },
+	Ok(assign!(discover_homeserver::Response::new(HomeserverInfo::new(client_url)), {
 		identity_server: None,
-		sliding_sync_proxy: None,
 		tile_server: None,
 		rtc_foci: services
 			.config
 			.matrix_rtc
-			.effective_foci(&services.config.well_known.rtc_focus_server_urls)
-			.to_vec(),
-	})
+			.foci
+			.clone()
+	}))
 }
 
 /// # `GET /_matrix/client/v1/rtc/transports`
@@ -42,14 +43,10 @@ pub(crate) async fn well_known_client(
 /// homeserver, implementing MSC4143.
 pub(crate) async fn get_rtc_transports(
 	State(services): State<crate::State>,
-	_body: Ruma<ruma::api::client::discovery::get_rtc_transports::Request>,
-) -> Result<ruma::api::client::discovery::get_rtc_transports::Response> {
-	Ok(ruma::api::client::discovery::get_rtc_transports::Response::new(
-		services
-			.config
-			.matrix_rtc
-			.effective_foci(&services.config.well_known.rtc_focus_server_urls)
-			.to_vec(),
+	_body: Ruma<ruma::api::client::rtc::transports::v1::Request>,
+) -> Result<ruma::api::client::rtc::transports::v1::Response> {
+	Ok(ruma::api::client::rtc::transports::v1::Response::new(
+		services.config.matrix_rtc.foci.clone(),
 	))
 }
 
@@ -69,73 +66,27 @@ pub(crate) async fn well_known_support(
 		.as_ref()
 		.map(ToString::to_string);
 
-	let email_address = services.config.well_known.support_email.clone();
-	let matrix_id = services.config.well_known.support_mxid.clone();
-	let pgp_key = services.config.well_known.support_pgp_key.clone();
-
-	// TODO: support defining multiple contacts in the config
-	let mut contacts: Vec<Contact> = vec![];
-
-	let role_value = services
-		.config
-		.well_known
-		.support_role
-		.clone()
-		.unwrap_or_else(|| "m.role.admin".to_owned().into());
-
-	// Add configured contact if at least one contact method is specified
-	if email_address.is_some() || matrix_id.is_some() {
-		contacts.push(Contact {
-			role: role_value.clone(),
-			email_address: email_address.clone(),
-			matrix_id: matrix_id.clone(),
-			pgp_key: pgp_key.clone(),
-		});
-	}
-
-	// Try to add admin users as contacts if no contacts are configured
-	if contacts.is_empty() {
-		let admin_users = services.admin.get_admins().await;
-
-		for user_id in &admin_users {
-			if *user_id == services.globals.server_user {
-				continue;
-			}
-
-			contacts.push(Contact {
-				role: role_value.clone(),
-				email_address: None,
-				matrix_id: Some(user_id.to_owned()),
-				pgp_key: None,
-			});
-		}
-	}
+	let contacts = services.admin.get_support_contacts().await;
 
 	if contacts.is_empty() && support_page.is_none() {
 		// No admin room, no configured contacts, and no support page
-		return Err(Error::BadRequest(ErrorKind::NotFound, "Not found."));
+		return Err!(Request(NotFound("No support information is available.")));
 	}
 
-	Ok(discover_support::Response { contacts, support_page })
+	Ok(assign!(discover_support::Response::with_contacts(contacts), { support_page }))
 }
 
-/// # `GET /client/server.json`
+/// # `GET /.well-known/matrix/policy_server`
 ///
-/// Endpoint provided by sliding sync proxy used by some clients such as Element
-/// Web as a non-standard health check.
-pub(crate) async fn syncv3_client_server_json(
+/// Advertises the policy server's public key, allowing clients to discover the
+/// values to be set in m.room.policy. Introduced in spec v1.18.
+pub(crate) async fn well_known_policy_server(
 	State(services): State<crate::State>,
-) -> Result<impl IntoResponse> {
-	let server_url = match services.config.well_known.client.as_ref() {
-		| Some(url) => url.to_string(),
-		| None => match services.config.well_known.server.as_ref() {
-			| Some(url) => url.to_string(),
-			| None => return Err(Error::BadRequest(ErrorKind::NotFound, "Not found.")),
-		},
-	};
-
-	Ok(Json(serde_json::json!({
-		"server": server_url,
-		"version": conduwuit::version(),
-	})))
+	_body: Ruma<discover_policy_server::Request>,
+) -> Result<discover_policy_server::Response> {
+	if let Some(key) = services.config.well_known.policy_server_public_key.clone() {
+		Ok(discover_policy_server::Response::new(key))
+	} else {
+		Err!(Request(NotFound("No policy server available.")))
+	}
 }

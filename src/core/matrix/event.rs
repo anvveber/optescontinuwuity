@@ -11,7 +11,7 @@ use std::fmt::Debug;
 
 use ruma::{
 	CanonicalJsonObject, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, RoomId,
-	RoomVersionId, UserId, events::TimelineEventType,
+	UserId, events::TimelineEventType, room_version_rules::RoomVersionRules,
 };
 use serde::Deserialize;
 use serde_json::{Value as JsonValue, value::RawValue as RawJsonValue};
@@ -95,11 +95,11 @@ pub trait Event: Clone + Debug {
 	}
 
 	#[inline]
-	fn redacts_id(&self, room_version: &RoomVersionId) -> Option<OwnedEventId>
+	fn redacts_id(&self, room_version_rules: &RoomVersionRules) -> Option<OwnedEventId>
 	where
 		Self: Sized,
 	{
-		redact::redacts_id(self, room_version)
+		redact::redacts_id(self, room_version_rules)
 	}
 
 	#[inline]
@@ -180,6 +180,10 @@ pub trait Event: Clone + Debug {
 
 	/// The state key for this event.
 	fn state_key(&self) -> Option<&str>;
+
+	/// The MSC4354 sticky object, verbatim, if the event has one.
+	#[inline]
+	fn sticky(&self) -> Option<&RawJsonValue> { None }
 
 	/// The event type.
 	fn kind(&self) -> &TimelineEventType;

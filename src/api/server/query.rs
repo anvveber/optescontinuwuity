@@ -1,16 +1,10 @@
-use std::collections::BTreeMap;
-
 use axum::extract::State;
-use conduwuit::{Error, Result, err};
+use conduwuit::{Err, Result, err};
 use futures::StreamExt;
-use get_profile_information::v1::ProfileField;
 use rand::seq::SliceRandom;
 use ruma::{
 	OwnedServerName,
-	api::{
-		client::error::ErrorKind,
-		federation::query::{get_profile_information, get_room_information},
-	},
+	api::federation::query::{get_profile_information, get_room_information},
 };
 
 use crate::Ruma;
@@ -33,7 +27,6 @@ pub(crate) async fn get_room_information_route(
 		.rooms
 		.state_cache
 		.room_servers(&room_id)
-		.map(ToOwned::to_owned)
 		.collect()
 		.await;
 
@@ -51,7 +44,7 @@ pub(crate) async fn get_room_information_route(
 		servers.insert(0, services.globals.server_name().to_owned());
 	}
 
-	Ok(get_room_information::v1::Response { room_id, servers })
+	Ok(get_room_information::v1::Response::new(room_id, servers))
 }
 
 /// # `GET /_matrix/federation/v1/query/profile`
@@ -67,57 +60,35 @@ pub(crate) async fn get_profile_information_route(
 		.config
 		.allow_inbound_profile_lookup_federation_requests
 	{
-		return Err(Error::BadRequest(
-			ErrorKind::forbidden(),
-			"Profile lookup over federation is not allowed on this homeserver.",
-		));
+		return Err!(Request(Forbidden(
+			"Profile lookup over federation is not allowed on this homeserver."
+		)));
 	}
 
 	if !services.globals.server_is_ours(body.user_id.server_name()) {
-		return Err(Error::BadRequest(
-			ErrorKind::InvalidParam,
-			"User does not belong to this server.",
-		));
+		return Err!(Request(InvalidParam("User does not belong to this server.")));
 	}
 
-	let mut displayname = None;
-	let mut avatar_url = None;
-	let mut blurhash = None;
-	let mut custom_profile_fields = BTreeMap::new();
+	let response = if let Some(field) = &body.field {
+		let mut response = get_profile_information::v1::Response::new();
 
-	match &body.field {
-		| Some(ProfileField::DisplayName) => {
-			displayname = services.users.displayname(&body.user_id).await.ok();
-		},
-		| Some(ProfileField::AvatarUrl) => {
-			avatar_url = services.users.avatar_url(&body.user_id).await.ok();
-			blurhash = services.users.blurhash(&body.user_id).await.ok();
-		},
-		| Some(custom_field) => {
-			if let Ok(value) = services
-				.users
-				.profile_key(&body.user_id, custom_field.as_str())
-				.await
-			{
-				custom_profile_fields.insert(custom_field.to_string(), value);
-			}
-		},
-		| None => {
-			displayname = services.users.displayname(&body.user_id).await.ok();
-			avatar_url = services.users.avatar_url(&body.user_id).await.ok();
-			blurhash = services.users.blurhash(&body.user_id).await.ok();
-			custom_profile_fields = services
-				.users
-				.all_profile_keys(&body.user_id)
-				.collect()
-				.await;
-		},
-	}
+		if let Some(value) = services
+			.users
+			.get_local_profile_field(&body.user_id, field.to_owned())
+			.await
+		{
+			response.set(value.field_name().as_str().to_owned(), value.value().into_owned());
+		}
 
-	Ok(get_profile_information::v1::Response {
-		displayname,
-		avatar_url,
-		blurhash,
-		custom_profile_fields,
-	})
+		response
+	} else {
+		services
+			.users
+			.get_local_profile(&body.user_id)
+			.await
+			.into_iter()
+			.collect()
+	};
+
+	Ok(response)
 }

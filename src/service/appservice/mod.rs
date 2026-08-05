@@ -67,7 +67,7 @@ impl crate::Service for Service {
 		for (id, registration) in appservices {
 			// During startup, resolve any token collisions in favour of appservices
 			// by logging out conflicting user devices
-			if let Ok((user_id, device_id)) = self
+			if let Some((user_id, device_id, _)) = self
 				.services
 				.users
 				.find_from_token(&registration.as_token)
@@ -108,22 +108,16 @@ impl Service {
 			self.services.globals.server_name(),
 		)?;
 
-		if !self.services.users.exists(&appservice_user_id).await {
-			self.services
-				.users
-				.create(&appservice_user_id, None, None)
-				.await?;
-		} else if self
+		if !self
 			.services
 			.users
-			.is_deactivated(&appservice_user_id)
+			.status(&appservice_user_id)
 			.await
-			.unwrap_or(false)
+			.is_found()
 		{
-			// Reactivate the appservice user if it was accidentally deactivated
 			self.services
 				.users
-				.set_password(&appservice_user_id, None)
+				.create_shadow_account(&appservice_user_id)
 				.await?;
 		}
 
@@ -161,7 +155,7 @@ impl Service {
 			.users
 			.find_from_token(&registration.as_token)
 			.await
-			.is_ok()
+			.is_some()
 		{
 			return Err(err!(Request(InvalidParam(
 				"Cannot register appservice: The provided token is already in use by a user \
@@ -228,6 +222,15 @@ impl Service {
 			.await
 			.values()
 			.any(|info| info.is_exclusive_user_match(user_id))
+	}
+
+	/// Checks if a given user id matches any appservice regex, exclusive or
+	/// otherwise
+	pub async fn is_user_id(&self, user_id: &UserId) -> bool {
+		self.read()
+			.await
+			.values()
+			.any(|info| info.is_user_match(user_id))
 	}
 
 	/// Checks if a given room alias matches any exclusive appservice regex

@@ -14,7 +14,7 @@ use database::Json;
 use futures::{FutureExt, StreamExt, TryStreamExt};
 use itertools::Itertools;
 use ruma::{
-	OwnedRoomId, OwnedUserId, RoomId, UserId,
+	OwnedRoomId, OwnedUserId, UserId,
 	events::{
 		AnyStrippedStateEvent, GlobalAccountDataEventType, StateEventType,
 		push_rules::PushRulesEvent,
@@ -32,7 +32,7 @@ use crate::{Services, media, rooms::short::ShortStateHash};
 /// - If database is opened at lesser version we apply migrations up to this.
 ///   Note that named-feature migrations may also be performed when opening at
 ///   equal or lesser version. These are expected to be backward-compatible.
-pub(crate) const DATABASE_VERSION: u64 = 18;
+pub(crate) const DATABASE_VERSION: u64 = 19;
 
 pub(crate) async fn migrations(services: &Services) -> Result<()> {
 	let users_count = services.users.count().await;
@@ -41,7 +41,7 @@ pub(crate) async fn migrations(services: &Services) -> Result<()> {
 	// requires recreating the database from scratch.
 	if users_count > 0 {
 		let server_user = &services.globals.server_user;
-		if !services.users.exists(server_user).await {
+		if !services.users.status(server_user).await.is_found() {
 			error!("The {server_user} server user does not exist, and the database is not new.");
 			return Err!(Database(
 				"Cannot reuse an existing database after changing the server name, please \
@@ -71,6 +71,8 @@ async fn fresh(services: &Services) -> Result<()> {
 	db["global"].insert(b"fix_corrupt_msc4133_fields", []);
 	db["global"].insert(b"populate_userroomid_leftstate_table", []);
 	db["global"].insert(b"fix_local_invite_state", []);
+	db["global"].insert(SPLIT_USERID_PASSWORD, []);
+	db["global"].insert(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH, []);
 
 	// Create the admin room and server user on first run
 	info!("Creating admin room and server user");
@@ -228,6 +230,31 @@ async fn migrate(services: &Services) -> Result<()> {
 			.map_err(|e| err!("Failed to run 'fix_local_invite_state' migration': {e}"))?;
 	}
 
+	if services.globals.db.database_version().await < 19 {
+		services.globals.db.bump_database_version(19);
+		info!("Migration: Bumped database version to 19");
+	}
+
+	if db["global"].get(SPLIT_USERID_PASSWORD).await.is_not_found() {
+		info!("Running migration 'split_userid_password'");
+		split_userid_password(services)
+			.await
+			.map_err(|e| err!("Failed to run 'split_userid_password' migration': {e}"))?;
+	}
+
+	if db["global"]
+		.get(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH)
+		.await
+		.is_not_found()
+	{
+		info!("Running migration 'drop_roomsynctoken_shortstatehash'");
+		obliterate_roomsynctoken_shortstatehash_with_extreme_prejudice(services)
+			.await
+			.map_err(|e| {
+				err!("Failed to run 'drop_roomsynctoken_shortstatehash' migration': {e}")
+			})?;
+	}
+
 	assert_eq!(
 		services.globals.db.database_version().await,
 		DATABASE_VERSION,
@@ -242,8 +269,14 @@ async fn migrate(services: &Services) -> Result<()> {
 		if !patterns.is_empty() {
 			services
 				.users
-				.stream()
-				.filter(|user_id| services.users.is_active_local(user_id))
+				.stream_local_users()
+				.filter_map(async |user_id| {
+					if services.users.status(&user_id).await.is_found() {
+						Some(user_id)
+					} else {
+						None
+					}
+				})
 				.ready_for_each(|user_id| {
 					let matches = patterns.matches(user_id.localpart());
 					if matches.matched_any() {
@@ -264,14 +297,7 @@ async fn migrate(services: &Services) -> Result<()> {
 	{
 		let patterns = services.globals.forbidden_alias_names();
 		if !patterns.is_empty() {
-			for room_id in services
-				.rooms
-				.metadata
-				.iter_ids()
-				.map(ToOwned::to_owned)
-				.collect::<Vec<_>>()
-				.await
-			{
+			for room_id in services.rooms.metadata.iter_ids().collect::<Vec<_>>().await {
 				services
 					.rooms
 					.alias
@@ -304,8 +330,8 @@ async fn migrate(services: &Services) -> Result<()> {
 async fn db_lt_12(services: &Services) -> Result<()> {
 	for username in &services
 		.users
-		.list_local_users()
-		.map(ToOwned::to_owned)
+		.stream_local_users()
+		.ready_filter(|user| services.globals.user_is_local(user))
 		.collect::<Vec<OwnedUserId>>()
 		.await
 	{
@@ -384,8 +410,8 @@ async fn db_lt_12(services: &Services) -> Result<()> {
 async fn db_lt_13(services: &Services) -> Result<()> {
 	for username in &services
 		.users
-		.list_local_users()
-		.map(ToOwned::to_owned)
+		.stream_local_users()
+		.ready_filter(|user| services.globals.user_is_local(user))
 		.collect::<Vec<OwnedUserId>>()
 		.await
 	{
@@ -476,13 +502,7 @@ async fn retroactively_fix_bad_data_from_roomuserid_joined(services: &Services) 
 	let db = &services.db;
 	let _cork = db.cork_and_sync();
 
-	let room_ids = services
-		.rooms
-		.metadata
-		.iter_ids()
-		.map(ToOwned::to_owned)
-		.collect::<Vec<_>>()
-		.await;
+	let room_ids = services.rooms.metadata.iter_ids().collect::<Vec<_>>().await;
 
 	for room_id in &room_ids {
 		debug_info!("Fixing room {room_id}");
@@ -491,7 +511,6 @@ async fn retroactively_fix_bad_data_from_roomuserid_joined(services: &Services) 
 			.rooms
 			.state_cache
 			.room_members(room_id)
-			.map(ToOwned::to_owned)
 			.collect()
 			.await;
 
@@ -603,11 +622,8 @@ async fn fix_referencedevents_missing_sep(services: &Services) -> Result {
 }
 
 async fn fix_readreceiptid_readreceipt_duplicates(services: &Services) -> Result {
-	use conduwuit::arrayvec::ArrayString;
-	use ruma::identifiers_validation::MAX_BYTES;
-
-	type ArrayId = ArrayString<MAX_BYTES>;
-	type Key<'a> = (&'a RoomId, u64, &'a UserId);
+	type ArrayId = String;
+	type Key = (OwnedRoomId, u64, OwnedUserId);
 
 	info!("Fixing undeleted entries in readreceiptid_readreceipt...");
 
@@ -621,21 +637,11 @@ async fn fix_readreceiptid_readreceipt_duplicates(services: &Services) -> Result
 	readreceiptid_readreceipt
 		.keys()
 		.expect_ok()
-		.ready_for_each(|key: Key<'_>| {
-			let (room_id, _, user_id) = key;
-			let last_room = cur_room.replace(
-				room_id
-					.as_str()
-					.try_into()
-					.expect("invalid room_id in database"),
-			);
+		.ready_for_each(|key: Key| {
+			let (ref room_id, _, ref user_id) = key;
+			let last_room = cur_room.replace(room_id.as_str().into());
 
-			let last_user = cur_user.replace(
-				user_id
-					.as_str()
-					.try_into()
-					.expect("invalid user_id in database"),
-			);
+			let last_user = cur_user.replace(user_id.as_str().into());
 
 			let is_dup = cur_room == last_room && cur_user == last_user;
 			if is_dup {
@@ -715,8 +721,8 @@ async fn fix_corrupt_msc4133_fields(services: &Services) -> Result {
 
 const POPULATED_USERROOMID_LEFTSTATE_TABLE_MARKER: &str = "populate_userroomid_leftstate_table";
 async fn populate_userroomid_leftstate_table(services: &Services) -> Result {
-	type KeyVal<'a> = (Key<'a>, Raw<Option<Pdu>>);
-	type Key<'a> = (&'a UserId, &'a RoomId);
+	type KeyVal = (Key, Raw<Option<Pdu>>);
+	type Key = (OwnedUserId, OwnedRoomId);
 
 	let db = &services.db;
 	let cork = db.cork_and_sync();
@@ -731,16 +737,16 @@ async fn populate_userroomid_leftstate_table(services: &Services) -> Result {
 				usize,
 				HashMap<_, _>,
 			),
-			       ((user_id, room_id), state): KeyVal<'_>|
+			       ((user_id, room_id), state): KeyVal|
 			       -> Result<(usize, usize, HashMap<_, _>)> {
 				if state.deserialize().is_err() {
 					let latest_shortstatehash =
-						if let Some(shortstatehash) = shortstatehash_cache.get(room_id) {
+						if let Some(shortstatehash) = shortstatehash_cache.get(&room_id) {
 							*shortstatehash
 						} else if let Ok(shortstatehash) =
-							services.rooms.state.get_room_shortstatehash(room_id).await
+							services.rooms.state.get_room_shortstatehash(&room_id).await
 						{
-							shortstatehash_cache.insert(room_id.to_owned(), shortstatehash);
+							shortstatehash_cache.insert(room_id.clone(), shortstatehash);
 							shortstatehash
 						} else {
 							warn!(%room_id, %user_id, "room has no shortstatehash");
@@ -792,19 +798,19 @@ const FIXED_LOCAL_INVITE_STATE_MARKER: &str = "fix_local_invite_state";
 async fn fix_local_invite_state(services: &Services) -> Result {
 	// Clean up the effects of !1249 by caching stripped state for invites
 
-	type KeyVal<'a> = (Key<'a>, Raw<Vec<AnyStrippedStateEvent>>);
-	type Key<'a> = (&'a UserId, &'a RoomId);
+	type KeyVal = (Key, Raw<Vec<AnyStrippedStateEvent>>);
+	type Key = (OwnedUserId, OwnedRoomId);
 
 	let db = &services.db;
 	let cork = db.cork_and_sync();
-	let userroomid_invitestate = services.db["userroomid_invitestate"].clone();
+	let userroomid_invitestate = db["userroomid_invitestate"].clone();
 
 	// for each user invited to a room
 	let fixed =  userroomid_invitestate.stream()
 		// if they're a local user on this homeserver
-		.try_filter(|((user_id, _), _): &KeyVal<'_>| ready(services.globals.user_is_local(user_id)))
-		.and_then(async |((user_id, room_id), stripped_state): KeyVal<'_>| Ok::<_,
-			conduwuit::Error>((user_id.to_owned(), room_id.to_owned(), stripped_state.deserialize
+		.try_filter(|((user_id, _), _): &KeyVal| ready(services.globals.user_is_local(user_id)))
+		.and_then(async |((user_id, room_id), stripped_state): KeyVal| Ok::<_,
+			conduwuit::Error>((user_id.clone(), room_id.clone(), stripped_state.deserialize
 		().unwrap_or_else(|e| {
 			trace!("Failed to deserialize: {:?}", stripped_state.json());
 			warn!(
@@ -812,7 +818,7 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 				%room_id,
 				"Failed to deserialize stripped state for invite, removing from db: {e}"
 			);
-			userroomid_invitestate.del((user_id, room_id));
+			userroomid_invitestate.del((&user_id, &room_id));
 			vec![]
 		}))))
 		.try_fold(0_usize, async |mut fixed, (user_id, room_id, stripped_state)| {
@@ -825,7 +831,7 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 				&& services.globals.user_is_local(&membership_event.sender) {
 
 				// build and save stripped state for their invite in the database
-				let stripped_state = services.rooms.state.summary_stripped(&membership_event, &room_id).await;
+				let stripped_state = services.rooms.state.summary_stripped(&membership_event, &room_id, &user_id, false).await;
 				userroomid_invitestate.put((&user_id, &room_id), Json(stripped_state));
 				fixed = fixed.saturating_add(1);
 			}
@@ -839,5 +845,59 @@ async fn fix_local_invite_state(services: &Services) -> Result {
 
 	db["global"].insert(FIXED_LOCAL_INVITE_STATE_MARKER, []);
 	db.db.sort()?;
+	Ok(())
+}
+
+const SPLIT_USERID_PASSWORD: &str = "split_userid_password";
+async fn split_userid_password(services: &Services) -> Result {
+	// Split remote and deactivated users out from the `userid_password` table
+
+	let db = &services.db;
+	let cork = db.cork_and_sync();
+	let userid_password = db["userid_password"].clone();
+	let remoteuserid_remoteuser = db["remoteuserid_remoteuser"].clone();
+	let userid_deactivated = db["userid_deactivated"].clone();
+
+	let remote_users = userid_password
+		.stream::<OwnedUserId, String>()
+		.ignore_err()
+		.fold(0_usize, async |mut remote_users, (user_id, hash)| {
+			if !services.globals.user_is_local(&user_id) {
+				assert!(hash.is_empty(), "non-empty hash {hash} for remote user {user_id}");
+
+				remoteuserid_remoteuser.insert(&user_id, "");
+				userid_password.remove(&user_id);
+				remote_users = remote_users.saturating_add(1);
+			} else if hash.is_empty() {
+				if !(services.appservice.is_user_id(&user_id).await
+					|| user_id == services.globals.server_user)
+				{
+					info!("Marking {user_id} as deactivated");
+					userid_deactivated.insert(&user_id, "");
+				}
+			}
+
+			remote_users
+		})
+		.await;
+
+	drop(cork);
+	info!(?remote_users, "Split userid_password.");
+
+	db["global"].insert(SPLIT_USERID_PASSWORD, []);
+	db.db.sort()?;
+	Ok(())
+}
+
+const DROP_ROOMSYNCTOKEN_SHORTSTATEHASH: &str = "drop_roomsynctoken_shortstatehash";
+async fn obliterate_roomsynctoken_shortstatehash_with_extreme_prejudice(
+	services: &Services,
+) -> Result {
+	services.db.db.drop_column("roomsynctoken_shortstatehash")?;
+
+	info!("Cleared roomsynctoken_shortstatehash.");
+
+	services.db["global"].insert(DROP_ROOMSYNCTOKEN_SHORTSTATEHASH, []);
+
 	Ok(())
 }

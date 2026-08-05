@@ -1,20 +1,17 @@
 use std::time::Duration;
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
-	Err, Error, Result, debug, err, info,
-	utils::{self, ReadyExt, hash, stream::BroadbandExt},
+	Err, Result, debug, err, info,
+	utils::{ReadyExt, stream::BroadbandExt},
 	warn,
 };
-use conduwuit_core::{debug_error, debug_warn};
 use conduwuit_service::Services;
 use futures::StreamExt;
 use lettre::Address;
 use ruma::{
 	OwnedUserId, UserId,
 	api::client::{
-		error::ErrorKind,
 		session::{
 			get_login_token,
 			get_login_types::{
@@ -23,154 +20,54 @@ use ruma::{
 			},
 			login::{
 				self,
-				v3::{DiscoveryInfo, HomeserverInfo},
+				v3::{DiscoveryInfo, HomeserverInfo, LoginInfo},
 			},
 			logout, logout_all,
 		},
-		uiaa::UserIdentifier,
+		uiaa::{EmailUserIdentifier, MatrixUserIdentifier, UserIdentifier},
 	},
+	assign,
 };
-use service::uiaa::Identity;
+use service::users::DeviceToken;
 
-use super::{DEVICE_ID_LENGTH, TOKEN_LENGTH};
-use crate::Ruma;
+use crate::{Ruma, client_ip::ClientIp};
 
 /// # `GET /_matrix/client/v3/login`
 ///
 /// Get the supported login types of this server. One of these should be used as
 /// the `type` field when logging in.
-#[tracing::instrument(skip_all, fields(%client), name = "login", level = "info")]
+#[tracing::instrument(skip_all, name = "login", level = "info")]
 pub(crate) async fn get_login_types_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	_body: Ruma<get_login_types::v3::Request>,
 ) -> Result<get_login_types::v3::Response> {
+	if !services.config.oauth.compatibility_mode().uiaa_available() {
+		return Err!(Request(Unrecognized(
+			"User-interactive authentication is not available on this server."
+		)));
+	}
+
 	Ok(get_login_types::v3::Response::new(vec![
 		get_login_types::v3::LoginType::Password(PasswordLoginType::default()),
 		get_login_types::v3::LoginType::ApplicationService(ApplicationServiceLoginType::default()),
-		get_login_types::v3::LoginType::Token(TokenLoginType {
+		get_login_types::v3::LoginType::Token(assign!(TokenLoginType::new(), {
 			get_login_token: services.server.config.login_via_existing_session,
-		}),
+		})),
 	]))
 }
 
-/// Authenticates the given user by its ID and its password.
-///
-/// Returns the user ID if successful, and an error otherwise.
-#[tracing::instrument(skip_all, fields(%user_id), name = "password", level = "debug")]
-pub(crate) async fn password_login(
-	services: &Services,
-	user_id: &UserId,
-	lowercased_user_id: &UserId,
-	password: &str,
-) -> Result<OwnedUserId> {
-	// Restrict login to accounts only of type 'password', including untyped
-	// legacy accounts which are equivalent to 'password'.
-	if services
-		.users
-		.origin(user_id)
-		.await
-		.is_ok_and(|origin| origin != "password")
-	{
-		return Err!(Request(Forbidden("Account does not permit password login.")));
-	}
-
-	let (hash, user_id) = match services.users.password_hash(user_id).await {
-		| Ok(hash) => (hash, user_id),
-		| Err(_) => services
-			.users
-			.password_hash(lowercased_user_id)
-			.await
-			.map(|hash| (hash, lowercased_user_id))
-			.map_err(|_| err!(Request(Forbidden("Invalid identifier or password."))))?,
-	};
-
-	if hash.is_empty() {
-		return Err!(Request(UserDeactivated("The user has been deactivated")));
-	}
-
-	hash::verify_password(password, &hash)
-		.inspect_err(|e| debug_error!("{e}"))
-		.map_err(|_| err!(Request(Forbidden("Invalid identifier or password."))))?;
-
-	Ok(user_id.to_owned())
-}
-
-/// Authenticates the given user through the configured LDAP server.
-///
-/// Creates the user if the user is found in the LDAP and do not already have an
-/// account.
-#[tracing::instrument(skip_all, fields(%user_id), name = "ldap", level = "debug")]
-pub(super) async fn ldap_login(
-	services: &Services,
-	user_id: &UserId,
-	lowercased_user_id: &UserId,
-	password: &str,
-) -> Result<OwnedUserId> {
-	let (user_dn, is_ldap_admin) = match services.config.ldap.bind_dn.as_ref() {
-		| Some(bind_dn) if bind_dn.contains("{username}") =>
-			(bind_dn.replace("{username}", lowercased_user_id.localpart()), None),
-		| _ => {
-			debug!("Searching user in LDAP");
-
-			let dns = services.users.search_ldap(user_id).await?;
-			if dns.len() >= 2 {
-				return Err!(Ldap("LDAP search returned two or more results"));
-			}
-
-			let Some((user_dn, is_admin)) = dns.first() else {
-				return password_login(services, user_id, lowercased_user_id, password).await;
-			};
-
-			(user_dn.clone(), *is_admin)
-		},
-	};
-
-	let user_id = services
-		.users
-		.auth_ldap(&user_dn, password)
-		.await
-		.map(|()| lowercased_user_id.to_owned())?;
-
-	// LDAP users are automatically created on first login attempt. This is a very
-	// common feature that can be seen on many services using a LDAP provider for
-	// their users (synapse, Nextcloud, Jellyfin, ...).
-	//
-	// LDAP users are crated with a dummy password but non empty because an empty
-	// password is reserved for deactivated accounts. The conduwuit password field
-	// will never be read to login a LDAP user so it's not an issue.
-	if !services.users.exists(lowercased_user_id).await {
-		services
-			.users
-			.create(lowercased_user_id, Some("*"), Some("ldap"))
-			.await?;
-	}
-
-	// Only sync admin status if LDAP can actually determine it.
-	// None means LDAP cannot determine admin status (manual config required).
-	if let Some(is_ldap_admin) = is_ldap_admin {
-		let is_conduwuit_admin = services.admin.user_is_admin(lowercased_user_id).await;
-
-		if is_ldap_admin && !is_conduwuit_admin {
-			Box::pin(services.admin.make_user_admin(lowercased_user_id)).await?;
-		} else if !is_ldap_admin && is_conduwuit_admin {
-			Box::pin(services.admin.revoke_admin(lowercased_user_id)).await?;
-		}
-	}
-
-	Ok(user_id)
-}
-
-pub(crate) async fn handle_login(
+pub async fn handle_login(
 	services: &Services,
 	identifier: Option<&UserIdentifier>,
 	password: &str,
 	user: Option<&String>,
 ) -> Result<OwnedUserId> {
 	debug!("Got password login type");
+
 	let user_id_or_localpart = match (identifier, user) {
-		| (Some(UserIdentifier::UserIdOrLocalpart(localpart)), _) => localpart,
-		| (Some(UserIdentifier::Email { address }), _) => {
+		| (Some(UserIdentifier::Matrix(MatrixUserIdentifier { user, .. })), _)
+		| (None, Some(user)) => user,
+		| (Some(UserIdentifier::Email(EmailUserIdentifier { address, .. })), _) => {
 			let email = Address::try_from(address.to_owned())
 				.map_err(|_| err!(Request(InvalidParam("Email is malformed"))))?;
 
@@ -180,7 +77,6 @@ pub(crate) async fn handle_login(
 				.await
 				.ok_or_else(|| err!(Request(Forbidden("Invalid identifier or password"))))?
 		},
-		| (None, Some(user)) => user,
 		| _ => {
 			return Err!(Request(InvalidParam("Identifier type not recognized")));
 		},
@@ -190,20 +86,8 @@ pub(crate) async fn handle_login(
 		UserId::parse_with_server_name(user_id_or_localpart, &services.config.server_name)
 			.map_err(|_| err!(Request(InvalidUsername("User ID is malformed"))))?;
 
-	let lowercased_user_id = UserId::parse_with_server_name(
-		user_id.localpart().to_lowercase(),
-		&services.config.server_name,
-	)
-	.unwrap();
-
-	if !services.globals.user_is_local(&user_id)
-		|| !services.globals.user_is_local(&lowercased_user_id)
-	{
-		return Err!(Request(Unknown("User ID does not belong to this homeserver")));
-	}
-
 	if services.users.is_locked(&user_id).await? {
-		return Err(Error::BadRequest(ErrorKind::UserLocked, "This account has been locked."));
+		return Err!(Request(UserLocked("This account has been locked.")));
 	}
 
 	if services.users.is_login_disabled(&user_id).await {
@@ -211,18 +95,7 @@ pub(crate) async fn handle_login(
 		return Err!(Request(Forbidden("This account is not permitted to log in.")));
 	}
 
-	if cfg!(feature = "ldap") && services.config.ldap.enable {
-		match Box::pin(ldap_login(services, &user_id, &lowercased_user_id, password)).await {
-			| Ok(user_id) => Ok(user_id),
-			| Err(err) if services.config.ldap.ldap_only => Err(err),
-			| Err(err) => {
-				debug_warn!("{err}");
-				password_login(services, &user_id, &lowercased_user_id, password).await
-			},
-		}
-	} else {
-		password_login(services, &user_id, &lowercased_user_id, password).await
-	}
+	services.users.check_password(&user_id, password).await
 }
 
 /// # `POST /_matrix/client/v3/login`
@@ -239,25 +112,35 @@ pub(crate) async fn handle_login(
 /// Note: You can use [`GET
 /// /_matrix/client/r0/login`](fn.get_supported_versions_route.html) to see
 /// supported login types.
-#[tracing::instrument(skip_all, fields(%client), name = "login", level = "info")]
+#[tracing::instrument(skip_all, name = "login", level = "info")]
 pub(crate) async fn login_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
+	ClientIp(client): ClientIp, // NOTE: Required for device metadata
 	body: Ruma<login::v3::Request>,
 ) -> Result<login::v3::Response> {
+	if !services.config.oauth.compatibility_mode().uiaa_available() {
+		return match body.login_info {
+			| LoginInfo::ApplicationService(_) => {
+				Err!(Request(AppserviceLoginUnsupported(
+					"User-interactive appservice login is not available on this server."
+				)))
+			},
+			| _ => {
+				Err!(Request(Unrecognized(
+					"User-interactive authentication is not available on this server."
+				)))
+			},
+		};
+	}
+
 	let emergency_mode_enabled = services.config.emergency_password.is_some();
 
 	// Validate login method
-	// TODO: Other login methods
 	let user_id = match &body.login_info {
 		#[allow(deprecated)]
-		| login::v3::LoginInfo::Password(login::v3::Password {
-			identifier,
-			password,
-			user,
-			..
-		}) => handle_login(&services, identifier.as_ref(), password, user.as_ref()).await?,
-		| login::v3::LoginInfo::Token(login::v3::Token { token }) => {
+		| LoginInfo::Password(login::v3::Password { identifier, password, user, .. }) =>
+			handle_login(&services, identifier.as_ref(), password, user.as_ref()).await?,
+		| LoginInfo::Token(login::v3::Token { token, .. }) => {
 			debug!("Got token login type");
 			if !services.server.config.login_via_existing_session {
 				return Err!(Request(Unknown("Token login is not enabled.")));
@@ -265,19 +148,20 @@ pub(crate) async fn login_route(
 			services.users.find_from_login_token(token).await?
 		},
 		#[allow(deprecated)]
-		| login::v3::LoginInfo::ApplicationService(login::v3::ApplicationService {
+		| LoginInfo::ApplicationService(login::v3::ApplicationService {
 			identifier,
 			user,
+			..
 		}) => {
 			debug!("Got appservice login type");
 
-			let Some(ref info) = body.appservice_info else {
+			let Some(ref info) = body.identity else {
 				return Err!(Request(MissingToken("Missing appservice token.")));
 			};
 
 			let user_id =
-				if let Some(UserIdentifier::UserIdOrLocalpart(user_id)) = identifier {
-					UserId::parse_with_server_name(user_id, &services.config.server_name)
+				if let Some(UserIdentifier::Matrix(MatrixUserIdentifier { user, .. })) = identifier {
+					UserId::parse_with_server_name(user, &services.config.server_name)
 				} else if let Some(user) = user {
 					UserId::parse_with_server_name(user, &services.config.server_name)
 				} else {
@@ -298,50 +182,45 @@ pub(crate) async fn login_route(
 			user_id
 		},
 		| _ => {
-			debug!("/login json_body: {:?}", &body.json_body);
 			return Err!(Request(Unknown(
 				debug_warn!(?body.login_info, "Invalid or unsupported login type")
 			)));
 		},
 	};
 
-	// Generate new device id if the user didn't specify one
-	let device_id = body
-		.device_id
-		.clone()
-		.unwrap_or_else(|| utils::random_string(DEVICE_ID_LENGTH).into());
-
-	// Generate a new token for the device (ensuring no collisions)
-	let token = services.users.generate_unique_token().await;
+	// Generate a new token for the device
+	let token = DeviceToken::new_random();
 
 	// Determine if device_id was provided and exists in the db for this user
-	let device_exists = if body.device_id.is_some() {
+	let existing_device_id = if let Some(device_id) = &body.device_id {
 		services
 			.users
 			.all_device_ids(&user_id)
-			.ready_any(|v| v == device_id)
+			.ready_find(|v| v == device_id)
 			.await
 	} else {
-		false
+		None
 	};
 
-	if device_exists {
+	let device_id = if let Some(existing_device_id) = existing_device_id {
 		services
 			.users
-			.set_token(&user_id, &device_id, &token)
+			.set_token(&user_id, &existing_device_id, token.clone())
 			.await?;
+
+		existing_device_id
 	} else {
 		services
 			.users
 			.create_device(
 				&user_id,
-				&device_id,
-				&token,
+				body.device_id.clone(),
+				Some(token.clone()),
 				body.initial_device_display_name.clone(),
 				Some(client.to_string()),
 			)
-			.await?;
-	}
+			.await?
+	};
 
 	// send client well-known if specified so the client knows to reconfigure itself
 	let client_discovery_info: Option<DiscoveryInfo> = services
@@ -355,15 +234,12 @@ pub(crate) async fn login_route(
 	info!("{user_id} logged in");
 
 	#[allow(deprecated)]
-	Ok(login::v3::Response {
-		user_id,
-		access_token: token,
-		device_id,
+	Ok(assign!(login::v3::Response::new(user_id, token.into_token(), device_id), {
 		well_known: client_discovery_info,
 		expires_in: None,
 		home_server: Some(services.config.server_name.clone()),
 		refresh_token: None,
-	})
+	}))
 }
 
 /// # `POST /_matrix/client/v1/login/get_token`
@@ -372,31 +248,30 @@ pub(crate) async fn login_route(
 /// to log in with the m.login.token flow.
 ///
 /// <https://spec.matrix.org/v1.13/client-server-api/#post_matrixclientv1loginget_token>
-#[tracing::instrument(skip_all, fields(%client), name = "login_token", level = "info")]
+#[tracing::instrument(skip_all, name = "login_token", level = "info")]
 pub(crate) async fn login_token_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<get_login_token::v1::Request>,
 ) -> Result<get_login_token::v1::Response> {
-	if !services.server.config.login_via_existing_session {
+	if !services.config.login_via_existing_session {
 		return Err!(Request(Forbidden("Login via an existing session is not enabled")));
 	}
 
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 
 	// Prompt the user to confirm with their password using UIAA
 	let _ = services
 		.uiaa
-		.authenticate_password(&body.auth, Some(Identity::from_user_id(sender_user)))
+		.authenticate_password(&body.auth, sender_user, body.identity.sender_device(), None)
 		.await?;
 
-	let login_token = utils::random_string(TOKEN_LENGTH);
+	let login_token = DeviceToken::new_random().into_token();
 	let expires_in = services.users.create_login_token(sender_user, &login_token);
 
-	Ok(get_login_token::v1::Response {
-		expires_in: Duration::from_millis(expires_in),
+	Ok(get_login_token::v1::Response::new(
+		Duration::from_millis(expires_in),
 		login_token,
-	})
+	))
 }
 
 /// # `POST /_matrix/client/v3/logout`
@@ -408,13 +283,14 @@ pub(crate) async fn login_token_route(
 ///   last seen ts)
 /// - Forgets to-device events
 /// - Triggers device list updates
-#[tracing::instrument(skip_all, fields(%client), name = "logout", level = "info")]
+#[tracing::instrument(skip_all, name = "logout", level = "info")]
 pub(crate) async fn logout_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<logout::v3::Request>,
 ) -> Result<logout::v3::Response> {
-	let (sender_user, sender_device) = body.sender();
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.expect_sender_device()?;
+
 	services
 		.users
 		.remove_device(sender_user, sender_device)
@@ -454,17 +330,16 @@ pub(crate) async fn logout_route(
 /// Note: This is equivalent to calling [`GET
 /// /_matrix/client/r0/logout`](fn.logout_route.html) from each device of this
 /// user.
-#[tracing::instrument(skip_all, fields(%client), name = "logout", level = "info")]
+#[tracing::instrument(skip_all, name = "logout", level = "info")]
 pub(crate) async fn logout_all_route(
 	State(services): State<crate::State>,
-	ClientIp(client): ClientIp,
 	body: Ruma<logout_all::v3::Request>,
 ) -> Result<logout_all::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	services
 		.users
 		.all_device_ids(sender_user)
-		.for_each(|device_id| services.users.remove_device(sender_user, device_id))
+		.for_each(async |device_id| services.users.remove_device(sender_user, &device_id).await)
 		.await;
 	services
 		.pusher

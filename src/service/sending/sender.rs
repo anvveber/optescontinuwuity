@@ -9,11 +9,13 @@ use std::{
 };
 
 use base64::{Engine as _, engine::general_purpose::URL_SAFE_NO_PAD};
-use conduwuit::info;
+use conduwuit::{
+	debug_info, debug_warn, info, utils::time::exponential_backoff::min_exp_backoff_duration,
+};
 use conduwuit_core::{
 	Error, Event, Result, at, debug, err, error,
+	matrix::pdu::sticky,
 	result::LogErr,
-	trace,
 	utils::{
 		ReadyExt, calculate_hash, continue_exponential_backoff_secs,
 		future::TryExtExt,
@@ -29,7 +31,7 @@ use futures::{
 };
 use ruma::{
 	CanonicalJsonObject, MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedServerName, OwnedUserId,
-	RoomId, RoomVersionId, ServerName, UInt,
+	RoomId, ServerName, UInt,
 	api::{
 		appservice::event::push_events::v1::EphemeralData,
 		federation::transactions::{
@@ -80,9 +82,11 @@ impl Service {
 		let mut statuses: CurTransactionStatus = CurTransactionStatus::new();
 		let mut futures: SendingFutures<'_> = FuturesUnordered::new();
 
+		info!(shard = id, "Running startup netburst");
 		self.startup_netburst(id, &mut futures, &mut statuses)
 			.boxed()
 			.await;
+		info!(shard = id, "Finished startup netburst");
 
 		self.work_loop(id, &mut futures, &mut statuses).await;
 
@@ -127,6 +131,8 @@ impl Service {
 		}
 	}
 
+	/// Handles a response, calling the appropriate sub-handler depending on if
+	/// the request was successful or not.
 	#[tracing::instrument(name = "response", level = "debug", skip_all)]
 	async fn handle_response<'a>(
 		&'a self,
@@ -140,6 +146,7 @@ impl Service {
 		}
 	}
 
+	/// Handles a response error, incrementing the backoff factor.
 	fn handle_response_err(dest: Destination, statuses: &mut CurTransactionStatus, e: &Error) {
 		debug!(dest = ?dest, "{e:?}");
 		statuses.entry(dest).and_modify(|e| {
@@ -154,6 +161,7 @@ impl Service {
 		});
 	}
 
+	/// Handles a successful response, queueing up more sends if necessary.
 	#[allow(clippy::needless_pass_by_ref_mut)]
 	async fn handle_response_ok<'a>(
 		&'a self,
@@ -183,8 +191,11 @@ impl Service {
 		}
 	}
 
-	#[allow(clippy::needless_pass_by_ref_mut)]
+	/// Handles sending a new request by queuing up any new events. If there are
+	/// no new events to send the destination, it is removed from the status map
+	/// instead.
 	#[tracing::instrument(name = "request", level = "debug", skip_all)]
+	#[allow(clippy::needless_pass_by_ref_mut)]
 	async fn handle_request<'a>(
 		&'a self,
 		msg: Msg,
@@ -201,6 +212,8 @@ impl Service {
 		}
 	}
 
+	/// Cleans up dangling futures by waiting for them to complete, aborting
+	/// early if the shutdown timeout is reached.
 	#[tracing::instrument(
 		name = "finish",
 		level = "info",
@@ -218,7 +231,7 @@ impl Service {
 		let now = Instant::now();
 		let deadline = now.checked_add(timeout).unwrap_or(now);
 		loop {
-			trace!("Waiting for {} requests to complete...", futures.len());
+			info!("Waiting for {} requests to complete...", futures.len());
 			select! {
 				() = sleep_until(deadline) => return,
 				response = futures.next() => match response {
@@ -230,6 +243,8 @@ impl Service {
 		}
 	}
 
+	/// Performs startup netburst, which sends any previously queued up but not
+	/// yet sent requests immediately.
 	#[tracing::instrument(
 		name = "netburst",
 		level = "debug",
@@ -254,8 +269,16 @@ impl Service {
 			}
 
 			let entry = txns.entry(dest.clone()).or_default();
-			if self.server.config.startup_netburst_keep >= 0 && entry.len() >= keep {
-				warn!("Dropping unsent event {dest:?} {:?}", String::from_utf8_lossy(&key));
+			let over_budget =
+				self.server.config.startup_netburst_keep >= 0 && entry.len() >= keep;
+
+			if over_budget && !self.survives_netburst_trim(&event).await {
+				warn!(
+					startup_netburst_keep = self.server.config.startup_netburst_keep,
+					queue_size = entry.len(),
+					"Dropping unsent event to {dest:?}: {:?}",
+					String::from_utf8_lossy(&key)
+				);
 				self.db.delete_active_request(&key);
 			} else {
 				entry.push(event);
@@ -270,8 +293,32 @@ impl Service {
 		}
 	}
 
+	/// Whether this event skips the netburst budget, which MSC4354 asks of
+	/// still-sticky events. Only netburst delivers this queue, so with it
+	/// disabled there is nothing to keep the event for.
+	async fn survives_netburst_trim(&self, event: &SendingEvent) -> bool {
+		if !self.server.config.allow_sticky_events || !self.server.config.startup_netburst {
+			return false;
+		}
+
+		let SendingEvent::Pdu(pdu_id) = event else {
+			return false;
+		};
+
+		let Ok(pdu) = self.services.timeline.get_pdu_from_id(pdu_id).await else {
+			return false;
+		};
+
+		let now = MilliSecondsSinceUnixEpoch::now().get().into();
+
+		pdu.sticky
+			.as_deref()
+			.is_some_and(|sticky| sticky::is_sticky(pdu.origin_server_ts, sticky, now))
+	}
+
+	/// Selects any new events to send to the given destination.
 	#[tracing::instrument(
-		name = "select",,
+		name = "select",
 		level = "debug",
 		skip_all,
 		fields(
@@ -285,7 +332,7 @@ impl Service {
 		new_events: Vec<QueueItem>, // Events we want to send: event and full key
 		statuses: &mut CurTransactionStatus,
 	) -> Result<Option<Vec<SendingEvent>>> {
-		let (allow, retry) = self.select_events_current(dest, statuses)?;
+		let (allow, retry) = self.should_attempt_send(dest, statuses)?;
 
 		// Nothing can be done for this remote, bail out.
 		if !allow {
@@ -328,29 +375,34 @@ impl Service {
 		Ok(Some(events))
 	}
 
-	fn select_events_current(
+	/// Determines if the destination should be retried, honouring exponential
+	/// backoff.
+	fn should_attempt_send(
 		&self,
 		dest: &Destination,
 		statuses: &mut CurTransactionStatus,
 	) -> Result<(bool, bool)> {
 		let (mut allow, mut retry) = (true, false);
 		statuses
-			.entry(dest.clone()) // TODO: can we avoid cloning?
+			.entry(dest.clone())
 			.and_modify(|e| match e {
-				TransactionStatus::Failed(tries, time) => {
+				| TransactionStatus::Failed(tries, time) => {
 					// Fail if a request has failed recently (exponential backoff)
 					let min = self.server.config.sender_timeout;
 					let max = self.server.config.sender_retry_backoff_limit;
 					if continue_exponential_backoff_secs(min, max, time.elapsed(), *tries)
 						&& !matches!(dest, Destination::Appservice(_))
 					{
+						let retry_after = min_exp_backoff_duration(min, max, *tries);
+						debug_warn!("Not retrying destination for another {retry_after:?}");
 						allow = false;
 					} else {
 						retry = true;
+						debug_info!("Will retry destination ({} tries)", *tries);
 						*e = TransactionStatus::Retrying(*tries);
 					}
 				},
-				TransactionStatus::Running | TransactionStatus::Retrying(_) => {
+				| TransactionStatus::Running | TransactionStatus::Retrying(_) => {
 					allow = false; // already running
 				},
 			})
@@ -359,11 +411,8 @@ impl Service {
 		Ok((allow, retry))
 	}
 
-	#[tracing::instrument(
-		name = "edus",,
-		level = "debug",
-		skip_all,
-	)]
+	/// Selects a number of EDUs to send to the target.
+	#[tracing::instrument(name = "edus", level = "debug", skip_all)]
 	async fn select_edus(&self, server_name: &ServerName) -> Result<(EduVec, u64)> {
 		// selection window
 		let since = self.db.get_latest_educount(server_name).await;
@@ -422,7 +471,7 @@ impl Service {
 			let keys_changed = self
 				.services
 				.users
-				.room_keys_changed(room_id, Some(since.0), None)
+				.room_keys_changed(&room_id, Some(since.0), None)
 				.ready_filter(|(user_id, _)| self.services.globals.user_is_local(user_id));
 
 			pin_mut!(keys_changed);
@@ -432,21 +481,17 @@ impl Service {
 				}
 
 				max_edu_count.fetch_max(count, Ordering::Relaxed);
-				if !device_list_changes.insert(user_id.into()) {
+				if !device_list_changes.insert(user_id.clone()) {
 					continue;
 				}
 
 				// Empty prev id forces synapse to resync; because synapse resyncs,
 				// we can just insert placeholder data
-				let edu = Edu::DeviceListUpdate(DeviceListUpdateContent {
-					user_id: user_id.into(),
-					device_id: device_id!("placeholder").to_owned(),
-					device_display_name: Some("Placeholder".to_owned()),
-					stream_id: uint!(1),
-					prev_id: Vec::new(),
-					deleted: None,
-					keys: None,
-				});
+				let edu = Edu::DeviceListUpdate(DeviceListUpdateContent::new(
+					user_id,
+					device_id!("placeholder").to_owned(),
+					uint!(1),
+				));
 
 				let mut buf = EduBuf::new();
 				serde_json::to_writer(&mut buf, &edu)
@@ -479,7 +524,6 @@ impl Service {
 			.services
 			.state_cache
 			.server_rooms(server_name)
-			.map(ToOwned::to_owned)
 			.broad_filter_map(|room_id| async move {
 				let receipt_map = self
 					.select_edus_receipts_room(&room_id, since, max_edu_count, &mut num)
@@ -498,7 +542,7 @@ impl Service {
 			return None;
 		}
 
-		let receipt_content = Edu::Receipt(ReceiptContent { receipts });
+		let receipt_content = Edu::Receipt(ReceiptContent::new(receipts));
 
 		let mut buf = EduBuf::new();
 		serde_json::to_writer(&mut buf, &receipt_content)
@@ -556,10 +600,7 @@ impl Service {
 				.remove(&user_id)
 				.expect("our read receipts always have the user here");
 
-			let receipt_data = ReceiptData {
-				data: receipt,
-				event_ids: vec![event_id.clone()],
-			};
+			let receipt_data = ReceiptData::new(receipt, vec![event_id.clone()]);
 
 			if read.insert(user_id, receipt_data).is_none() {
 				*num = num.saturating_add(1);
@@ -569,7 +610,7 @@ impl Service {
 			}
 		}
 
-		ReceiptMap { read }
+		ReceiptMap::new(read)
 	}
 
 	/// Look for presence
@@ -617,16 +658,16 @@ impl Service {
 				continue;
 			};
 
-			let update = PresenceUpdate {
-				user_id: user_id.into(),
-				presence: presence_event.content.presence,
-				currently_active: presence_event.content.currently_active.unwrap_or(false),
-				status_msg: presence_event.content.status_msg,
-				last_active_ago: presence_event
+			let mut update = PresenceUpdate::new(
+				user_id.to_owned(),
+				presence_event.content.presence,
+				presence_event
 					.content
 					.last_active_ago
 					.unwrap_or_else(|| uint!(0)),
-			};
+			);
+			update.currently_active = presence_event.content.currently_active.unwrap_or_default();
+			update.status_msg = presence_event.content.status_msg;
 
 			presence_updates.insert(user_id.into(), update);
 			if presence_updates.len() >= SELECT_PRESENCE_LIMIT {
@@ -638,9 +679,8 @@ impl Service {
 			return None;
 		}
 
-		let presence_content = Edu::Presence(PresenceContent {
-			push: presence_updates.into_values().collect(),
-		});
+		let presence_content =
+			Edu::Presence(PresenceContent::new(presence_updates.into_values().collect()));
 
 		let mut buf = EduBuf::new();
 		serde_json::to_writer(&mut buf, &presence_content)
@@ -649,8 +689,14 @@ impl Service {
 		Some(buf)
 	}
 
+	/// Actually sends fetched events to the destination.
+	/// If the events vec is empty, a stub response is returned, and a debug
+	/// warning is logged.
 	fn send_events(&self, dest: Destination, events: Vec<SendingEvent>) -> SendingFuture<'_> {
-		debug_assert!(!events.is_empty(), "sending empty transaction");
+		if events.is_empty() {
+			debug_warn!(?dest, "Attempted to send empty transaction!");
+			return std::future::ready(Ok(dest)).boxed();
+		}
 		match dest {
 			| Destination::Federation(server) =>
 				self.send_events_dest_federation(server, events).boxed(),
@@ -686,7 +732,7 @@ impl Service {
 				.filter(|event| matches!(event, SendingEvent::Pdu(_)))
 				.count(),
 		);
-		let mut edu_jsons: Vec<EphemeralData> = Vec::with_capacity(
+		let mut edu_jsons: Vec<Raw<EphemeralData>> = Vec::with_capacity(
 			events
 				.iter()
 				.filter(|event| matches!(event, SendingEvent::Edu(_)))
@@ -702,7 +748,7 @@ impl Service {
 				| SendingEvent::Edu(edu) =>
 					if appservice.receive_ephemeral {
 						if let Ok(edu) = serde_json::from_slice(edu) {
-							edu_jsons.push(edu);
+							edu_jsons.push(Raw::from_json(edu));
 						}
 					},
 				| SendingEvent::Flush => {}, // flush only; no new content
@@ -717,21 +763,12 @@ impl Service {
 
 		let txn_id = &*URL_SAFE_NO_PAD.encode(txn_hash);
 
-		//debug_assert!(pdu_jsons.len() + edu_jsons.len() > 0, "sending empty
-		// transaction");
+		let mut request =
+			ruma::api::appservice::event::push_events::v1::Request::new(txn_id.into(), pdu_jsons);
+		request.ephemeral = edu_jsons;
+		request.to_device = Vec::new(); // TODO
 
-		match self
-			.send_appservice_request(
-				appservice,
-				ruma::api::appservice::event::push_events::v1::Request {
-					events: pdu_jsons,
-					txn_id: txn_id.into(),
-					ephemeral: edu_jsons,
-					to_device: Vec::new(), // TODO
-				},
-			)
-			.await
-		{
+		match self.send_appservice_request(appservice, request).await {
 			| Ok(_) => Ok(Destination::Appservice(id)),
 			| Err(e) => Err((Destination::Appservice(id), e)),
 		}
@@ -851,19 +888,35 @@ impl Service {
 
 		let txn_hash = calculate_hash(preimage);
 		let txn_id = &*URL_SAFE_NO_PAD.encode(txn_hash);
-		let request = send_transaction_message::v1::Request {
-			transaction_id: txn_id.into(),
-			origin: self.server.name.clone(),
-			origin_server_ts: MilliSecondsSinceUnixEpoch::now(),
-			pdus,
-			edus,
-		};
+		let mut request = send_transaction_message::v1::Request::new(
+			txn_id.into(),
+			self.server.name.clone(),
+			MilliSecondsSinceUnixEpoch::now(),
+		);
+		request.pdus = pdus;
+		request.edus = edus;
+		let pdu_count = request.pdus.len();
+		let edu_count = request.edus.len();
 
+		debug_info!(
+			%txn_id,
+			pdus=pdu_count,
+			edus=edu_count,
+			"Sending transaction to remote"
+		);
+		let start = Instant::now();
 		let result = self
 			.services
 			.federation
-			.execute_on(&self.services.client.sender, &server, request)
+			.execute_signed(&self.services.client.sender, &server, request)
 			.await;
+		debug_info!(
+			%txn_id,
+			pdus=pdu_count,
+			edus=edu_count,
+			elapsed=?start.elapsed(),
+			"Finished sending transaction"
+		);
 
 		for (event_id, result) in result.iter().flat_map(|resp| resp.pdus.iter()) {
 			if let Err(e) = result {
@@ -883,7 +936,8 @@ impl Service {
 		}
 	}
 
-	/// This does not return a full `Pdu` it is only to satisfy ruma's types.
+	/// Converts and sanitises an outgoing PDU object for federation
+	/// transmission.
 	pub async fn convert_to_outgoing_federation_event(
 		&self,
 		mut pdu_json: CanonicalJsonObject,
@@ -892,31 +946,12 @@ impl Service {
 			.get_mut("unsigned")
 			.and_then(|val| val.as_object_mut())
 		{
+			// TODO: remove all unsigned data over federation.
 			unsigned.remove("transaction_id");
 		}
-
-		// room v3 and above removed the "event_id" field from remote PDU format
-		if let Some(room_id) = pdu_json
-			.get("room_id")
-			.and_then(|val| RoomId::parse(val.as_str()?).ok())
-		{
-			match self.services.state.get_room_version(room_id).await {
-				| Ok(room_version_id) => match room_version_id {
-					| RoomVersionId::V1 | RoomVersionId::V2 => {},
-					| _ => _ = pdu_json.remove("event_id"),
-				},
-				| Err(_) => _ = pdu_json.remove("event_id"),
-			}
-		} else {
-			pdu_json.remove("event_id");
-		}
-
-		// TODO: another option would be to convert it to a canonical string to validate
-		// size and return a Result<Raw<...>>
-		// serde_json::from_str::<Raw<_>>(
-		//     ruma::serde::to_canonical_json_string(pdu_json).expect("CanonicalJson is
-		// valid serde_json::Value"), )
-		// .expect("Raw::from_value always works")
+		// We don't support any room versions that have the event_id in the PDU JSON,
+		// so we can safely remove it here.
+		pdu_json.remove("event_id");
 
 		to_raw_value(&pdu_json).expect("CanonicalJson is valid serde_json::Value")
 	}

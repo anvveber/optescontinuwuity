@@ -4,10 +4,13 @@ use conduwuit::{
 	trace,
 	utils::{self, IterStream, future::ReadyEqExt, stream::WidebandExt as _},
 };
-use futures::{StreamExt, future::join};
+use futures::StreamExt;
 use ruma::{
 	EventId, OwnedRoomId, RoomId,
-	api::client::sync::sync_events::v3::{LeftRoom, RoomAccountData, State, Timeline},
+	api::client::sync::sync_events::v3::{
+		LeftRoom, RoomAccountData, State, StateEvents, Timeline,
+	},
+	assign,
 	events::{StateEventType, TimelineEventType},
 	uint,
 };
@@ -178,17 +181,22 @@ pub(super) async fn load_left_room(
 		.collect::<Vec<_>>()
 		.await;
 
-	Ok(Some(LeftRoom {
-		account_data: RoomAccountData { events: Vec::new() },
-		timeline: Timeline {
+	let state_events =
+		StateEvents::with_events(state_events.into_iter().map(Event::into_format).collect());
+
+	Ok(Some(assign!(LeftRoom::new(), {
+		account_data: RoomAccountData::new(),
+		timeline: assign!(Timeline::new(), {
 			limited: timeline.limited,
 			prev_batch: Some(current_count.to_string()),
 			events: raw_timeline_pdus,
+		}),
+		state: if sync_context.use_state_after {
+			State::After(state_events)
+		} else {
+			State::Before(state_events)
 		},
-		state: State {
-			events: state_events.into_iter().map(Event::into_format).collect(),
-		},
-	}))
+	})))
 }
 
 async fn build_left_state_and_timeline(
@@ -222,7 +230,7 @@ async fn build_left_state_and_timeline(
 		.and_then(|limit| limit.try_into().ok())
 		.unwrap_or(DEFAULT_TIMELINE_LIMIT);
 
-	let timeline = load_timeline(
+	let mut timeline = load_timeline(
 		services,
 		syncing_user,
 		room_id,
@@ -232,29 +240,22 @@ async fn build_left_state_and_timeline(
 	)
 	.await?;
 
-	let timeline_start_shortstatehash = async {
-		if let Some((_, pdu)) = timeline.pdus.front() {
-			if let Ok(shortstatehash) = services
-				.rooms
-				.state_accessor
-				.pdu_shortstatehash(&pdu.event_id)
-				.await
-			{
-				return shortstatehash;
-			}
-		}
+	// the timeline index can lag behind the leave PDU, so `load_timeline` may omit
+	// it. we already hold the leave event, so ensure it's always synced to the
+	// client.
+	let leave_synced = timeline
+		.pdus
+		.iter()
+		.any(|(_, pdu)| pdu.event_id() == leave_membership_event.event_id());
 
-		// the timeline generally should not be empty (see the TODO further down),
-		// but in case it is we use `leave_shortstatehash` as the state to
-		// send
-		leave_shortstatehash
-	};
+	if !leave_synced {
+		timeline
+			.pdus
+			.push_back((timeline_end_count, leave_membership_event));
+	}
 
 	let lazily_loaded_members =
-		prepare_lazily_loaded_members(services, sync_context, room_id, timeline.senders());
-
-	let (timeline_start_shortstatehash, lazily_loaded_members) =
-		join(timeline_start_shortstatehash, lazily_loaded_members).await;
+		prepare_lazily_loaded_members(services, sync_context, room_id, timeline.senders()).await;
 
 	// TODO: calculate incremental state for incremental syncs.
 	// always calculating initial state _works_ but returns more data and does
@@ -262,7 +263,9 @@ async fn build_left_state_and_timeline(
 	let mut state = build_state_initial(
 		services,
 		syncing_user,
-		timeline_start_shortstatehash,
+		leave_shortstatehash,
+		&timeline,
+		sync_context.use_state_after,
 		lazily_loaded_members.as_ref(),
 	)
 	.await?;
@@ -317,7 +320,7 @@ fn create_dummy_leave_event(
 	// clients. perhaps a database table could be created to hold these dummy
 	// events, or they could be stored as outliers?
 	PduEvent {
-		event_id: EventId::new(services.globals.server_name()),
+		event_id: EventId::new_v1(services.globals.server_name()),
 		sender: syncing_user.to_owned(),
 		origin: None,
 		origin_server_ts: utils::millis_since_unix_epoch()
@@ -325,6 +328,7 @@ fn create_dummy_leave_event(
 			.expect("Timestamp is valid js_int value"),
 		kind: TimelineEventType::RoomMember,
 		content: RawValue::from_string(r#"{"membership": "leave"}"#.to_owned()).unwrap(),
+		sticky: None,
 		state_key: Some(syncing_user.as_str().into()),
 		unsigned: None,
 		// The following keys are dropped on conversion

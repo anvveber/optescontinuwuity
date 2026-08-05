@@ -17,10 +17,13 @@ use either::{
 use figment::providers::{Env, Format, Toml};
 pub use figment::{Figment, value::Value as FigmentValue};
 use lettre::message::Mailbox;
+use openidconnect::{ClientId, ClientSecret, Scope};
 use regex::RegexSet;
 use ruma::{
 	OwnedRoomId, OwnedRoomOrAliasId, OwnedServerName, OwnedUserId, RoomVersionId,
-	api::client::discovery::{discover_homeserver::RtcFocusInfo, discover_support::ContactRole},
+	api::client::{discovery::discover_support::ContactRole, rtc::RtcTransport},
+	profile::ProfileFieldName,
+	serde::Base64,
 };
 use serde::{Deserialize, Serialize, de::IgnoredAny};
 use url::Url;
@@ -480,7 +483,62 @@ pub struct Config {
 	#[serde(default = "default_ip_lookup_strategy")]
 	pub ip_lookup_strategy: u8,
 
+	/// The preferred source to use for getting the real client IP.
+	///
+	/// Takes any of the following options:
+	///
+	/// "cf_connecting_ip" - `Cf-Connecting-Ip` header
+	/// "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+	/// "fly_client_ip" - `Fly-Client-IP` header
+	/// "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+	/// "true_client_ip" - `True-Client-Ip` header
+	/// "x_envoy_external_address" - `X-Envoy-External-Address` header
+	/// "x_real_ip" - `X-Real-Ip` header
+	/// "direct" - the directly connected IP address (fallback for other
+	/// options)
+	///
+	/// Only set this if you are certain only your reverse proxy
+	/// will send the expected header. There is no "is the connecting IP allowed
+	/// to set this header" check; if the header selected is present, it is
+	/// used.
+	///
+	/// Ignored if `accepted_ip_sources` is set.
+	///
+	/// If not set set, `direct` is used. Additionally, `direct` is used
+	/// as a fallback if the chosen header is not found.
+	#[serde(default)]
+	pub request_ip_source: Option<String>,
+
+	/// The accepted source(s) for the real client IP.
+	///
+	/// Takes any combination of the following options:
+	///
+	/// "cf_connecting_ip" - `Cf-Connecting-Ip` header
+	/// "cloudfront_viewer_address" - `CloudFront-Viewer-Address` header
+	/// "fly_client_ip" - `Fly-Client-IP` header
+	/// "x_forwarded_for" - rightmost value of the `X-Forwarded-For` header
+	/// "true_client_ip" - `True-Client-Ip` header
+	/// "x_envoy_external_address" - `X-Envoy-External-Address` header
+	/// "x_real_ip" - `X-Real-Ip` header
+	/// "direct" - the directly connected IP address
+	///
+	/// Only set this if you are certain only your reverse proxy
+	/// will send the expected header. There is no "is the connecting IP allowed
+	/// to set this header" check; if the header selected is present, it is
+	/// used.
+	///
+	/// One of the configured sources must be available or the request is
+	/// rejected. If you want a fallback (including `direct`!), you have to
+	/// configure it. Priority is based on configuration order.
+	///
+	/// If not set, `request_ip_source` configuration is used.
+	///
+	/// default: []
+	#[serde(default)]
+	pub accepted_ip_sources: Vec<String>,
+
 	/// Max request size for file uploads in bytes. Defaults to 20MB.
+	/// Also limits incoming federated media.
 	///
 	/// default: 20971520
 	#[serde(default = "default_max_request_size")]
@@ -494,7 +552,7 @@ pub struct Config {
 	/// response. This can be used for things like backfilling room data and
 	/// getting missing events.
 	///
-	/// default: 192
+	/// default: 1024
 	#[serde(default = "default_max_fetch_prev_events")]
 	pub max_fetch_prev_events: u16,
 
@@ -595,20 +653,18 @@ pub struct Config {
 	#[serde(default = "default_federation_timeout")]
 	pub federation_timeout: u64,
 
-	/// MSC4284 Policy server request timeout (seconds). Generally policy
+	/// Policy server request timeout (seconds). Generally policy
 	/// servers should respond near instantly, however may slow down under
 	/// load. If a policy server doesn't respond in a short amount of time, the
 	/// room it is configured in may become unusable if this limit is set too
-	/// high. 10 seconds is a good default, however dropping this to 3-5 seconds
-	/// can be acceptable.
+	/// high. 30 seconds is a good default, however lower values may be
+	/// acceptable if temporary send failures are an okay trade-off.
 	///
-	/// Please be aware that policy requests are *NOT* currently re-tried, so if
-	/// a spam check request fails, the event will be assumed to be not spam,
-	/// which in some cases may result in spam being sent to or received from
-	/// the room that would typically be prevented.
 	///
 	/// About policy servers: https://matrix.org/blog/2025/04/introducing-policy-servers/
-	/// default: 10
+	/// (Stabilized in Matrix v1.18)
+	///
+	/// default: 30
 	#[serde(default = "default_policy_server_request_timeout")]
 	pub policy_server_request_timeout: u64,
 
@@ -776,19 +832,25 @@ pub struct Config {
 	/// even if `recaptcha_site_key` is set.
 	pub recaptcha_private_site_key: Option<String>,
 
-	/// Policy documents, such as terms and conditions or a privacy policy,
-	/// which users must agree to when registering an account.
-	///
-	/// Example:
-	/// ```ignore
-	/// [global.registration_terms.privacy_policy]
-	/// en = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
-	/// es = { name = "Política de Privacidad", url = "https://homeserver.example/es/privacy_policy.html" }
-	/// ```
-	///
-	/// default: {}
+	/// display: nested
 	#[serde(default)]
-	pub registration_terms: HashMap<String, HashMap<String, TermsDocument>>,
+	pub registration_terms: RegistrationTerms,
+
+	/// display: nested
+	#[serde(default)]
+	pub oauth: OauthConfig,
+
+	/// Controls whether users are allowed to deactivate their own accounts
+	/// through the account management panel or their Matrix clients. Server
+	/// admins can always deactivate users using the relevant admin commands.
+	///
+	/// Note that, in some jurisdictions, you may be legally required to honor
+	/// users who request to deactivate their accounts if you set this option
+	/// to `false`.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub allow_deactivation: bool,
 
 	/// Controls whether encrypted rooms and events are allowed.
 	#[serde(default = "true_fn")]
@@ -827,18 +889,6 @@ pub struct Config {
 	/// is inherently false.
 	#[serde(default)]
 	pub allow_public_room_directory_over_federation: bool,
-
-	/// Allow guests/unauthenticated users to access TURN credentials.
-	///
-	/// This is the equivalent of Synapse's `turn_allow_guests` config option.
-	/// This allows any unauthenticated user to call the endpoint
-	/// `/_matrix/client/v3/voip/turnServer`.
-	///
-	/// It is unlikely you need to enable this as all major clients support
-	/// authentication for this endpoint and prevents misuse of your TURN server
-	/// from potential bots.
-	#[serde(default)]
-	pub turn_allow_guests: bool,
 
 	/// Set this to true to lock down your server's public room directory and
 	/// only allow admins to publish rooms to the room directory. Unpublishing
@@ -891,6 +941,38 @@ pub struct Config {
 	/// default: "12"
 	#[serde(default = "default_default_room_version")]
 	pub default_room_version: RoomVersionId,
+
+	/// A default allow value for the Access Control List when creating a room.
+	///
+	/// If a list is provided, new rooms will be created with
+	/// a m.room.server_acl event. Only servers which match one of the patterns
+	/// in the list will be permitted to participate in the room.
+	///
+	/// ACLs in existing rooms will not be updated automatically. This is not
+	/// a substitute for moderation bots.
+	pub default_room_acl_allow: Option<Vec<String>>,
+
+	/// A default deny value for the Access Control List when creating a room.
+	///
+	/// If a list is provided, new rooms will be created with
+	/// a m.room.server_acl event. Servers which match one of the patterns
+	/// in the list will be NOT permitted to participate in the room.
+	///
+	/// This config cannot be used if the default_room_acl_allow config is used.
+	///
+	/// ACLs in existing rooms will not be updated automatically. This is not
+	/// a substitute for moderation bots.
+	pub default_room_acl_deny: Option<Vec<String>>,
+
+	/// The number of forward extremities to tolerate in a room before
+	/// attempting to manually squash them with a "dummy event". Setting this
+	/// above 20 will hinder its efficacy, and setting it below 5 will cause
+	/// more dummy events to be sent than necessary (which increases federation
+	/// traffic).
+	///
+	/// default: 10
+	#[serde(default = "default_extremity_threshold")]
+	pub dummy_event_threshold: u8,
 
 	/// display: nested
 	#[serde(default)]
@@ -1590,6 +1672,14 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub allow_incoming_typing: bool,
 
+	/// Allow the use of unstable persistent "sticky events" ([MSC4354])
+	///
+	/// MSC4354: https://c10y.cc/MSC4354
+	///
+	/// default: false
+	#[serde(default)]
+	pub allow_sticky_events: bool,
+
 	/// Maximum time federation user can indicate typing.
 	///
 	/// default: 30
@@ -1639,21 +1729,6 @@ pub struct Config {
 	/// before deciding to enable this.
 	#[serde(default)]
 	pub brotli_compression: bool,
-
-	/// Set to true to allow user type "guest" registrations. Some clients like
-	/// Element attempt to register guest users automatically.
-	#[serde(default)]
-	pub allow_guest_registration: bool,
-
-	/// Set to true to log guest registrations in the admin room. Note that
-	/// these may be noisy or unnecessary if you're a public homeserver.
-	#[serde(default)]
-	pub log_guest_registrations: bool,
-
-	/// Set to true to allow guest registrations/users to auto join any rooms
-	/// specified in `auto_join_rooms`.
-	#[serde(default)]
-	pub allow_guests_auto_join_rooms: bool,
 
 	/// Enable the legacy unauthenticated Matrix media repository endpoints.
 	/// These endpoints consist of:
@@ -1810,6 +1885,11 @@ pub struct Config {
 	#[serde(default)]
 	pub send_messages_from_ignored_users_to_client: bool,
 
+	/// Send "org.matrix.dummy_event" events to the client. This is a debugging
+	/// option.
+	#[serde(default)]
+	pub send_dummy_events_to_clients: bool,
+
 	/// Vector list of IPv4 and IPv6 CIDR ranges / subnets *in quotes* that you
 	/// do not want continuwuity to send outbound requests to. Defaults to
 	/// RFC1918, unroutable, loopback, multicast, and testnet addresses for
@@ -1928,7 +2008,7 @@ pub struct Config {
 
 	/// User agent that is used specifically when fetching url previews.
 	///
-	/// default: "continuwuity/<version> (bot; +https://continuwuity.org)"
+	/// default: "continuwuity/<version> (embedbot; facebookexternalhit/1.1; +https://continuwuity.org)"
 	pub url_preview_user_agent: Option<String>,
 
 	/// Determines whether audio and video files will be downloaded for URL
@@ -1993,19 +2073,6 @@ pub struct Config {
 	/// Admins are always allowed to send and receive all room invites.
 	#[serde(default)]
 	pub block_non_admin_invites: bool,
-
-	/// Enable or disable making requests to MSC4284 Policy Servers.
-	/// It is recommended you keep this enabled unless you experience frequent
-	/// connectivity issues, such as in a restricted networking environment.
-	#[serde(default = "true_fn")]
-	pub enable_msc4284_policy_servers: bool,
-
-	/// Enable running locally generated events through configured MSC4284
-	/// policy servers. You may wish to disable this if your server is
-	/// single-user for a slight speed benefit in some rooms, but otherwise
-	/// should leave it enabled.
-	#[serde(default = "true_fn")]
-	pub policy_server_check_own_events: bool,
 
 	/// Allow admins to enter commands in rooms other than "#admins" (admin
 	/// room) by prefixing your message with "\!admin" or "\\!admin" followed up
@@ -2306,18 +2373,10 @@ pub struct Config {
 	#[serde(default)]
 	pub allow_web_indexing: bool,
 
-	/// display: nested
-	#[serde(default)]
-	pub ldap: LdapConfig,
-
 	/// Configuration for antispam support
 	/// display: nested
 	#[serde(default)]
 	pub antispam: Option<Antispam>,
-
-	/// display: nested
-	#[serde(default)]
-	pub blurhashing: BlurhashConfig,
 
 	/// Configuration for MatrixRTC (MSC4143) transport discovery.
 	/// display: nested
@@ -2370,6 +2429,10 @@ pub struct WellKnownConfig {
 	/// Will be included alongside any contact information
 	pub support_page: Option<Url>,
 
+	/// The ed25519 public key for the policy server available at this server's
+	/// name. Must be unpadded base64.
+	pub policy_server_public_key: Option<Base64<ruma::serde::base64::Standard>>,
+
 	/// Role string for server support contacts, to be served as part of the
 	/// MSC1929 server support endpoint at /.well-known/matrix/support.
 	///
@@ -2392,43 +2455,6 @@ pub struct WellKnownConfig {
 	/// PGP key URI for server support contacts, to be served as part of the
 	/// MSC1929 server support endpoint.
 	pub support_pgp_key: Option<String>,
-
-	/// **DEPRECATED**: Use `[global.matrix_rtc].foci` instead.
-	///
-	/// A list of MatrixRTC foci URLs which will be served as part of the
-	/// MSC4143 client endpoint at /.well-known/matrix/client.
-	///
-	/// This option is deprecated and will be removed in a future release.
-	/// Please migrate to the new `[global.matrix_rtc]` config section.
-	///
-	/// default: []
-	#[serde(default)]
-	pub rtc_focus_server_urls: Vec<RtcFocusInfo>,
-}
-
-#[derive(Clone, Copy, Debug, Deserialize, Default)]
-#[allow(rustdoc::broken_intra_doc_links, rustdoc::bare_urls)]
-#[config_example_generator(filename = "conduwuit-example.toml", section = "global.blurhashing")]
-pub struct BlurhashConfig {
-	/// blurhashing x component, 4 is recommended by https://blurha.sh/
-	///
-	/// default: 4
-	#[serde(default = "default_blurhash_x_component")]
-	pub components_x: u32,
-	/// blurhashing y component, 3 is recommended by https://blurha.sh/
-	///
-	/// default: 3
-	#[serde(default = "default_blurhash_y_component")]
-	pub components_y: u32,
-	/// Max raw size that the server will blurhash, this is the size of the
-	/// image after converting it to raw data, it should be higher than the
-	/// upload limit but not too high. The higher it is the higher the
-	/// potential load will be for clients requesting blurhashes. The default
-	/// is 33.55MB. Setting it to 0 disables blurhashing.
-	///
-	/// default: 33554432
-	#[serde(default = "default_blurhash_max_raw_size")]
-	pub blurhash_max_raw_size: u64,
 }
 
 #[derive(Clone, Debug, Deserialize, Default)]
@@ -2449,143 +2475,7 @@ pub struct MatrixRtcConfig {
 	///
 	/// default: []
 	#[serde(default)]
-	pub foci: Vec<RtcFocusInfo>,
-}
-
-impl MatrixRtcConfig {
-	/// Returns the effective foci, falling back to the deprecated
-	/// `rtc_focus_server_urls` if the new config is empty.
-	#[must_use]
-	pub fn effective_foci<'a>(
-		&'a self,
-		deprecated_foci: &'a [RtcFocusInfo],
-	) -> &'a [RtcFocusInfo] {
-		if !self.foci.is_empty() {
-			&self.foci
-		} else {
-			deprecated_foci
-		}
-	}
-}
-
-#[derive(Clone, Debug, Default, Deserialize)]
-#[config_example_generator(filename = "conduwuit-example.toml", section = "global.ldap")]
-pub struct LdapConfig {
-	/// Whether to enable LDAP login.
-	///
-	/// example: "true"
-	#[serde(default)]
-	pub enable: bool,
-
-	/// Whether to force LDAP authentication or authorize classical password
-	/// login.
-	///
-	/// example: "true"
-	#[serde(default)]
-	pub ldap_only: bool,
-
-	/// URI of the LDAP server.
-	///
-	/// example: "ldap://ldap.example.com:389"
-	///
-	/// default: ""
-	#[serde(default)]
-	pub uri: Option<Url>,
-
-	/// StartTLS for LDAP connections.
-	///
-	/// default: false
-	#[serde(default)]
-	pub use_starttls: bool,
-
-	/// Skip TLS certificate verification, possibly dangerous.
-	///
-	/// default: false
-	#[serde(default)]
-	pub disable_tls_verification: bool,
-
-	/// Root of the searches.
-	///
-	/// example: "ou=users,dc=example,dc=org"
-	///
-	/// default: ""
-	#[serde(default)]
-	pub base_dn: String,
-
-	/// Bind DN if anonymous search is not enabled.
-	///
-	/// You can use the variable `{username}` that will be replaced by the
-	/// entered username. In such case, the password used to bind will be the
-	/// one provided for the login and not the one given by
-	/// `bind_password_file`. Beware: automatically granting admin rights will
-	/// not work if you use this direct bind instead of a LDAP search.
-	///
-	/// example: "cn=ldap-reader,dc=example,dc=org" or
-	/// "cn={username},ou=users,dc=example,dc=org"
-	///
-	/// default: ""
-	#[serde(default)]
-	pub bind_dn: Option<String>,
-
-	/// Path to a file on the system that contains the password for the
-	/// `bind_dn`.
-	///
-	/// The server must be able to access the file, and it must not be empty.
-	///
-	/// default: ""
-	#[serde(default)]
-	pub bind_password_file: Option<PathBuf>,
-
-	/// Search filter to limit user searches.
-	///
-	/// You can use the variable `{username}` that will be replaced by the
-	/// entered username for more complex filters.
-	///
-	/// example: "(&(objectClass=person)(memberOf=matrix))"
-	///
-	/// default: "(objectClass=*)"
-	#[serde(default = "default_ldap_search_filter")]
-	pub filter: String,
-
-	/// Attribute to use to uniquely identify the user.
-	///
-	/// example: "uid" or "cn"
-	///
-	/// default: "uid"
-	#[serde(default = "default_ldap_uid_attribute")]
-	pub uid_attribute: String,
-
-	/// Attribute containing the display name of the user.
-	///
-	/// example: "givenName" or "sn"
-	///
-	/// default: "givenName"
-	#[serde(default = "default_ldap_name_attribute")]
-	pub name_attribute: String,
-
-	/// Root of the searches for admin users.
-	///
-	/// Defaults to `base_dn` if empty.
-	///
-	/// example: "ou=admins,dc=example,dc=org"
-	///
-	/// default: ""
-	#[serde(default)]
-	pub admin_base_dn: String,
-
-	/// The LDAP search filter to find administrative users for continuwuity.
-	///
-	/// If left blank, administrative state must be configured manually for each
-	/// user.
-	///
-	/// You can use the variable `{username}` that will be replaced by the
-	/// entered username for more complex filters.
-	///
-	/// example: "(objectClass=conduwuitAdmin)" or "(uid={username})"
-	///
-	/// default: ""
-	#[serde(default)]
-	pub admin_filter: String,
+	pub foci: Vec<RtcTransport>,
 }
 
 #[derive(Deserialize, Clone, Debug)]
@@ -2693,8 +2583,10 @@ pub struct SmtpConfig {
 	/// - `address@domain.org` to not use a name
 	pub sender: Mailbox,
 
-	/// Whether to require that users provide an email address when they
-	/// register.
+	/// Whether to allow public registration with an email address.
+	///
+	/// Note that, if this option is enabled, anyone will be able to register an
+	/// account with just an email address.
 	///
 	/// If either this option or `require_email_for_token_registration` are set,
 	/// users will not be allowed to remove their email address.
@@ -2704,11 +2596,35 @@ pub struct SmtpConfig {
 	pub require_email_for_registration: bool,
 
 	/// Whether to require that users who register with a registration token
-	/// provide an email address.
+	/// provide an email address. This option is independent of
+	/// `require_email_for_registration`.
 	///
 	/// default: false
 	#[serde(default)]
 	pub require_email_for_token_registration: bool,
+}
+
+#[derive(Clone, Debug, Default, Deserialize, Serialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.registration_terms",
+	optional = "true"
+)]
+pub struct RegistrationTerms {
+	/// The language code to provide to clients along with the policy documents.
+	///
+	/// default: "en"
+	#[serde(default = "default_terms_language")]
+	pub language: String,
+	/// Policy documents, such as terms and conditions or a privacy policy,
+	/// which users must agree to when registering an account.
+	///
+	/// Example:
+	/// ```ignore
+	/// [global.registration_terms.documents]
+	/// privacy_policy = { name = "Privacy Policy", url = "https://homeserver.example/en/privacy_policy.html" }
+	/// ```
+	pub documents: BTreeMap<String, TermsDocument>,
 }
 
 /// A policy document for use with a m.login.terms stage.
@@ -2716,6 +2632,173 @@ pub struct SmtpConfig {
 pub struct TermsDocument {
 	pub name: String,
 	pub url: String,
+}
+
+#[derive(Clone, Debug, Default, Deserialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.oauth",
+	optional = "true"
+)]
+pub struct OauthConfig {
+	/// The compatibility mode to use for OAuth.
+	///
+	/// - "disabled": OAuth will be unavailable. Users will only be able to log
+	///   in using legacy authentication.
+	/// - "hybrid": OAuth and legacy authentication will both be available. Some
+	///   clients may only use one or the other.
+	/// - "exclusive": Only OAuth will be available. Clients which require
+	///   legacy authentication will be unable to log in.
+	///
+	/// default: "hybrid"
+	#[serde(default)]
+	compatibility_mode: OAuthMode,
+
+	/// display: hidden
+	pub oidc: Option<OidcConfig>,
+}
+
+impl OauthConfig {
+	#[must_use]
+	pub fn compatibility_mode(&self) -> OAuthMode {
+		if self.oidc.is_some() {
+			OAuthMode::Exclusive
+		} else {
+			self.compatibility_mode
+		}
+	}
+}
+
+#[derive(Clone, Copy, Debug, Default, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum OAuthMode {
+	Disabled,
+	#[default]
+	Hybrid,
+	Exclusive,
+}
+
+impl OAuthMode {
+	#[must_use]
+	pub fn uiaa_available(&self) -> bool { matches!(self, Self::Disabled | Self::Hybrid) }
+
+	#[must_use]
+	pub fn oauth_available(&self) -> bool { matches!(self, Self::Hybrid | Self::Exclusive) }
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[config_example_generator(
+	filename = "conduwuit-example.toml",
+	section = "global.oauth.oidc",
+	optional = "true",
+	subheader = "\
+# Uncommenting this section will enable Continuwuity's support for
+# authenticating users using an OpenID Connect-compatible identity provider.
+# This is referred to as \"delegated authentication\".
+#
+# IMPORTANT NOTE: When delegated authentication is active, Continuwuity will behave as if
+# the `global.oauth.compatibility_mode` setting is set to `exclusive`.
+# Matrix clients which do not support OAuth login (also referred to as \"next-gen auth\") will \
+	             NOT be able
+# to log in while delegated authentication is active."
+)]
+pub struct OidcConfig {
+	/// The OIDC issuer URL. Continuwuity will use OpenID Connect Discovery to
+	/// automatically fetch the identity provider's metadata from this URL.
+	/// Generally you should set this to the base domain your identity provider
+	/// runs on.
+	pub discovery_url: String,
+
+	/// The OAuth client ID for Continuwuity to use when communicating with the
+	/// identity provider.
+	pub client_id: ClientId,
+
+	/// The OAuth client secret for Continuwuity to use when communicating with
+	/// the identity provider.
+	pub client_secret: Option<ClientSecret>,
+
+	/// A path to a file which Continuwuity will read the client secret from.
+	/// If this option is set, it will override `client_secret`.
+	///
+	/// The server will fail to start if the file cannot be read.
+	pub client_secret_file: Option<PathBuf>,
+
+	/// Additional scopes Continuwuity should request from the IDP. This may be
+	/// necessary to access certain claims. Continuwuity always requests the
+	/// `openid` scope.
+	///
+	/// default: []
+	#[serde(default)]
+	pub additional_scopes: Vec<Scope>,
+
+	/// Whether the user should be prompted to choose a localpart
+	/// when signing in for the first time. If this is `false`, Continuwuity
+	/// will attempt to use the value of the `preferred_username_claim`
+	/// (see below) as the user's localpart. Authentication will
+	/// fail if this claim is missing or is not a valid localpart.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub prompt_for_localpart: bool,
+
+	/// The claim to use for the user's localpart, if `prompt_for_localpart` is
+	/// false.
+	///
+	/// default: "preferred_username"
+	#[serde(default = "default_preferred_username_claim")]
+	pub preferred_username_claim: String,
+
+	/// The claim which will be used to set the user's email address,
+	/// either on initial registration or on every login depending on
+	/// the value of `profile_key_import_mode`. Continuwuity assumes that
+	/// the IDP has taken care of verifying that the user controls the email
+	/// address it provides.
+	///
+	/// This option does nothing if SMTP is not configured.
+	///
+	/// If this option is set, and `profile_key_import_mode` is `on_login`,
+	/// users will not be able to change their email addresses themselves.
+	///
+	/// default: "email"
+	pub email_claim: Option<String>,
+
+	/// Defines how claims returned from the IDP should be mapped to a user's
+	/// profile data. The profile field named in each key will be set from the
+	/// claim named in the corresponding value when the user first registers,
+	/// and possibly on subsequent logins as well, depending on the value of
+	/// `profile_key_import_mode` (see below).
+	///
+	/// Per-room overrides to the user's display name or avatar will be
+	/// preserved by the import process.
+	///
+	/// SECURITY NOTE: If the `avatar_url` field is set, Continuwuity will
+	/// perform a HTTP GET to the URL in the mapped claim and use the returned
+	/// file as the user's profile picture. Make sure your users are not able
+	/// to set the value of the mapped claim to an arbitrary URL.
+	///
+	/// default: { displayname = "name" }
+	#[serde(default = "default_profile_key_map")]
+	pub profile_key_map: HashMap<String, String>,
+
+	/// When profile keys should be imported from the IDP's claims.
+	///
+	/// - "on_registration": Listed keys will be imported once, when the user
+	///   logs in for the first time and their shadow account is created.
+	/// - "on_login": Listed keys will be imported every time the user logs in.
+	///   Additionally, users will not be able to manually edit any listed keys
+	///   through their Matrix client.
+	///
+	/// default: "on_registration"
+	#[serde(default)]
+	pub profile_key_import_mode: OidcProfileKeyImportMode,
+}
+
+#[derive(Clone, Debug, Deserialize, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum OidcProfileKeyImportMode {
+	#[default]
+	OnRegistration,
+	OnLogin,
 }
 
 const DEPRECATED_KEYS: &[&str] = &[
@@ -2887,7 +2970,7 @@ fn default_federation_conn_timeout() -> u64 { 10 }
 
 fn default_federation_timeout() -> u64 { 60 }
 
-fn default_policy_server_request_timeout() -> u64 { 10 }
+fn default_policy_server_request_timeout() -> u64 { 30 }
 
 fn default_federation_idle_timeout() -> u64 { 25 }
 
@@ -2909,7 +2992,7 @@ fn default_pusher_timeout() -> u64 { 60 }
 
 fn default_pusher_idle_timeout() -> u64 { 15 }
 
-fn default_max_fetch_prev_events() -> u16 { 192_u16 }
+fn default_max_fetch_prev_events() -> u16 { 1024 }
 
 fn default_max_concurrent_inbound_transactions() -> usize { 150 }
 
@@ -3012,6 +3095,8 @@ fn default_rocksdb_stats_level() -> u8 { 1 }
 #[inline]
 pub fn default_default_room_version() -> RoomVersionId { RoomVersionId::V12 }
 
+fn default_extremity_threshold() -> u8 { 10 }
+
 fn default_ip_range_denylist() -> Vec<String> {
 	vec![
 		"127.0.0.0/8".to_owned(),
@@ -3099,18 +3184,10 @@ fn default_client_shutdown_timeout() -> u64 { 15 }
 
 fn default_sender_shutdown_timeout() -> u64 { 5 }
 
-// blurhashing defaults recommended by https://blurha.sh/
-// 2^25
-pub(super) fn default_blurhash_max_raw_size() -> u64 { 33_554_432 }
+fn default_terms_language() -> String { "en".to_owned() }
 
-pub(super) fn default_blurhash_x_component() -> u32 { 4 }
+fn default_preferred_username_claim() -> String { "preferred_username".to_owned() }
 
-pub(super) fn default_blurhash_y_component() -> u32 { 3 }
-
-// end recommended & blurhashing defaults
-
-fn default_ldap_search_filter() -> String { "(objectClass=*)".to_owned() }
-
-fn default_ldap_uid_attribute() -> String { String::from("uid") }
-
-fn default_ldap_name_attribute() -> String { String::from("givenName") }
+fn default_profile_key_map() -> HashMap<String, String> {
+	HashMap::from_iter([(ProfileFieldName::DisplayName.to_string(), "name".to_owned())])
+}

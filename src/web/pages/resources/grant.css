@@ -1,0 +1,36 @@
+.avatars {
+    justify-content: center;
+    display: flex;
+    flex-direction: row;
+
+    .separator {
+        align-self: center;
+        margin-inline: 1em;
+        color: var(--secondary);
+	    font-size: x-large;
+        font-weight: bold;
+        user-select: none;
+    }
+}
+
+.identity {
+    margin-block: 1em;
+    color: var(--secondary);
+    font-size: small;
+    font-style: italic;
+    text-align: center;
+}
+
+.user-code {
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+
+    input {
+        text-align: center;
+        font-weight: bold;
+        font-size: 200%;
+        padding: 0.2em;
+        width: 6em !important;
+    }
+}

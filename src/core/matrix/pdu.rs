@@ -1,8 +1,9 @@
-mod builder;
 mod count;
 mod id;
+mod partial;
 mod raw_id;
 mod redact;
+pub mod sticky;
 #[cfg(test)]
 mod tests;
 mod unsigned;
@@ -18,9 +19,9 @@ use serde_json::value::RawValue as RawJsonValue;
 
 pub use self::{
 	Count as PduCount, Id as PduId, Pdu as PduEvent, RawId as RawPduId,
-	builder::{Builder, Builder as PduBuilder},
 	count::Count,
 	id::{ShortId, *},
+	partial::PartialPdu,
 	raw_id::*,
 };
 use super::{Event, StateKey};
@@ -45,6 +46,11 @@ pub struct Pdu {
 	pub kind: TimelineEventType,
 
 	pub content: Box<RawJsonValue>,
+
+	/// MSC4354 sticky object, kept verbatim because it is signed. Interpret it
+	/// with [`sticky`], never by rewriting it.
+	#[serde(rename = "msc4354_sticky", default, skip_serializing_if = "Option::is_none")]
+	pub sticky: Option<Box<RawJsonValue>>,
 
 	#[serde(skip_serializing_if = "Option::is_none")]
 	pub state_key: Option<StateKey>,
@@ -127,9 +133,7 @@ impl Event for Pdu {
 		} else {
 			// v12+
 			let constructed_hash = self.event_id.as_str().replace('$', "!");
-			RoomId::parse(&constructed_hash)
-				.expect("event ID can be parsed")
-				.to_owned()
+			RoomId::parse(&constructed_hash).expect("event ID can be parsed")
 		}
 	}
 
@@ -138,6 +142,9 @@ impl Event for Pdu {
 
 	#[inline]
 	fn state_key(&self) -> Option<&str> { self.state_key.as_deref() }
+
+	#[inline]
+	fn sticky(&self) -> Option<&RawJsonValue> { self.sticky.as_deref() }
 
 	#[inline]
 	fn kind(&self) -> &TimelineEventType { &self.kind }
@@ -200,9 +207,7 @@ impl Event for &Pdu {
 		} else {
 			// v12+
 			let constructed_hash = self.event_id.as_str().replace('$', "!");
-			RoomId::parse(&constructed_hash)
-				.expect("event ID can be parsed")
-				.to_owned()
+			RoomId::parse(&constructed_hash).expect("event ID can be parsed")
 		}
 	}
 
@@ -211,6 +216,9 @@ impl Event for &Pdu {
 
 	#[inline]
 	fn state_key(&self) -> Option<&str> { self.state_key.as_deref() }
+
+	#[inline]
+	fn sticky(&self) -> Option<&RawJsonValue> { self.sticky.as_deref() }
 
 	#[inline]
 	fn kind(&self) -> &TimelineEventType { &self.kind }

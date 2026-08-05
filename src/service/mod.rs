@@ -27,11 +27,11 @@ pub mod key_backups;
 pub mod mailer;
 pub mod media;
 pub mod moderation;
-pub mod password_reset;
+pub mod oauth;
+pub mod oidc;
 pub mod presence;
 pub mod pusher;
 pub mod registration_tokens;
-pub mod resolver;
 pub mod rooms;
 pub mod sending;
 pub mod server_keys;
@@ -47,3 +47,11 @@ pub use crate::services::Services;
 
 conduwuit::mod_ctor! {}
 conduwuit::mod_dtor! {}
+
+use std::sync::LazyLock;
+
+use conduwuit::matrix::versions::{unstable_features, versions};
+use ruma::api::SupportedVersions;
+
+pub static SUPPORTED_VERSIONS: LazyLock<SupportedVersions> =
+	LazyLock::new(|| SupportedVersions::from_parts(&versions(), &unstable_features()));

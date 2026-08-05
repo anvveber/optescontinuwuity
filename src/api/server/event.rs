@@ -22,6 +22,15 @@ pub(crate) async fn get_event_route(
 		.await
 		.map_err(|_| err!(Request(NotFound("Event not found."))))?;
 
+	if services
+		.rooms
+		.pdu_metadata
+		.is_event_rejected(&body.event_id)
+		.await
+	{
+		return Err!(Request(NotFound("Event not found.")));
+	}
+
 	let room_id: &RoomId = event
 		.get("room_id")
 		.and_then(|val| val.as_str())
@@ -31,11 +40,11 @@ pub(crate) async fn get_event_route(
 
 	AccessCheck {
 		services: &services,
-		origin: body.origin(),
+		origin: &body.identity,
 		room_id,
 		event_id: Some(&body.event_id),
 	}
-	.check()
+	.assert()
 	.await?;
 
 	if !services
@@ -45,18 +54,18 @@ pub(crate) async fn get_event_route(
 		.await
 	{
 		info!(
-			origin = body.origin().as_str(),
+			origin = body.identity.as_str(),
 			"Refusing to serve state for room we aren't participating in"
 		);
 		return Err!(Request(NotFound("This server is not participating in that room.")));
 	}
 
-	Ok(get_event::v1::Response {
-		origin: services.globals.server_name().to_owned(),
-		origin_server_ts: MilliSecondsSinceUnixEpoch::now(),
-		pdu: services
+	Ok(get_event::v1::Response::new(
+		services.globals.server_name().to_owned(),
+		MilliSecondsSinceUnixEpoch::now(),
+		services
 			.sending
 			.convert_to_outgoing_federation_event(event)
 			.await,
-	})
+	))
 }

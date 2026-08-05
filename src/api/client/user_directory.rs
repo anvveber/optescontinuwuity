@@ -6,6 +6,7 @@ use conduwuit::{
 use futures::{FutureExt, StreamExt, pin_mut};
 use ruma::{
 	api::client::user_directory::search_users::{self},
+	assign,
 	events::room::join_rules::JoinRule,
 };
 
@@ -25,16 +26,17 @@ pub(crate) async fn search_users_route(
 	State(services): State<crate::State>,
 	body: Ruma<search_users::v3::Request>,
 ) -> Result<search_users::v3::Response> {
-	let sender_user = body.sender_user();
+	let sender_user = body.identity.expect_sender_user()?;
 	let limit = usize::try_from(body.limit)
 		.map_or(LIMIT_DEFAULT, usize::from)
 		.min(LIMIT_MAX);
 
 	let search_term = body.search_term.to_lowercase();
+
 	let mut users = services
 		.users
-		.stream()
-		.map(ToOwned::to_owned)
+		.stream_local_users()
+		.chain(services.users.stream_remote_users())
 		.broad_filter_map(async |user_id| {
 			let display_name = services.users.displayname(&user_id).await.ok();
 
@@ -53,7 +55,6 @@ pub(crate) async fn search_users_route(
 				.rooms
 				.state_cache
 				.rooms_joined(&user_id)
-				.map(ToOwned::to_owned)
 				.broad_any(async |room_id| {
 					services
 						.rooms
@@ -69,18 +70,19 @@ pub(crate) async fn search_users_route(
 				.user_sees_user(sender_user, &user_id);
 
 			pin_mut!(user_in_public_room, user_sees_user);
-			user_in_public_room
-				.or(user_sees_user)
-				.await
-				.then_some(search_users::v3::User {
-					user_id: user_id.clone(),
+
+			if user_in_public_room.or(user_sees_user).await {
+				Some(assign!(search_users::v3::User::new(user_id.clone()), {
 					display_name,
 					avatar_url: services.users.avatar_url(&user_id).await.ok(),
-				})
+				}))
+			} else {
+				None
+			}
 		});
 
 	let results = users.by_ref().take(limit).collect().await;
 	let limited = users.next().await.is_some();
 
-	Ok(search_users::v3::Response { results, limited })
+	Ok(search_users::v3::Response::new(results, limited))
 }

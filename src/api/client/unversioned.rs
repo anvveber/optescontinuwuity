@@ -1,9 +1,10 @@
-use std::collections::BTreeMap;
-
 use axum::{Json, extract::State, response::IntoResponse};
-use conduwuit::Result;
+use conduwuit::{
+	Result,
+	matrix::versions::{unstable_features, versions},
+};
 use futures::StreamExt;
-use ruma::api::client::discovery::get_supported_versions;
+use ruma::{api::client::discovery::get_supported_versions, assign};
 
 use crate::Ruma;
 
@@ -20,72 +21,55 @@ use crate::Ruma;
 /// Note: Unstable features are used while developing new features. Clients
 /// should avoid using unstable features in their stable releases
 pub(crate) async fn get_supported_versions_route(
+	State(services): State<crate::State>,
 	_body: Ruma<get_supported_versions::Request>,
 ) -> Result<get_supported_versions::Response> {
-	let resp = get_supported_versions::Response {
-		versions: vec![
-			"r0.0.1".to_owned(),
-			"r0.1.0".to_owned(),
-			"r0.2.0".to_owned(),
-			"r0.3.0".to_owned(),
-			"r0.4.0".to_owned(),
-			"r0.5.0".to_owned(),
-			"r0.6.0".to_owned(),
-			"r0.6.1".to_owned(),
-			"v1.1".to_owned(),
-			"v1.2".to_owned(),
-			"v1.3".to_owned(),
-			"v1.4".to_owned(),
-			"v1.5".to_owned(),
-			"v1.8".to_owned(),
-			"v1.11".to_owned(),
-			"v1.12".to_owned(),
-			"v1.13".to_owned(),
-			"v1.14".to_owned(),
-		],
-		unstable_features: BTreeMap::from_iter([
-			("org.matrix.e2e_cross_signing".to_owned(), true),
-			("org.matrix.msc2285.stable".to_owned(), true), /* private read receipts (https://github.com/matrix-org/matrix-spec-proposals/pull/2285) */
-			("uk.half-shot.msc2666.query_mutual_rooms".to_owned(), true), /* query mutual rooms (https://github.com/matrix-org/matrix-spec-proposals/pull/2666) */
-			("org.matrix.msc2836".to_owned(), true), /* threading/threads (https://github.com/matrix-org/matrix-spec-proposals/pull/2836) */
-			("org.matrix.msc2946".to_owned(), true), /* spaces/hierarchy summaries (https://github.com/matrix-org/matrix-spec-proposals/pull/2946) */
-			("org.matrix.msc3026.busy_presence".to_owned(), true), /* busy presence status (https://github.com/matrix-org/matrix-spec-proposals/pull/3026) */
-			("org.matrix.msc3814".to_owned(), true),               /* dehydrated devices */
-			("org.matrix.msc3827".to_owned(), true), /* filtering of /publicRooms by room type (https://github.com/matrix-org/matrix-spec-proposals/pull/3827) */
-			("org.matrix.msc3952_intentional_mentions".to_owned(), true), /* intentional mentions (https://github.com/matrix-org/matrix-spec-proposals/pull/3952) */
-			("org.matrix.msc3916.stable".to_owned(), true), /* authenticated media (https://github.com/matrix-org/matrix-spec-proposals/pull/3916) */
-			("org.matrix.msc4180".to_owned(), true), /* stable flag for 3916 (https://github.com/matrix-org/matrix-spec-proposals/pull/4180) */
-			("uk.tcpip.msc4133".to_owned(), true), /* Extending User Profile API with Key:Value Pairs (https://github.com/matrix-org/matrix-spec-proposals/pull/4133) */
-			("us.cloke.msc4175".to_owned(), true), /* Profile field for user time zone (https://github.com/matrix-org/matrix-spec-proposals/pull/4175) */
-			("org.matrix.simplified_msc3575".to_owned(), true), /* Simplified Sliding sync (https://github.com/matrix-org/matrix-spec-proposals/pull/4186) */
-			("uk.timedout.msc4323".to_owned(), true), /* agnostic suspend (https://github.com/matrix-org/matrix-spec-proposals/pull/4323) */
-			("org.matrix.msc4155".to_owned(), true), /* invite filtering (https://github.com/matrix-org/matrix-spec-proposals/pull/4155) */
-		]),
-	};
+	let mut unstable_features = unstable_features();
 
-	Ok(resp)
+	if services.config.allow_sticky_events {
+		// sticky events (https://github.com/matrix-org/matrix-spec-proposals/pull/4354)
+		unstable_features.insert("org.matrix.msc4354".to_owned(), true);
+	}
+
+	Ok(assign!(get_supported_versions::Response::new(versions()), {
+		unstable_features
+	}))
 }
 
-/// # `GET /_conduwuit/server_version`
+/// # `GET /_continuwuity/server_version`
 ///
 /// Conduwuit-specific API to get the server version, results akin to
 /// `/_matrix/federation/v1/version`
-pub(crate) async fn conduwuit_server_version() -> Result<impl IntoResponse> {
+pub(crate) async fn continuwuity_server_version() -> Result<impl IntoResponse> {
 	Ok(Json(serde_json::json!({
-		"name": conduwuit::version::name(),
-		"version": conduwuit::version::version(),
+		"name": conduwuit::BRANDING,
+		"version": conduwuit::version(),
 	})))
 }
 
-/// # `GET /_conduwuit/local_user_count`
+/// # `GET /_continuwuity/local_user_count`
 ///
 /// conduwuit-specific API to return the amount of users registered on this
 /// homeserver. Endpoint is disabled if federation is disabled for privacy. This
-/// only includes active users (not deactivated, no guests, etc)
-pub(crate) async fn conduwuit_local_user_count(
+///
+/// only includes active users (not deactivated, etc)
+pub(crate) async fn continuwuity_local_user_count(
 	State(services): State<crate::State>,
 ) -> Result<impl IntoResponse> {
-	let user_count = services.users.list_local_users().count().await;
+	let user_count = services
+		.users
+		.stream_local_users()
+		.filter_map(async |user_id| {
+			if !services.users.status(&user_id).await.is_active()
+				|| services.appservice.is_exclusive_user_id(&user_id).await
+			{
+				None
+			} else {
+				Some(user_id)
+			}
+		})
+		.count()
+		.await;
 
 	Ok(Json(serde_json::json!({
 		"count": user_count

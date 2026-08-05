@@ -48,20 +48,13 @@ pub(crate) fn parse_local_user_id(services: &Services, user_id: &str) -> Result<
 	Ok(user_id)
 }
 
-/// Parses user ID that is an active (not guest or deactivated) local user
+/// Parses user ID that is an active (not deactivated) local user
 pub(crate) async fn parse_active_local_user_id(
 	services: &Services,
 	user_id: &str,
 ) -> Result<OwnedUserId> {
 	let user_id = parse_local_user_id(services, user_id)?;
-
-	if !services.users.exists(&user_id).await {
-		return Err!("User {user_id:?} does not exist on this server.");
-	}
-
-	if services.users.is_deactivated(&user_id).await? {
-		return Err!("User {user_id:?} is deactivated.");
-	}
+	services.users.status(&user_id).await.ensure_active()?;
 
 	Ok(user_id)
 }

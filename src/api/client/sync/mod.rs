@@ -48,6 +48,13 @@ async fn load_timeline(
 	ending_count: Option<PduCount>,
 	limit: usize,
 ) -> Result<TimelinePdus> {
+	if let (Some(starting_count), Some(ending_count)) = (starting_count, ending_count) {
+		debug_assert!(
+			starting_count <= ending_count,
+			"starting count {starting_count} > ending count {ending_count}"
+		);
+	}
+
 	let mut pdu_stream = match starting_count {
 		| Some(starting_count) => {
 			let last_timeline_count = services
@@ -152,8 +159,7 @@ async fn share_encrypted_room(
 		.rooms
 		.state_cache
 		.get_shared_rooms(sender_user, user_id)
-		.ready_filter(|&room_id| Some(room_id) != ignore_room)
-		.map(ToOwned::to_owned)
+		.ready_filter(|room_id| Some(room_id.as_ref()) != ignore_room)
 		.broad_any(|other_room_id| async move {
 			services
 				.rooms

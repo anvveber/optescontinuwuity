@@ -1,9 +1,15 @@
-use std::{fmt::Debug, mem};
+use std::{borrow::Cow, fmt::Debug, mem, time::Instant};
 
 use bytes::BytesMut;
-use conduwuit::{Err, Result, debug_error, err, utils, utils::response::LimitReadExt, warn};
+use conduwuit::{Err, Result, debug_info, err, utils::response::LimitReadExt};
 use reqwest::Client;
-use ruma::api::{IncomingResponse, MatrixVersion, OutgoingRequest, SendAccessToken};
+use ruma::api::{
+	IncomingResponseExt, OutgoingRequest, OutgoingRequestExt,
+	auth_scheme::{AppserviceToken, SendAccessToken},
+	path_builder::VersionHistory,
+};
+
+use crate::SUPPORTED_VERSIONS;
 
 /// Sends a request to an antispam service
 pub(crate) async fn send_antispam_request<T>(
@@ -13,18 +19,33 @@ pub(crate) async fn send_antispam_request<T>(
 	request: T,
 ) -> Result<T::IncomingResponse>
 where
-	T: OutgoingRequest + Debug + Send,
+	T: OutgoingRequest<Authentication = AppserviceToken, PathBuilder = VersionHistory>
+		+ Debug
+		+ Send,
 {
-	const VERSIONS: [MatrixVersion; 1] = [MatrixVersion::V1_15];
 	let http_request = request
-		.try_into_http_request::<BytesMut>(base_url, SendAccessToken::Always(secret), &VERSIONS)?
+		.try_into_http_request::<BytesMut>(
+			base_url,
+			SendAccessToken::Always(secret),
+			Cow::Borrowed(&SUPPORTED_VERSIONS),
+		)?
 		.map(BytesMut::freeze);
 	let reqwest_request = reqwest::Request::try_from(http_request)?;
 
+	let method = reqwest_request.method().clone();
+	let url = reqwest_request.url().clone();
+	debug_info!("Sending request to appservice: {} {}", method, url);
+	let start = Instant::now();
 	let mut response = client.execute(reqwest_request).await.map_err(|e| {
-		warn!("Could not send request to antispam: {e:?}");
-		e
+		err!(BadServerResponse(error!(?e, "Failed to contact antispam service.")))
 	})?;
+	debug_info!(
+		"Received response (HTTP {}) from antispam service in {:?}: {} {}",
+		response.status(),
+		start.elapsed().as_millis(),
+		method,
+		url,
+	);
 
 	// reqwest::Response -> http::Response conversion
 	let status = response.status();
@@ -38,10 +59,14 @@ where
 			.expect("http::response::Builder is usable"),
 	);
 
-	let body = response.limit_read(65535).await?; // TODO: handle timeout
+	let body = response.limit_read(65535).await.map_err(|e| {
+		err!(BadServerResponse(error!(
+			?e,
+			"Failed to read response body from antispam service."
+		)))
+	})?; // TODO: handle timeout
 
 	if !status.is_success() {
-		debug_error!("Antispam response bytes: {:?}", utils::string_from_bytes(&body));
 		return match status {
 			| http::StatusCode::FORBIDDEN =>
 				Err!(Request(Forbidden("Request was rejected by antispam service.",))),
@@ -51,11 +76,14 @@ where
 		};
 	}
 
-	let response = T::IncomingResponse::try_from_http_response(
-		http_response_builder
-			.body(body)
-			.expect("reqwest body is valid http body"),
-	);
+	let (parts, body) = http_response_builder
+		.body(body)
+		.expect("reqwest body is valid http body")
+		.into_parts();
+	let response = T::IncomingResponse::try_from_http_response(http::Response::from_parts(
+		parts,
+		body.as_ref(),
+	));
 
 	response.map_err(|e| {
 		err!(BadServerResponse(warn!(

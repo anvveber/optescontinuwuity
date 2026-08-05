@@ -46,7 +46,7 @@ macro_rules! err {
 	(Request(Forbidden($level:ident!($($args:tt)+)))) => {{
 		let mut buf = String::new();
 		$crate::error::Error::Request(
-			$crate::ruma::api::client::error::ErrorKind::forbidden(),
+			$crate::ruma::api::error::ErrorKind::Forbidden,
 			$crate::err_log!(buf, $level, $($args)+),
 			$crate::http::StatusCode::BAD_REQUEST
 		)
@@ -54,7 +54,7 @@ macro_rules! err {
 
 	(Request(Forbidden($($args:tt)+))) => {
 		$crate::error::Error::Request(
-			$crate::ruma::api::client::error::ErrorKind::forbidden(),
+			$crate::ruma::api::error::ErrorKind::Forbidden,
 			$crate::format_maybe!($($args)+),
 			$crate::http::StatusCode::BAD_REQUEST
 		)
@@ -63,7 +63,7 @@ macro_rules! err {
 	(Request($variant:ident($level:ident!($($args:tt)+)))) => {{
 		let mut buf = String::new();
 		$crate::error::Error::Request(
-			$crate::ruma::api::client::error::ErrorKind::$variant,
+			$crate::ruma::api::error::ErrorKind::$variant,
 			$crate::err_log!(buf, $level, $($args)+),
 			$crate::http::StatusCode::BAD_REQUEST
 		)
@@ -71,7 +71,7 @@ macro_rules! err {
 
 	(Request($variant:ident($($args:tt)+))) => {
 		$crate::error::Error::Request(
-			$crate::ruma::api::client::error::ErrorKind::$variant,
+			$crate::ruma::api::error::ErrorKind::$variant,
 			$crate::format_maybe!($($args)+),
 			$crate::http::StatusCode::BAD_REQUEST
 		)
@@ -79,7 +79,7 @@ macro_rules! err {
 
 	(Request($variant:ident($($args:tt)+), $status_code:ident)) => {
 		$crate::error::Error::Request(
-			$crate::ruma::api::client::error::ErrorKind::$variant,
+			$crate::ruma::api::error::ErrorKind::$variant,
 			$crate::format_maybe!($($args)+),
 			$crate::http::StatusCode::$status_code,
 		)
@@ -149,6 +149,14 @@ macro_rules! err_log {
 #[macro_export]
 #[collapse_debuginfo(yes)]
 macro_rules! err_lev {
+	(debug_info) => {
+		if $crate::debug::logging() {
+			$crate::tracing::Level::INFO
+		} else {
+			$crate::tracing::Level::DEBUG
+		}
+	};
+
 	(debug_warn) => {
 		if $crate::debug::logging() {
 			$crate::tracing::Level::WARN

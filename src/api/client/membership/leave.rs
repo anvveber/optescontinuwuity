@@ -3,13 +3,13 @@ use std::collections::HashSet;
 use axum::extract::State;
 use conduwuit::{
 	Err, Pdu, Result, debug_info, debug_warn, err,
-	matrix::{event::gen_event_id, pdu::PduBuilder},
+	matrix::{event::gen_event_id, pdu::PartialPdu},
 	utils::{self, FutureBoolExt, future::ReadyEqExt},
 	warn,
 };
 use futures::{FutureExt, StreamExt, pin_mut};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, OwnedServerName, RoomId, RoomVersionId, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, OwnedServerName, RoomId, UserId,
 	api::{
 		client::membership::leave_room,
 		federation::{self},
@@ -19,9 +19,8 @@ use ruma::{
 		room::member::{MembershipState, RoomMemberEventContent},
 	},
 };
-use service::Services;
+use service::{Services, rooms::membership::validate_remote_member_event_stub};
 
-use super::validate_remote_member_event_stub;
 use crate::Ruma;
 
 /// # `POST /_matrix/client/v3/rooms/{roomId}/leave`
@@ -33,20 +32,21 @@ pub(crate) async fn leave_room_route(
 	State(services): State<crate::State>,
 	body: Ruma<leave_room::v3::Request>,
 ) -> Result<leave_room::v3::Response> {
-	leave_room(&services, body.sender_user(), &body.room_id, body.reason.clone())
-		.boxed()
-		.await
-		.map(|()| leave_room::v3::Response::new())
+	leave_room(
+		&services,
+		body.identity.expect_sender_user()?,
+		&body.room_id,
+		body.reason.clone(),
+	)
+	.boxed()
+	.await
+	.map(|()| leave_room::v3::Response::new())
 }
 
 // Make a user leave all their joined rooms, rescinds knocks, forgets all rooms,
 // and ignores errors
 pub async fn leave_all_rooms(services: &Services, user_id: &UserId) {
-	let rooms_joined = services
-		.rooms
-		.state_cache
-		.rooms_joined(user_id)
-		.map(ToOwned::to_owned);
+	let rooms_joined = services.rooms.state_cache.rooms_joined(user_id);
 
 	let rooms_invited = services
 		.rooms
@@ -142,18 +142,17 @@ pub async fn leave_room(
 			.await;
 
 		match user_member_event_content {
-			| Ok(content) => {
+			| Ok(mut content) => {
+				content.membership = MembershipState::Leave;
+				content.reason = reason;
+				content.join_authorized_via_users_server = None;
+				content.is_direct = None;
+
 				services
 					.rooms
 					.timeline
 					.build_and_append_pdu(
-						PduBuilder::state(user_id.to_string(), &RoomMemberEventContent {
-							membership: MembershipState::Leave,
-							reason,
-							join_authorized_via_users_server: None,
-							is_direct: None,
-							..content
-						}),
+						PartialPdu::state(user_id.to_string(), &content),
 						user_id,
 						Some(room_id),
 						&state_lock,
@@ -171,9 +170,7 @@ pub async fn leave_room(
 					 locally."
 				);
 
-				// return the existing leave state, if one exists. `mark_as_left` will then
-				// update the `roomuserid_leftcount` table, making the leave come down sync
-				// again.
+				// return the existing leave state, if one exists
 				services
 					.rooms
 					.state_cache
@@ -208,6 +205,8 @@ pub async fn leave_room(
 		.update_joined_count(room_id)
 		.await;
 
+	services.sync.wake(user_id).await;
+
 	Ok(())
 }
 
@@ -226,7 +225,6 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 			.rooms
 			.state_cache
 			.servers_invite_via(room_id)
-			.map(ToOwned::to_owned)
 			.collect::<HashSet<OwnedServerName>>()
 			.await,
 	);
@@ -260,7 +258,7 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 							.filter_map(|event| event.get_field("sender").ok().flatten())
 							.filter_map(|sender: &str| UserId::parse(sender).ok())
 							.filter_map(|sender| {
-								if !services.globals.user_is_local(sender) {
+								if !services.globals.user_is_local(&sender) {
 									Some(sender.server_name().to_owned())
 								} else {
 									None
@@ -289,10 +287,10 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 			.sending
 			.send_federation_request(
 				remote_server.as_ref(),
-				federation::membership::prepare_leave_event::v1::Request {
-					room_id: room_id.to_owned(),
-					user_id: user_id.to_owned(),
-				},
+				federation::membership::prepare_leave_event::v1::Request::new(
+					room_id.to_owned(),
+					user_id.to_owned(),
+				),
 			)
 			.await;
 
@@ -328,6 +326,10 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 			 continuwuity",
 		)));
 	}
+
+	let room_version_rules = room_version_id
+		.rules()
+		.expect("room version should have defined rules");
 
 	let mut leave_event_stub = serde_json::from_str::<CanonicalJsonObject>(
 		make_leave_response.event.get(),
@@ -366,21 +368,16 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 	}
 
 	// room v3 and above removed the "event_id" field from remote PDU format
-	match room_version_id {
-		| RoomVersionId::V1 | RoomVersionId::V2 => {},
-		| _ => {
-			leave_event_stub.remove("event_id");
-		},
-	}
+	leave_event_stub.remove("event_id");
 
 	// In order to create a compatible ref hash (EventID) the `hashes` field needs
 	// to be present
 	services
 		.server_keys
-		.hash_and_sign_event(&mut leave_event_stub, &room_version_id)?;
+		.hash_and_sign_event(&mut leave_event_stub, &room_version_rules)?;
 
 	// Generate event id
-	let event_id = gen_event_id(&leave_event_stub, &room_version_id)?;
+	let event_id = gen_event_id(&leave_event_stub, &room_version_rules)?;
 
 	// Add event_id back
 	leave_event_stub
@@ -393,14 +390,14 @@ pub async fn remote_leave_room<S: ::std::hash::BuildHasher>(
 		.sending
 		.send_federation_request(
 			&remote_server,
-			federation::membership::create_leave_event::v2::Request {
-				room_id: room_id.to_owned(),
-				event_id: event_id.clone(),
-				pdu: services
+			federation::membership::create_leave_event::v2::Request::new(
+				room_id.to_owned(),
+				event_id.clone(),
+				services
 					.sending
 					.convert_to_outgoing_federation_event(leave_event.clone())
 					.await,
-			},
+			),
 		)
 		.await?;
 

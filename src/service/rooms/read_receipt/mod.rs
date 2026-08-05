@@ -21,7 +21,7 @@ use ruma::{
 };
 
 use self::data::{Data, ReceiptItem};
-use crate::{Dep, rooms, sending};
+use crate::{Dep, rooms, sending, sync};
 
 pub struct Service {
 	services: Services,
@@ -31,6 +31,7 @@ pub struct Service {
 struct Services {
 	sending: Dep<sending::Service>,
 	short: Dep<rooms::short::Service>,
+	sync: Dep<sync::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 }
 
@@ -40,6 +41,7 @@ impl crate::Service for Service {
 			services: Services {
 				sending: args.depend::<sending::Service>("sending"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
+				sync: args.depend::<sync::Service>("sync"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},
 			db: Data::new(&args),
@@ -63,6 +65,7 @@ impl Service {
 			.flush_room(room_id)
 			.await
 			.expect("room flush failed");
+		self.services.sync.wake_all_joined(room_id).await;
 	}
 
 	/// Gets the latest private read receipt from the user in the room
@@ -85,18 +88,21 @@ impl Service {
 
 		let event_id: OwnedEventId = pdu.event_id().to_owned();
 		let user_id: OwnedUserId = user_id.to_owned();
+
+		let mut receipt = ruma::events::receipt::Receipt::default();
+		// TODO: start storing the timestamp so we can return one
+		receipt.ts = None;
+		receipt.thread = ruma::events::receipt::ReceiptThread::Unthreaded;
+
 		let content: BTreeMap<OwnedEventId, Receipts> = BTreeMap::from_iter([(
 			event_id,
 			BTreeMap::from_iter([(
 				ruma::events::receipt::ReceiptType::ReadPrivate,
-				BTreeMap::from_iter([(user_id, ruma::events::receipt::Receipt {
-					ts: None, // TODO: start storing the timestamp so we can return one
-					thread: ruma::events::receipt::ReceiptThread::Unthreaded,
-				})]),
+				BTreeMap::from_iter([(user_id, receipt)]),
 			)]),
 		)]);
 		let receipt_event_content = ReceiptEventContent(content);
-		let receipt_sync_event = SyncEphemeralRoomEvent { content: receipt_event_content };
+		let receipt_sync_event = SyncEphemeralRoomEvent::new(receipt_event_content);
 
 		let event = serde_json::value::to_raw_value(&receipt_sync_event)
 			.expect("receipt created manually");
@@ -165,7 +171,7 @@ where
 
 	conduwuit::trace!(?content);
 	Raw::from_json(
-		serde_json::value::to_raw_value(&SyncEphemeralRoomEvent { content })
+		serde_json::value::to_raw_value(&SyncEphemeralRoomEvent::new(content))
 			.expect("received valid json"),
 	)
 }

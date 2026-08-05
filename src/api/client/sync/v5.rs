@@ -1,43 +1,57 @@
 use std::{
 	cmp::{self, Ordering},
-	collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque},
-	ops::Deref,
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
 	time::Duration,
 };
 
 use axum::extract::State;
-use axum_client_ip::ClientIp;
 use conduwuit::{
 	Err, Error, Result, at, error, extract_variant, is_equal_to,
-	matrix::{Event, TypeStateKey, pdu::PduCount},
+	matrix::{
+		Event, TypeStateKey,
+		pdu::{PduCount, PduEvent, sticky},
+	},
 	trace,
 	utils::{
 		BoolExt, FutureBoolExt, IterStream, ReadyExt, TryFutureExtExt,
 		future::ReadyEqExt,
 		math::{ruma_from_usize, usize_from_ruma},
-		stream::WidebandExt,
+		stream::{TryIgnore, WidebandExt},
 	},
 	warn,
 };
-use conduwuit_service::{Services, rooms::read_receipt::pack_receipts, sync::into_snake_key};
+use conduwuit_service::{
+	Services,
+	rooms::read_receipt::pack_receipts,
+	sync::{SnakeConnectionsKey, into_snake_key},
+};
 use futures::{
-	FutureExt, Stream, StreamExt, TryFutureExt,
+	FutureExt, StreamExt, TryFutureExt,
 	future::{OptionFuture, join3, try_join4},
 	pin_mut,
 };
 use ruma::{
-	DeviceId, OwnedEventId, OwnedRoomId, RoomId, UInt, UserId,
-	api::client::sync::sync_events::{self, DeviceLists, UnreadNotificationsCount},
+	DeviceId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedRoomId, RoomId, UInt, UserId,
+	api::client::sync::sync_events::{
+		self, DeviceLists, UnreadNotificationsCount, v5::request::ExtensionRoomConfig,
+	},
+	assign,
 	directory::RoomTypeFilter,
 	events::{
-		AnyRawAccountDataEvent, AnySyncEphemeralRoomEvent, AnySyncStateEvent, StateEventType,
-		TimelineEventType,
-		room::member::{MembershipState, RoomMemberEventContent},
-		typing::TypingEventContent,
+		AnyStrippedStateEvent, AnySyncEphemeralRoomEvent, AnySyncStateEvent,
+		GlobalAccountDataEventType, StateEventType, TimelineEventType,
+		direct::DirectEvent,
+		room::{
+			create::RoomCreateEventContent,
+			member::{MembershipState, RoomMemberEventContent},
+		},
+		typing::{SyncTypingEvent, TypingEventContent},
 	},
 	serde::Raw,
 	uint,
 };
+use service::account_data::AnyRawAccountDataEvent;
+use tokio::pin;
 
 use super::share_encrypted_room;
 use crate::{
@@ -45,11 +59,21 @@ use crate::{
 	client::{
 		DEFAULT_BUMP_TYPES, TimelinePdus, ignored_filter, is_ignored_invite, sync::load_timeline,
 	},
+	client_ip::ClientIp,
 };
 
 type SyncInfo<'a> = (&'a UserId, &'a DeviceId, u64, &'a sync_events::v5::Request);
 type TodoRooms = BTreeMap<OwnedRoomId, (BTreeSet<TypeStateKey>, usize, u64)>;
 type KnownRooms = BTreeMap<String, BTreeMap<OwnedRoomId, u64>>;
+type KnownRoomUpdates = BTreeMap<String, BTreeSet<OwnedRoomId>>;
+
+/// Default and maximum number of sticky events returned per response.
+const DEFAULT_STICKY_LIMIT: usize = 100;
+
+struct SyncCollection {
+	response: sync_events::v5::Response,
+	known_room_updates: KnownRoomUpdates,
+}
 
 /// `POST /_matrix/client/unstable/org.matrix.simplified_msc3575/sync`
 /// ([MSC4186])
@@ -63,12 +87,11 @@ type KnownRooms = BTreeMap<String, BTreeMap<OwnedRoomId, u64>>;
 /// [MSC4186]: https://github.com/matrix-org/matrix-spec-proposals/pull/4186
 pub(crate) async fn sync_events_v5_route(
 	State(ref services): State<crate::State>,
-	ClientIp(client_ip): ClientIp,
+	ClientIp(client_ip): ClientIp, // NOTE: Required for updating device metadata
 	body: Ruma<sync_events::v5::Request>,
 ) -> Result<sync_events::v5::Response> {
-	debug_assert!(DEFAULT_BUMP_TYPES.is_sorted(), "DEFAULT_BUMP_TYPES is not sorted");
-	let sender_user = body.sender_user.as_ref().expect("user is authenticated");
-	let sender_device = body.sender_device.as_ref().expect("user is authenticated");
+	let sender_user = body.identity.expect_sender_user()?;
+	let sender_device = body.identity.expect_sender_device()?;
 
 	services
 		.users
@@ -76,11 +99,6 @@ pub(crate) async fn sync_events_v5_route(
 		.await;
 
 	let mut body = body.body;
-
-	// Setup watchers, so if there's no response, we can wait for them
-	let watcher = services.sync.watch(sender_user, sender_device);
-
-	let next_batch = services.globals.next_count()?;
 
 	let conn_id = body.conn_id.clone();
 
@@ -90,7 +108,7 @@ pub(crate) async fn sync_events_v5_route(
 		.and_then(|string| string.parse().ok())
 		.unwrap_or(0);
 
-	let snake_key = into_snake_key(sender_user, sender_device, conn_id);
+	let snake_key = into_snake_key(sender_user, sender_device.as_str(), conn_id);
 
 	if globalsince != 0 && !services.sync.snake_connection_cached(&snake_key) {
 		return Err!(Request(UnknownPos(
@@ -108,11 +126,73 @@ pub(crate) async fn sync_events_v5_route(
 		.sync
 		.update_snake_sync_request_with_cache(&snake_key, &mut body);
 
+	let mut wake_receiver = services.sync.subscribe_to_wake(sender_user).await;
+	let mut collection = collect_sync_response(
+		services,
+		sender_user,
+		sender_device,
+		&body,
+		globalsince,
+		&known_rooms,
+	)
+	.await?;
+
+	if response_is_empty(&collection.response) {
+		let default = Duration::from_secs(30);
+		let duration = cmp::min(body.timeout.unwrap_or(default), default);
+		let woke = tokio::time::timeout(duration, wake_receiver.changed())
+			.await
+			.is_ok();
+
+		if woke {
+			collection = collect_sync_response(
+				services,
+				sender_user,
+				sender_device,
+				&body,
+				globalsince,
+				&known_rooms,
+			)
+			.await?;
+		}
+	}
+
+	commit_sync_collection(
+		services,
+		sender_user,
+		sender_device,
+		&body,
+		globalsince,
+		&snake_key,
+		&collection.known_room_updates,
+	)
+	.await;
+
+	trace!(
+		rooms = ?collection.response.rooms.len(),
+		account_data = ?collection.response.extensions.account_data.rooms.len(),
+		receipts = ?collection.response.extensions.receipts.rooms.len(),
+		"responding to request with"
+	);
+	Ok(collection.response)
+}
+
+async fn collect_sync_response(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: &DeviceId,
+	body: &sync_events::v5::Request,
+	globalsince: u64,
+	known_rooms: &KnownRooms,
+) -> Result<SyncCollection> {
+	// Bounds every read below and becomes the `pos` returned to the client. Zero
+	// would be echoed back as a request for an initial sync.
+	let next_batch = services.globals.current_count()?.max(1);
+
 	let all_joined_rooms = services
 		.rooms
 		.state_cache
 		.rooms_joined(sender_user)
-		.map(ToOwned::to_owned)
 		.collect::<Vec<OwnedRoomId>>();
 
 	let all_invited_rooms = services
@@ -139,7 +219,18 @@ pub(crate) async fn sync_events_v5_route(
 	let (all_joined_rooms, all_invited_rooms, all_knocked_rooms) =
 		join3(all_joined_rooms, all_invited_rooms, all_knocked_rooms).await;
 
+	let allowed_rooms: BTreeSet<OwnedRoomId> = all_joined_rooms
+		.iter()
+		.chain(all_invited_rooms.iter())
+		.chain(all_knocked_rooms.iter())
+		.cloned()
+		.collect();
+
 	let all_joined_rooms = all_joined_rooms.iter().map(AsRef::as_ref);
+	let joined_room_ids = all_joined_rooms
+		.clone()
+		.map(ToOwned::to_owned)
+		.collect::<BTreeSet<_>>();
 	let all_invited_rooms = all_invited_rooms.iter().map(AsRef::as_ref);
 	let all_knocked_rooms = all_knocked_rooms.iter().map(AsRef::as_ref);
 	let all_rooms = all_joined_rooms
@@ -147,11 +238,12 @@ pub(crate) async fn sync_events_v5_route(
 		.chain(all_invited_rooms.clone())
 		.chain(all_knocked_rooms.clone());
 
-	let pos = next_batch.clone().to_string();
+	let pos = next_batch.to_string();
 
 	let mut todo_rooms: TodoRooms = BTreeMap::new();
+	let mut sticky_rooms = BTreeSet::new();
 
-	let sync_info: SyncInfo<'_> = (sender_user, sender_device, globalsince, &body);
+	let sync_info: SyncInfo<'_> = (sender_user, sender_device, globalsince, body);
 
 	let account_data = collect_account_data(services, sync_info).map(Ok);
 
@@ -164,84 +256,162 @@ pub(crate) async fn sync_events_v5_route(
 	let (account_data, e2ee, to_device, receipts) =
 		try_join4(account_data, e2ee, to_device, receipts).await?;
 
-	let extensions = sync_events::v5::response::Extensions {
+	let extensions = assign!(sync_events::v5::response::Extensions::default(), {
 		account_data,
 		e2ee,
 		to_device,
 		receipts,
 		typing: sync_events::v5::response::Typing::default(),
-	};
+		sticky_events: sync_events::v5::response::StickyEvents::default(),
+	});
 
-	let mut response = sync_events::v5::Response {
+	let mut response = assign!(sync_events::v5::Response::new(pos), {
 		txn_id: body.txn_id.clone(),
-		pos,
 		lists: BTreeMap::new(),
 		rooms: BTreeMap::new(),
 		extensions,
+	});
+	let direct_rooms = if body.lists.values().any(|list| {
+		list.filters
+			.as_ref()
+			.is_some_and(|filters| filters.is_dm.is_some())
+	}) {
+		match services
+			.account_data
+			.get_global::<DirectEvent>(sender_user, GlobalAccountDataEventType::Direct)
+			.await
+		{
+			| Ok(event) => event.content.0.into_values().flatten().collect(),
+			| Err(error) if error.is_not_found() => HashSet::new(),
+			| Err(error) => return Err(error),
+		}
+	} else {
+		HashSet::new()
 	};
 
-	handle_lists(
+	let mut known_room_updates = handle_lists(
 		services,
-		sync_info,
+		sender_user,
+		body,
 		all_invited_rooms.clone(),
 		all_joined_rooms.clone(),
 		all_rooms,
+		&direct_rooms,
 		&mut todo_rooms,
-		&known_rooms,
+		&mut sticky_rooms,
+		known_rooms,
 		&mut response,
 	)
 	.await;
 
-	fetch_subscriptions(services, sync_info, &known_rooms, &mut todo_rooms).await;
+	known_room_updates.insert(
+		"subscriptions".to_owned(),
+		fetch_subscriptions(services, body, known_rooms, &allowed_rooms, &mut todo_rooms).await,
+	);
+	sticky_rooms.extend(body.room_subscriptions.keys().cloned());
 
+	let mut timeline_event_ids = BTreeSet::new();
 	response.rooms = process_rooms(
 		services,
 		sender_user,
 		next_batch,
 		all_invited_rooms.clone(),
+		all_knocked_rooms.clone(),
 		&todo_rooms,
 		&mut response,
-		&body,
+		body,
+		&mut timeline_event_ids,
 	)
 	.await?;
 
-	if response.rooms.iter().all(|(id, r)| {
-		r.timeline.is_empty()
-			&& r.required_state.is_empty()
+	response.extensions.sticky_events = collect_sticky_events(
+		services,
+		sender_user,
+		body,
+		&sticky_rooms,
+		&joined_room_ids,
+		&todo_rooms,
+		&timeline_event_ids,
+	)
+	.await?;
+
+	response.extensions.typing =
+		collect_typing_events(services, sender_user, body, &todo_rooms).await?;
+
+	Ok(SyncCollection { response, known_room_updates })
+}
+
+fn response_is_empty(response: &sync_events::v5::Response) -> bool {
+	let no_account_data = response.extensions.account_data.global.is_empty()
+		&& response
+			.extensions
+			.account_data
+			.rooms
+			.values()
+			.all(Vec::is_empty);
+	let no_room_data = response.rooms.iter().all(|(id, room)| {
+		room.timeline.is_empty()
+			&& room.required_state.is_empty()
+			&& room.invite_state.is_none()
 			&& !response.extensions.receipts.rooms.contains_key(id)
-	}) && response
+	});
+	let no_to_device_messages = response
 		.extensions
 		.to_device
-		.clone()
-		.is_none_or(|to| to.events.is_empty())
-	{
-		// Hang a few seconds so requests are not spammed
-		// Stop hanging if new info arrives
-		let default = Duration::from_secs(30);
-		let duration = cmp::min(body.timeout.unwrap_or(default), default);
-		_ = tokio::time::timeout(duration, watcher).await;
+		.as_ref()
+		.is_none_or(|to| to.events.is_empty());
+
+	no_account_data
+		&& no_room_data
+		&& no_to_device_messages
+		&& response.extensions.sticky_events.is_empty()
+}
+
+async fn commit_sync_collection(
+	services: &Services,
+	sender_user: &UserId,
+	sender_device: &DeviceId,
+	body: &sync_events::v5::Request,
+	globalsince: u64,
+	snake_key: &SnakeConnectionsKey,
+	known_room_updates: &KnownRoomUpdates,
+) {
+	let (.., conn_id) = snake_key;
+
+	if conn_id.is_some() {
+		for (list_id, rooms) in known_room_updates {
+			services.sync.update_snake_sync_known_rooms(
+				snake_key,
+				list_id.clone(),
+				rooms.clone(),
+				globalsince,
+			);
+		}
 	}
 
-	let typing = collect_typing_events(services, sender_user, &body, &todo_rooms).await?;
-	response.extensions.typing = typing;
-
-	trace!(
-		rooms = ?response.rooms.len(),
-		account_data = ?response.extensions.account_data.rooms.len(),
-		receipts = ?response.extensions.receipts.rooms.len(),
-		"responding to request with"
-	);
-	Ok(response)
+	if body.extensions.to_device.enabled.unwrap_or(false) {
+		services
+			.users
+			.remove_to_device_events(sender_user, sender_device, globalsince)
+			.await;
+	}
 }
 
 async fn fetch_subscriptions(
 	services: &Services,
-	(sender_user, sender_device, globalsince, body): SyncInfo<'_>,
+	body: &sync_events::v5::Request,
 	known_rooms: &KnownRooms,
+	allowed_rooms: &BTreeSet<OwnedRoomId>,
 	todo_rooms: &mut TodoRooms,
-) {
+) -> BTreeSet<OwnedRoomId> {
 	let mut known_subscription_rooms = BTreeSet::new();
 	for (room_id, room) in &body.room_subscriptions {
+		// Silently ignore subscriptions to rooms the user is not a member of
+		// (joined or invited).
+		if !allowed_rooms.contains(room_id) {
+			continue;
+		}
+
 		let not_exists = services.rooms.metadata.exists(room_id).eq(&false);
 
 		let is_disabled = services.rooms.metadata.is_disabled(room_id);
@@ -282,54 +452,97 @@ async fn fetch_subscriptions(
 	//	body.room_subscriptions.remove(&r);
 	//}
 
-	if let Some(conn_id) = body.conn_id.clone() {
-		let snake_key = into_snake_key(sender_user, sender_device, conn_id);
-		services.sync.update_snake_sync_known_rooms(
-			&snake_key,
-			"subscriptions".to_owned(),
-			known_subscription_rooms,
-			globalsince,
-		);
-	}
+	known_subscription_rooms
 }
 
 #[allow(clippy::too_many_arguments)]
 async fn handle_lists<'a, Rooms, AllRooms>(
 	services: &Services,
-	(sender_user, sender_device, globalsince, body): SyncInfo<'_>,
+	sender_user: &UserId,
+	body: &sync_events::v5::Request,
 	all_invited_rooms: Rooms,
 	all_joined_rooms: Rooms,
 	all_rooms: AllRooms,
+	direct_rooms: &HashSet<OwnedRoomId>,
 	todo_rooms: &'a mut TodoRooms,
+	sticky_rooms: &mut BTreeSet<OwnedRoomId>,
 	known_rooms: &'a KnownRooms,
 	response: &'_ mut sync_events::v5::Response,
-) -> KnownRooms
+) -> KnownRoomUpdates
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
 	AllRooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
 {
-	// TODO MSC4186: Implement remaining list filters: is_dm, is_encrypted,
-	// room_types.
+	// TODO MSC4186: ruma's `ListFilters` does not model `spaces`, `tags` or
+	// `not_tags`, nor the rename of `is_invite` to `is_invited`.
+	let invited_rooms: HashSet<&RoomId> = all_invited_rooms.clone().collect();
+
+	// Memoised for the whole request; lists commonly overlap.
+	let mut encrypted_rooms: HashMap<&RoomId, bool> = HashMap::new();
+	let mut room_types: HashMap<&RoomId, Option<RoomTypeFilter>> = HashMap::new();
+
+	let mut known_room_updates = KnownRoomUpdates::new();
 	for (list_id, list) in &body.lists {
-		let active_rooms: Vec<_> = match list.filters.as_ref().and_then(|f| f.is_invite) {
+		let filters = list.filters.as_ref();
+		let is_dm = filters.and_then(|filters| filters.is_dm);
+		let is_encrypted = filters.and_then(|filters| filters.is_encrypted);
+		let room_types_filter = filters.map_or(&[][..], |filters| filters.room_types.as_slice());
+		let not_room_types = filters.map_or(&[][..], |filters| filters.not_room_types.as_slice());
+		let filter_room_types = !room_types_filter.is_empty() || !not_room_types.is_empty();
+
+		let candidate_rooms: Vec<&RoomId> = match filters.and_then(|filters| filters.is_invite) {
 			| None => all_rooms.clone().collect(),
 			| Some(true) => all_invited_rooms.clone().collect(),
 			| Some(false) => all_joined_rooms.clone().collect(),
 		};
 
-		let active_rooms = match list.filters.as_ref().map(|f| &f.not_room_types) {
-			| None => active_rooms,
-			| Some(filter) if filter.is_empty() => active_rooms,
-			| Some(value) =>
-				filter_rooms(
-					services,
-					value,
-					&true,
-					active_rooms.iter().stream().map(Deref::deref),
-				)
-				.collect()
-				.await,
-		};
+		let mut active_rooms: Vec<&RoomId> = Vec::with_capacity(candidate_rooms.len());
+		for room_id in candidate_rooms {
+			if !matches_bool_filter(direct_rooms.contains(room_id), is_dm) {
+				continue;
+			}
+
+			let invited = invited_rooms.contains(room_id);
+
+			if is_encrypted.is_some() {
+				let encrypted = match encrypted_rooms.get(room_id) {
+					| Some(encrypted) => *encrypted,
+					| None => {
+						let encrypted =
+							room_is_encrypted(services, sender_user, room_id, invited).await;
+						encrypted_rooms.insert(room_id, encrypted);
+						encrypted
+					},
+				};
+
+				if !matches_bool_filter(encrypted, is_encrypted) {
+					continue;
+				}
+			}
+
+			if filter_room_types {
+				let room_type = match room_types.get(room_id) {
+					| Some(room_type) => room_type.clone(),
+					| None => {
+						let room_type =
+							room_type_filter(services, sender_user, room_id, invited).await;
+						room_types.insert(room_id, room_type.clone());
+						room_type
+					},
+				};
+
+				let Some(room_type) = room_type else {
+					continue;
+				};
+
+				if !matches_room_type(&room_type, room_types_filter, not_room_types) {
+					continue;
+				}
+			}
+
+			active_rooms.push(room_id);
+		}
+		sticky_rooms.extend(active_rooms.iter().map(|room_id| (*room_id).to_owned()));
 
 		let mut new_known_rooms: BTreeSet<OwnedRoomId> = BTreeSet::new();
 
@@ -379,34 +592,116 @@ where
 				);
 			}
 		}
-		response
-			.lists
-			.insert(list_id.clone(), sync_events::v5::response::List {
+		response.lists.insert(
+			list_id.clone(),
+			assign!(sync_events::v5::response::List::default(), {
 				count: ruma_from_usize(active_rooms.len()),
-			});
+			}),
+		);
 
-		if let Some(conn_id) = body.conn_id.clone() {
-			let snake_key = into_snake_key(sender_user, sender_device, conn_id);
-			services.sync.update_snake_sync_known_rooms(
-				&snake_key,
-				list_id.clone(),
-				new_known_rooms,
-				globalsince,
-			);
-		}
+		known_room_updates.insert(list_id.clone(), new_known_rooms);
 	}
 
-	BTreeMap::default()
+	known_room_updates
 }
 
+fn matches_bool_filter(value: bool, filter: Option<bool>) -> bool {
+	filter.is_none_or(|expected| value == expected)
+}
+
+/// Rooms we are only invited to have no state locally, so their stripped
+/// invite state answers for them instead.
+async fn room_is_encrypted(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	invited: bool,
+) -> bool {
+	if !invited {
+		return services
+			.rooms
+			.state_accessor
+			.is_encrypted_room(room_id)
+			.await;
+	}
+
+	stripped_state_event(services, sender_user, room_id, &StateEventType::RoomEncryption)
+		.await
+		.is_some()
+}
+
+/// Returns `None` if the type could not be determined, in which case the room
+/// is excluded from the list.
+///
+/// Stripped invite state is only recommended to carry `m.room.create`, so an
+/// invite without one is treated as untyped rather than hidden from every list.
+async fn room_type_filter(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	invited: bool,
+) -> Option<RoomTypeFilter> {
+	if invited {
+		let content: Option<RoomCreateEventContent> =
+			stripped_state_event(services, sender_user, room_id, &StateEventType::RoomCreate)
+				.await
+				.and_then(|event| event.get_field("content").ok().flatten());
+
+		return Some(RoomTypeFilter::from(content.and_then(|content| content.room_type)));
+	}
+
+	match services.rooms.state_accessor.get_room_type(room_id).await {
+		| Ok(room_type) => Some(RoomTypeFilter::from(Some(room_type))),
+		| Err(error) if error.is_not_found() => Some(RoomTypeFilter::Default),
+		| Err(error) => {
+			warn!(%room_id, %error, "Failed to fetch room type for a sliding sync list filter");
+			None
+		},
+	}
+}
+
+async fn stripped_state_event(
+	services: &Services,
+	sender_user: &UserId,
+	room_id: &RoomId,
+	event_type: &StateEventType,
+) -> Option<Raw<AnyStrippedStateEvent>> {
+	services
+		.rooms
+		.state_cache
+		.invite_state(sender_user, room_id)
+		.await
+		.ok()?
+		.into_iter()
+		.find(|event| {
+			event
+				.get_field::<StateEventType>("type")
+				.ok()
+				.flatten()
+				.as_ref() == Some(event_type)
+		})
+}
+
+fn matches_room_type(
+	room_type: &RoomTypeFilter,
+	room_types: &[RoomTypeFilter],
+	not_room_types: &[RoomTypeFilter],
+) -> bool {
+	!not_room_types.contains(room_type)
+		&& (room_types.is_empty() || room_types.contains(room_type))
+}
+
+#[allow(clippy::too_many_arguments)]
 async fn process_rooms<'a, Rooms>(
 	services: &Services,
 	sender_user: &UserId,
 	next_batch: u64,
 	all_invited_rooms: Rooms,
+	all_knocked_rooms: Rooms,
 	todo_rooms: &TodoRooms,
 	response: &mut sync_events::v5::Response,
 	body: &sync_events::v5::Request,
+	timeline_event_ids: &mut BTreeSet<OwnedEventId>,
 ) -> Result<BTreeMap<OwnedRoomId, sync_events::v5::response::Room>>
 where
 	Rooms: Iterator<Item = &'a RoomId> + Clone + Send + 'a,
@@ -416,37 +711,100 @@ where
 		let roomsincecount = PduCount::Normal(*roomsince);
 
 		let mut timestamp: Option<_> = None;
-		let mut invite_state = None;
 		let (timeline_pdus, limited);
 		let new_room_id: &RoomId = (*room_id).as_ref();
 		if all_invited_rooms.clone().any(is_equal_to!(new_room_id)) {
+			let Ok(invite_count) = services
+				.rooms
+				.state_cache
+				.get_invite_count(room_id, sender_user)
+				.await
+			else {
+				continue;
+			};
+
+			if *roomsince >= invite_count {
+				continue;
+			}
+
 			// TODO: figure out a timestamp we can use for remote invites
-			invite_state = services
+			let invite_state = services
 				.rooms
 				.state_cache
 				.invite_state(sender_user, room_id)
 				.await
 				.ok();
 
-			(timeline_pdus, limited) = (VecDeque::new(), true);
-		} else {
-			TimelinePdus { pdus: timeline_pdus, limited } = match load_timeline(
-				services,
-				sender_user,
-				room_id,
-				Some(roomsincecount),
-				Some(PduCount::from(next_batch)),
-				*timeline_limit,
-			)
-			.await
-			{
-				| Ok(value) => value,
-				| Err(err) => {
-					warn!("Encountered missing timeline in {}, error {}", room_id, err);
-					continue;
-				},
-			};
+			rooms.insert(
+				room_id.clone(),
+				assign!(sync_events::v5::response::Room::new(), {
+					initial: Some(roomsince == &0),
+					invite_state,
+					limited: true,
+				}),
+			);
+			continue;
 		}
+
+		if all_knocked_rooms.clone().any(is_equal_to!(new_room_id)) {
+			let Ok(knock_count) = services
+				.rooms
+				.state_cache
+				.get_knock_count(room_id, sender_user)
+				.await
+			else {
+				continue;
+			};
+
+			if *roomsince >= knock_count {
+				continue;
+			}
+
+			let Ok(knock_state) = services
+				.rooms
+				.state_cache
+				.knock_state(sender_user, room_id)
+				.await
+			else {
+				continue;
+			};
+
+			rooms.insert(
+				room_id.clone(),
+				assign!(sync_events::v5::response::Room::new(), {
+					initial: Some(roomsince == &0),
+					invite_state: Some(knock_state),
+					limited: true,
+				}),
+			);
+			continue;
+		}
+
+		if !services
+			.rooms
+			.state_cache
+			.is_joined(sender_user, room_id)
+			.await
+		{
+			continue;
+		}
+
+		TimelinePdus { pdus: timeline_pdus, limited } = match load_timeline(
+			services,
+			sender_user,
+			room_id,
+			Some(roomsincecount),
+			Some(PduCount::from(next_batch)),
+			*timeline_limit,
+		)
+		.await
+		{
+			| Ok(value) => value,
+			| Err(err) => {
+				warn!("Encountered missing timeline in {}, error {}", room_id, err);
+				continue;
+			},
+		};
 
 		if body.extensions.account_data.enabled == Some(true) {
 			response.extensions.account_data.rooms.insert(
@@ -547,6 +905,7 @@ where
 			.map(Event::into_format)
 			.collect()
 			.await;
+		timeline_event_ids.extend(timeline_pdus.iter().map(|(_, pdu)| pdu.event_id.clone()));
 
 		for (_, pdu) in timeline_pdus {
 			let ts = pdu.origin_server_ts;
@@ -563,17 +922,19 @@ where
 			.state_cache
 			.room_members(room_id)
 			.ready_filter(|member| *member != sender_user)
-			.filter_map(|user_id| {
+			.filter_map(async |user_id| {
 				services
 					.rooms
 					.state_accessor
-					.get_member(room_id, user_id)
-					.map_ok(|memberevent| sync_events::v5::response::Hero {
-						user_id: user_id.into(),
-						name: memberevent.displayname,
-						avatar: memberevent.avatar_url,
+					.get_member(room_id, &user_id)
+					.map_ok(|member_event| {
+						assign!(sync_events::v5::response::Hero::new(user_id.clone()), {
+							name: member_event.displayname,
+							avatar: member_event.avatar_url,
+						})
 					})
 					.ok()
+					.await
 			})
 			.take(5)
 			.collect()
@@ -609,75 +970,195 @@ where
 			None
 		};
 
-		rooms.insert(room_id.clone(), sync_events::v5::response::Room {
-			name: services
-				.rooms
-				.state_accessor
-				.get_name(room_id)
-				.await
-				.ok()
-				.or(name),
-			avatar: match heroes_avatar {
-				| Some(heroes_avatar) => ruma::JsOption::Some(heroes_avatar),
-				| _ => match services.rooms.state_accessor.get_avatar(room_id).await {
-					| ruma::JsOption::Some(avatar) => ruma::JsOption::from_option(avatar.url),
-					| ruma::JsOption::Null => ruma::JsOption::Null,
-					| ruma::JsOption::Undefined => ruma::JsOption::Undefined,
+		rooms.insert(
+			room_id.clone(),
+			assign!(sync_events::v5::response::Room::new(), {
+				name: services
+					.rooms
+					.state_accessor
+					.get_name(room_id)
+					.await
+					.ok()
+					.or(name),
+				avatar: match heroes_avatar {
+					| Some(heroes_avatar) => ruma::JsOption::Some(heroes_avatar),
+					| _ => match services.rooms.state_accessor.get_avatar(room_id).await {
+						| ruma::JsOption::Some(avatar) => ruma::JsOption::from_option(avatar.url),
+						| ruma::JsOption::Null => ruma::JsOption::Null,
+						| ruma::JsOption::Undefined => ruma::JsOption::Undefined,
+					},
 				},
-			},
-			initial: Some(roomsince == &0),
-			is_dm: None,
-			invite_state,
-			unread_notifications: UnreadNotificationsCount {
-				highlight_count: Some(
+				initial: Some(roomsince == &0),
+				is_dm: None,
+				unread_notifications: assign!(UnreadNotificationsCount::new(), {
+					highlight_count: Some(
+						services
+							.rooms
+							.user
+							.highlight_count(sender_user, room_id)
+							.await
+							.try_into()
+							.expect("notification count can't go that high"),
+					),
+					notification_count: Some(
+						services
+							.rooms
+							.user
+							.notification_count(sender_user, room_id)
+							.await
+							.try_into()
+							.expect("notification count can't go that high"),
+					),
+				}),
+				timeline: room_events,
+				required_state,
+				prev_batch,
+				limited,
+				joined_count: Some(
 					services
 						.rooms
-						.user
-						.highlight_count(sender_user, room_id)
+						.state_cache
+						.room_joined_count(room_id)
 						.await
+						.unwrap_or(0)
 						.try_into()
-						.expect("notification count can't go that high"),
+						.unwrap_or_else(|_| uint!(0)),
 				),
-				notification_count: Some(
+				invited_count: Some(
 					services
 						.rooms
-						.user
-						.notification_count(sender_user, room_id)
+						.state_cache
+						.room_invited_count(room_id)
 						.await
+						.unwrap_or(0)
 						.try_into()
-						.expect("notification count can't go that high"),
+						.unwrap_or_else(|_| uint!(0)),
 				),
-			},
-			timeline: room_events,
-			required_state,
-			prev_batch,
-			limited,
-			joined_count: Some(
-				services
-					.rooms
-					.state_cache
-					.room_joined_count(room_id)
-					.await
-					.unwrap_or(0)
-					.try_into()
-					.unwrap_or_else(|_| uint!(0)),
-			),
-			invited_count: Some(
-				services
-					.rooms
-					.state_cache
-					.room_invited_count(room_id)
-					.await
-					.unwrap_or(0)
-					.try_into()
-					.unwrap_or_else(|_| uint!(0)),
-			),
-			num_live: None, // Count events in timeline greater than global sync counter
-			bump_stamp: timestamp,
-			heroes: Some(heroes),
-		});
+				num_live: None, // Count events in timeline greater than global sync counter
+				bump_stamp: timestamp,
+				heroes: Some(heroes),
+			}),
+		);
 	}
 	Ok(rooms)
+}
+
+async fn collect_sticky_events(
+	services: &Services,
+	sender_user: &UserId,
+	body: &sync_events::v5::Request,
+	sticky_rooms: &BTreeSet<OwnedRoomId>,
+	joined_room_ids: &BTreeSet<OwnedRoomId>,
+	todo_rooms: &TodoRooms,
+	timeline_event_ids: &BTreeSet<OwnedEventId>,
+) -> Result<sync_events::v5::response::StickyEvents> {
+	if !services.config.allow_sticky_events
+		|| !body.extensions.sticky_events.enabled.unwrap_or(false)
+	{
+		return Ok(sync_events::v5::response::StickyEvents::default());
+	}
+
+	let since = body
+		.extensions
+		.sticky_events
+		.since
+		.as_deref()
+		.and_then(|token| token.parse::<u64>().ok())
+		.unwrap_or(0);
+	let limit = body
+		.extensions
+		.sticky_events
+		.limit
+		.map_or(DEFAULT_STICKY_LIMIT, usize_from_ruma)
+		.clamp(1, DEFAULT_STICKY_LIMIT);
+	let now = u64::from(MilliSecondsSinceUnixEpoch::now().get());
+	let oldest_sticky_ts = now.saturating_sub(sticky::MAX_DURATION_MS);
+
+	let mut backlog = Vec::new();
+	let mut stream = Vec::new();
+	for room_id in sticky_rooms
+		.iter()
+		.filter(|room_id| joined_room_ids.contains(*room_id))
+	{
+		// a room the client has not seen before needs its whole backlog, which a
+		// single stream position cannot express
+		let initial = todo_rooms
+			.get(room_id)
+			.is_some_and(|&(_, _, roomsince)| roomsince == 0);
+
+		let pdus = services.rooms.timeline.pdus_rev(room_id, None).ignore_err();
+		pin_mut!(pdus);
+		while let Some((count, pdu)) = pdus.next().await {
+			// nothing older than this can still be sticky, and on the stream we
+			// have already delivered everything up to `since`
+			if u64::from(pdu.origin_server_ts) < oldest_sticky_ts
+				|| (!initial && count <= PduCount::Normal(since))
+			{
+				break;
+			}
+
+			let PduCount::Normal(count) = count else {
+				continue;
+			};
+
+			let is_sticky = pdu
+				.sticky
+				.as_deref()
+				.is_some_and(|sticky| sticky::is_sticky(pdu.origin_server_ts, sticky, now));
+
+			if !is_sticky || timeline_event_ids.contains(&pdu.event_id) {
+				continue;
+			}
+			if services
+				.users
+				.user_is_ignored(pdu.sender(), sender_user)
+				.await
+			{
+				continue;
+			}
+
+			if count > since {
+				stream.push((count, room_id.clone(), pdu));
+			} else {
+				backlog.push((room_id.clone(), pdu));
+			}
+		}
+	}
+	stream.sort_by_key(|(count, ..)| *count);
+
+	let mut response = sync_events::v5::response::StickyEvents::default();
+
+	// MSC4480 lets us ignore the limit for a newly visible room's backlog
+	for (room_id, pdu) in backlog {
+		push_sticky_event(&mut response, sender_user, room_id, pdu);
+	}
+
+	let mut next_batch = None;
+	for (count, room_id, pdu) in stream.into_iter().take(limit) {
+		push_sticky_event(&mut response, sender_user, room_id, pdu);
+		next_batch = Some(count);
+	}
+
+	if !response.rooms.is_empty() {
+		response.next_batch = Some(next_batch.unwrap_or(since).to_string());
+	}
+
+	Ok(response)
+}
+
+fn push_sticky_event(
+	response: &mut sync_events::v5::response::StickyEvents,
+	sender_user: &UserId,
+	room_id: OwnedRoomId,
+	mut pdu: PduEvent,
+) {
+	pdu.set_unsigned(Some(sender_user));
+	response
+		.rooms
+		.entry(room_id)
+		.or_default()
+		.events
+		.push(Event::into_format(pdu));
 }
 
 /// Collect the required state events for a room
@@ -737,7 +1218,8 @@ async fn collect_typing_events(
 	let rooms: Vec<_> = body.extensions.typing.rooms.clone().unwrap_or_else(|| {
 		body.room_subscriptions
 			.keys()
-			.map(ToOwned::to_owned)
+			.cloned()
+			.map(ExtensionRoomConfig::Room)
 			.collect()
 	});
 	let lists: Vec<_> = body
@@ -753,6 +1235,15 @@ async fn collect_typing_events(
 
 	let mut typing_response = sync_events::v5::response::Typing::default();
 	for (room_id, (_, _, roomsince)) in todo_rooms {
+		if !services
+			.rooms
+			.state_cache
+			.is_joined(sender_user, room_id)
+			.await
+		{
+			continue;
+		}
+
 		if services.rooms.typing.last_typing_update(room_id).await? <= *roomsince {
 			continue;
 		}
@@ -766,9 +1257,7 @@ async fn collect_typing_events(
 			| Ok(typing_users) => {
 				typing_response.rooms.insert(
 					room_id.to_owned(), // Already OwnedRoomId
-					Raw::new(&sync_events::v5::response::SyncTypingEvent {
-						content: TypingEventContent::new(typing_users),
-					})?,
+					Raw::new(&SyncTypingEvent::new(TypingEventContent::new(typing_users)))?,
 				);
 			},
 			| Err(e) => {
@@ -784,10 +1273,7 @@ async fn collect_account_data(
 	services: &Services,
 	(sender_user, _, globalsince, body): (&UserId, &DeviceId, u64, &sync_events::v5::Request),
 ) -> sync_events::v5::response::AccountData {
-	let mut account_data = sync_events::v5::response::AccountData {
-		global: Vec::new(),
-		rooms: BTreeMap::new(),
-	};
+	let mut account_data = sync_events::v5::response::AccountData::default();
 
 	if !body.extensions.account_data.enabled.unwrap_or(false) {
 		return sync_events::v5::response::AccountData::default();
@@ -802,15 +1288,17 @@ async fn collect_account_data(
 
 	if let Some(rooms) = &body.extensions.account_data.rooms {
 		for room in rooms {
-			account_data.rooms.insert(
-				room.clone(),
-				services
-					.account_data
-					.changes_since(Some(room), sender_user, Some(globalsince), None)
-					.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Room))
-					.collect()
-					.await,
-			);
+			if let ExtensionRoomConfig::Room(room) = room {
+				account_data.rooms.insert(
+					room.clone(),
+					services
+						.account_data
+						.changes_since(Some(room.as_ref()), sender_user, Some(globalsince), None)
+						.ready_filter_map(|e| extract_variant!(e, AnyRawAccountDataEvent::Room))
+						.collect()
+						.await,
+				);
+			}
 		}
 	}
 
@@ -841,7 +1329,6 @@ where
 		services
 			.users
 			.keys_changed(sender_user, Some(globalsince), None)
-			.map(ToOwned::to_owned)
 			.collect::<Vec<_>>()
 			.await,
 	);
@@ -854,12 +1341,31 @@ where
 			continue;
 		};
 
-		let since_shortstatehash = services
-			.rooms
-			.user
-			.get_token_shortstatehash(room_id, globalsince)
-			.await
-			.ok();
+		let since_shortstatehash = async {
+			pin! {
+				let pdus_rev = services
+					.rooms
+					.timeline
+					.pdus_rev(room_id, Some(PduCount::Normal(globalsince.saturating_sub(1))))
+					.ignore_err();
+			}
+
+			let (count, pdu_at_last_sync_end) = pdus_rev.next().await?;
+
+			if matches!(count, PduCount::Backfilled(_)) {
+				None
+			} else {
+				Some(
+					services
+						.rooms
+						.state_accessor
+						.pdu_shortstatehash(&pdu_at_last_sync_end.event_id)
+						.await
+						.expect("pdu should have a shortstatehash"),
+				)
+			}
+		}
+		.await;
 
 		let encrypted_room = services
 			.rooms
@@ -932,18 +1438,18 @@ where
 										if !share_encrypted_room(
 											services,
 											sender_user,
-											user_id,
+											&user_id,
 											Some(room_id),
 										)
 										.await
 										{
-											device_list_changes.insert(user_id.to_owned());
+											device_list_changes.insert(user_id.clone());
 										}
 									},
 									| MembershipState::Leave => {
 										// Write down users that have left encrypted rooms we
 										// are in
-										left_encrypted_users.insert(user_id.to_owned());
+										left_encrypted_users.insert(user_id.clone());
 									},
 									| _ => {},
 								}
@@ -962,9 +1468,10 @@ where
 						.ready_filter(|user_id| sender_user != *user_id)
 						// Only send keys if the sender doesn't share an encrypted room with the target
 						// already
-						.filter_map(|user_id| {
-							share_encrypted_room(services, sender_user, user_id, Some(room_id))
-								.map(|res| res.or_some(user_id.to_owned()))
+						.filter_map(async |user_id| {
+							share_encrypted_room(services, sender_user, &user_id, Some(room_id))
+								.map(|res| res.or_some(user_id.clone()))
+								.await
 						})
 						.collect::<Vec<_>>()
 						.await,
@@ -978,7 +1485,6 @@ where
 				.users
 				.room_keys_changed(room_id, Some(globalsince), None)
 				.map(|(user_id, _)| user_id)
-				.map(ToOwned::to_owned)
 				.collect::<Vec<_>>()
 				.await,
 		);
@@ -995,7 +1501,7 @@ where
 		}
 	}
 
-	Ok(sync_events::v5::response::E2EE {
+	Ok(assign!(sync_events::v5::response::E2EE::default(), {
 		device_unused_fallback_key_types: None,
 
 		device_one_time_keys_count: services
@@ -1003,11 +1509,11 @@ where
 			.count_one_time_keys(sender_user, sender_device)
 			.await,
 
-		device_lists: DeviceLists {
+		device_lists: assign!(DeviceLists::new(), {
 			changed: device_list_changes.into_iter().collect(),
 			left: device_list_left.into_iter().collect(),
-		},
-	})
+		}),
+	}))
 }
 
 async fn collect_to_device(
@@ -1019,51 +1525,128 @@ async fn collect_to_device(
 		return None;
 	}
 
-	services
-		.users
-		.remove_to_device_events(sender_user, sender_device, globalsince)
-		.await;
-
-	Some(sync_events::v5::response::ToDevice {
+	Some(assign!(sync_events::v5::response::ToDevice::default(), {
 		next_batch: next_batch.to_string(),
 		events: services
 			.users
-			.get_to_device_events(sender_user, sender_device, None, Some(next_batch))
+			.get_to_device_events(sender_user, sender_device, Some(globalsince), Some(next_batch))
 			.map(at!(1))
 			.collect()
 			.await,
-	})
+	}))
 }
 
 async fn collect_receipts(_services: &Services) -> sync_events::v5::response::Receipts {
-	sync_events::v5::response::Receipts { rooms: BTreeMap::new() }
 	// TODO: get explicitly requested read receipts
+	sync_events::v5::response::Receipts::default()
 }
 
-fn filter_rooms<'a, Rooms>(
-	services: &'a Services,
-	filter: &'a [RoomTypeFilter],
-	negate: &'a bool,
-	rooms: Rooms,
-) -> impl Stream<Item = &'a RoomId> + Send + 'a
-where
-	Rooms: Stream<Item = &'a RoomId> + Send + 'a,
-{
-	rooms.filter_map(async |room_id| {
-		let room_type = services.rooms.state_accessor.get_room_type(room_id).await;
+#[cfg(test)]
+mod tests {
+	use std::slice;
 
-		if room_type.as_ref().is_err_and(|e| !e.is_not_found()) {
-			return None;
-		}
+	use ruma::{owned_room_id, room_id};
 
-		let room_type_filter = RoomTypeFilter::from(room_type.ok());
+	use super::*;
 
-		let include = if *negate {
-			!filter.contains(&room_type_filter)
-		} else {
-			filter.is_empty() || filter.contains(&room_type_filter)
-		};
+	fn custom_room_type() -> RoomTypeFilter { RoomTypeFilter::from(Some("com.example")) }
 
-		include.then_some(room_id)
-	})
+	fn response() -> sync_events::v5::Response { sync_events::v5::Response::new("1".to_owned()) }
+
+	#[test]
+	fn absent_bool_filter_matches_either_value() {
+		assert!(matches_bool_filter(true, None));
+		assert!(matches_bool_filter(false, None));
+	}
+
+	#[test]
+	fn bool_filter_matches_only_its_own_value() {
+		assert!(matches_bool_filter(true, Some(true)));
+		assert!(!matches_bool_filter(false, Some(true)));
+		assert!(matches_bool_filter(false, Some(false)));
+		assert!(!matches_bool_filter(true, Some(false)));
+	}
+
+	#[test]
+	fn absent_room_type_filters_match_every_type() {
+		assert!(matches_room_type(&custom_room_type(), &[], &[]));
+		assert!(matches_room_type(&RoomTypeFilter::Default, &[], &[]));
+	}
+
+	#[test]
+	fn positive_room_type_matches_and_mismatches() {
+		let custom = custom_room_type();
+		assert!(matches_room_type(&custom, slice::from_ref(&custom), &[]));
+		assert!(!matches_room_type(&custom, &[RoomTypeFilter::Default], &[]));
+	}
+
+	#[test]
+	fn default_room_type_matches_untyped_rooms() {
+		assert!(matches_room_type(&RoomTypeFilter::Default, &[RoomTypeFilter::Default], &[]));
+	}
+
+	#[test]
+	fn negative_room_type_excludes_without_a_positive_filter() {
+		assert!(!matches_room_type(&RoomTypeFilter::Space, &[], &[RoomTypeFilter::Space]));
+		assert!(matches_room_type(&RoomTypeFilter::Default, &[], &[RoomTypeFilter::Space]));
+	}
+
+	#[test]
+	fn negative_room_type_overrides_positive() {
+		let custom = custom_room_type();
+		assert!(!matches_room_type(&custom, slice::from_ref(&custom), slice::from_ref(&custom)));
+	}
+
+	#[test]
+	fn fresh_response_is_empty() {
+		assert!(response_is_empty(&response()));
+	}
+
+	#[test]
+	fn account_data_is_not_empty() {
+		let mut response = response();
+		response
+			.extensions
+			.account_data
+			.rooms
+			.insert(owned_room_id!("!a:example.com"), vec![
+				Raw::from_json_string("{}".to_owned()).unwrap(),
+			]);
+
+		assert!(!response_is_empty(&response));
+	}
+
+	#[test]
+	fn a_room_with_no_events_is_still_empty() {
+		let mut response = response();
+		response
+			.rooms
+			.insert(owned_room_id!("!a:example.com"), sync_events::v5::response::Room::default());
+
+		assert!(response_is_empty(&response));
+	}
+
+	#[test]
+	fn a_receipt_makes_its_room_non_empty() {
+		let room_id = room_id!("!a:example.com");
+		let mut response = response();
+		response
+			.rooms
+			.insert(room_id.to_owned(), sync_events::v5::response::Room::default());
+		response
+			.extensions
+			.receipts
+			.rooms
+			.insert(room_id.to_owned(), Raw::from_json_string("{}".to_owned()).unwrap());
+
+		assert!(!response_is_empty(&response));
+	}
+
+	#[test]
+	fn to_device_without_events_is_empty() {
+		let mut response = response();
+		response.extensions.to_device = Some(sync_events::v5::response::ToDevice::default());
+
+		assert!(response_is_empty(&response));
+	}
 }
