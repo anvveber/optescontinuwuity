@@ -45,6 +45,36 @@ argument once to invite yourslf to the admin room on startup
 - Or specify the `emergency_password` config option to allow you to temporarily
 log into the server account (`@conduit`) from a web client
 
+## Federation issues
+
+### Invites from another server are rejected with `M_INVALID_PARAM`
+
+Users on your homeserver cannot be invited from some remote servers, while
+invites sent *by* your users are accepted. The remote server reports a
+`400 M_INVALID_PARAM` from `PUT /_matrix/federation/v2/invite/...`, and your
+logs contain:
+
+```
+WARN ... invite: Rejecting invite: sending server used pre-v1.16 stripped state in invite_room_state origin=... room_id=...
+```
+
+[Matrix 1.16][spec116] requires the entries of `invite_room_state` to be full
+PDUs, formatted according to the room version, rather than the stripped state
+events used before it. Continuwuity enforces this from v26.6.1 onwards: without
+it, the room state attached to an invite cannot be verified, and a malicious
+server can fabricate it freely.
+
+Some servers have not migrated yet and still send stripped state, so their
+invites are refused. **This cannot be fixed from the Continuwuity side** — the
+sending server has to be updated. If you are the operator of the sending server,
+check whether a newer release implements this; for Synapse, this is tracked in
+[element-hq/synapse#19723][syn19723]. Issue [#1971][c1971] tracks the ecosystem
+migration for reference.
+
+[spec116]: https://spec.matrix.org/v1.16/server-server-api/#put_matrixfederationv2inviteroomideventid
+[syn19723]: https://github.com/element-hq/synapse/pull/19723
+[c1971]: https://forgejo.ellis.link/continuwuation/continuwuity/issues/1971
+
 ## DNS issues
 
 ### DNS server overload
