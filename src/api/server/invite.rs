@@ -68,6 +68,7 @@ pub(crate) async fn create_invite_route(
 		&body.invite_room_state,
 		&room_version_rules,
 		body.room_id.clone(),
+		&body.identity,
 	)
 	.await?;
 	let create_event_json = state
@@ -290,6 +291,7 @@ async fn validate_invite_state(
 	invite_state: &[RawStrippedState],
 	room_version_rules: &RoomVersionRules,
 	room_id: OwnedRoomId,
+	origin: &ServerName,
 ) -> Result<(OwnedEventId, HashMap<(StateEventType, StateKey), CanonicalJsonObject>)> {
 	trace!(?invite_state, "Raw invite state");
 	let mut invite_state_map: HashMap<(StateEventType, StateKey), _> =
@@ -299,11 +301,32 @@ async fn validate_invite_state(
 	for (idx, invite_state_event) in invite_state.iter().cloned().enumerate() {
 		trace!(%idx, ?invite_state_event, "Invite state event");
 		// Stripped state hasn't been sent over federation since v1.16.
-		let RawStrippedState::Pdu(raw_pdu) = invite_state_event else {
-			debug!(%idx, "Invite state event is not a PDU");
-			return Err!(Request(InvalidParam(
-				"PDU in invite state (index {idx}) violates the room event format"
-			)));
+		#[allow(deprecated)]
+		let raw_pdu = match invite_state_event {
+			| RawStrippedState::Pdu(raw_pdu) => raw_pdu,
+			// The sending server is still using pre-v1.16 stripped state. Say so
+			// explicitly: this error is surfaced to the inviting user by some
+			// servers, and it is otherwise indistinguishable from a malformed PDU.
+			| RawStrippedState::Stripped(_) => {
+				warn!(
+					%idx,
+					origin = %origin,
+					room_id = %room_id,
+					"Rejecting invite: sending server used pre-v1.16 stripped state in \
+					 invite_room_state"
+				);
+				return Err!(Request(InvalidParam(
+					"Entry {idx} of invite_room_state is a stripped state event. Since Matrix \
+					 1.16, entries must be full PDUs formatted according to the room version. \
+					 The sending server needs updating."
+				)));
+			},
+			| _ => {
+				debug!(%idx, "Invite state event is not a PDU");
+				return Err!(Request(InvalidParam(
+					"PDU in invite state (index {idx}) violates the room event format"
+				)));
+			},
 		};
 		let (state_event_room_id, state_event_id, state_event_json) = services
 			.rooms
