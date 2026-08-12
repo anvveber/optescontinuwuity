@@ -15,6 +15,7 @@ pub const STABLE_ROOM_VERSIONS: &[RoomVersionId] = &[
 	RoomVersionId::V10,
 	RoomVersionId::V11,
 	RoomVersionId::V12,
+	RoomVersionId::MSC4527,
 ];
 
 /// Experimental, partially supported room versions

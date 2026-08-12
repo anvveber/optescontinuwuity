@@ -364,5 +364,9 @@ async fn user_can_publish_room(
 		return Ok(true);
 	}
 
-	Ok(power_levels.user_can_send_state(user_id, StateEventType::RoomCanonicalAlias))
+	Ok(power_levels.user_can_send_state(
+		&room_version_rules.authorization,
+		user_id,
+		StateEventType::RoomCanonicalAlias,
+	))
 }

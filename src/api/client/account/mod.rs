@@ -347,14 +347,25 @@ pub async fn full_user_deactivate(
 	let mut pdu_queue: Vec<(PartialPdu, &OwnedRoomId)> = Vec::new();
 
 	for room_id in all_joined_rooms {
+		let room_version_rules = services
+			.rooms
+			.state
+			.get_room_version(room_id)
+			.await?
+			.rules()
+			.unwrap();
+
 		let room_power_levels = services
 			.rooms
 			.state_accessor
 			.get_room_power_levels(room_id)
 			.await;
 
-		let user_can_demote_self =
-			room_power_levels.user_can_change_user_power_level(user_id, user_id);
+		let user_can_demote_self = room_power_levels.user_can_change_user_power_level(
+			&room_version_rules.authorization,
+			user_id,
+			user_id,
+		);
 
 		if user_can_demote_self
 			&& let Ok(mut power_levels_content) =

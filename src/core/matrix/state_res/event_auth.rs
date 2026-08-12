@@ -12,7 +12,7 @@ use ruma::{
 		power_levels::{RoomPowerLevelsEventContent, UserPowerLevel},
 	},
 	int,
-	room_version_rules::{RoomIdFormatVersion, RoomVersionRules},
+	room_version_rules::{AuthorizationRules, RoomIdFormatVersion, RoomVersionRules},
 	serde::Raw,
 };
 use serde::Deserialize;
@@ -552,7 +552,12 @@ where
 	// If the event type's required power level is greater than the sender's
 	// power level, reject If the event has a state_key that starts with an @
 	// and does not match the sender, reject.
-	if !can_send_event(incoming_event, power_levels_event.as_ref(), sender_power_level) {
+	if !can_send_event(
+		&room_version.authorization,
+		incoming_event,
+		power_levels_event.as_ref(),
+		sender_power_level,
+	) {
 		warn!(
 			%sender,
 			event_type=?incoming_event.kind(),
@@ -1116,11 +1121,13 @@ where
 /// Does the event have the correct userId as its state_key if it's not the ""
 /// state_key.
 fn can_send_event(
+	authorization: &AuthorizationRules,
 	event: &impl Event,
 	ple: Option<&impl Event>,
 	user_level: UserPowerLevel,
 ) -> bool {
-	let event_type_power_level = get_send_level(event.event_type(), event.state_key(), ple);
+	let event_type_power_level =
+		get_send_level(authorization, event.event_type(), event.state_key(), ple);
 
 	debug!(
 		required_level = i64::from(event_type_power_level),
@@ -1414,25 +1421,38 @@ fn check_redaction(
 /// Helper function to fetch the power level needed to send an event of type
 /// `e_type` based on the rooms "m.room.power_level" event.
 fn get_send_level(
+	authorization: &AuthorizationRules,
 	e_type: &TimelineEventType,
 	state_key: Option<&str>,
 	power_lvl: Option<&impl Event>,
 ) -> Int {
-	power_lvl
-		.and_then(|ple| {
-			from_json_str::<RoomPowerLevelsEventContent>(ple.content().get())
-				.map(|content| {
-					content.events.get(e_type).copied().unwrap_or_else(|| {
-						if state_key.is_some() {
-							content.state_default
-						} else {
-							content.events_default
-						}
-					})
-				})
-				.ok()
-		})
-		.unwrap_or_else(|| if state_key.is_some() { int!(50) } else { int!(0) })
+	let Some(power_levels) = power_lvl
+		.and_then(|ple| from_json_str::<RoomPowerLevelsEventContent>(ple.content().get()).ok())
+	else {
+		return if state_key.is_some() { int!(50) } else { int!(0) };
+	};
+
+	if state_key.is_some() {
+		if authorization.use_power_levels_state {
+			power_levels
+				.state
+				.get(e_type)
+				.copied()
+				.unwrap_or(power_levels.state_default)
+		} else {
+			power_levels
+				.events
+				.get(e_type)
+				.copied()
+				.unwrap_or(power_levels.state_default)
+		}
+	} else {
+		power_levels
+			.events
+			.get(e_type)
+			.copied()
+			.unwrap_or(power_levels.events_default)
+	}
 }
 
 fn verify_third_party_invite(

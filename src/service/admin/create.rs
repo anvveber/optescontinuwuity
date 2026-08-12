@@ -117,15 +117,27 @@ pub async fn create_admin_room(services: &Services) -> Result {
 			.insert(server_user.into(), Int::MAX);
 	}
 	// Prevent common foot-shotguns
-	power_levels_content
-		.events
-		.insert(TimelineEventType::RoomTombstone, Int::MAX);
-	power_levels_content
-		.events
-		.insert(TimelineEventType::RoomEncryption, Int::MAX);
-	power_levels_content
-		.events
-		.insert(TimelineEventType::RoomCanonicalAlias, Int::MAX);
+	if room_version_rules.authorization.use_power_levels_state {
+		power_levels_content
+			.state
+			.insert(TimelineEventType::RoomTombstone, Int::MAX);
+		power_levels_content
+			.state
+			.insert(TimelineEventType::RoomEncryption, Int::MAX);
+		power_levels_content
+			.state
+			.insert(TimelineEventType::RoomCanonicalAlias, Int::MAX);
+	} else {
+		power_levels_content
+			.events
+			.insert(TimelineEventType::RoomTombstone, Int::MAX);
+		power_levels_content
+			.events
+			.insert(TimelineEventType::RoomEncryption, Int::MAX);
+		power_levels_content
+			.events
+			.insert(TimelineEventType::RoomCanonicalAlias, Int::MAX);
+	}
 	power_levels_content.invite = power_levels_content.state_default;
 
 	services

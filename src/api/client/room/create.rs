@@ -662,6 +662,12 @@ fn default_power_levels_content(
 		power_levels_content.users.remove(&creator);
 	}
 
+	let state_events = if authorization_rules.use_power_levels_state {
+		&mut power_levels_content.state
+	} else {
+		&mut power_levels_content.events
+	};
+
 	// secure proper defaults of sensitive/dangerous permissions that moderators
 	// (power level 50) should not have easy access to
 	let admin_only_events = [
@@ -674,10 +680,14 @@ fn default_power_levels_content(
 	];
 
 	for event_type in admin_only_events {
-		power_levels_content
-			.events
-			.entry(event_type)
-			.or_insert(int!(100));
+		state_events.entry(event_type).or_insert(int!(100));
+	}
+
+	// synapse does this too. clients do not expose these permissions. it
+	// prevents default users from calling public rooms, for obvious reasons.
+	if *visibility == room::Visibility::Public {
+		state_events.entry(CallInvite).or_insert(int!(50));
+		state_events.entry(CallMember).or_insert(int!(50));
 	}
 
 	// always allow users to respond (not post new) to polls. this is primarily
@@ -690,19 +700,6 @@ fn default_power_levels_content(
 		.events
 		.entry(UnstablePollResponse)
 		.or_insert(int!(0));
-
-	// synapse does this too. clients do not expose these permissions. it
-	// prevents default users from calling public rooms, for obvious reasons.
-	if *visibility == room::Visibility::Public {
-		power_levels_content
-			.events
-			.entry(CallInvite)
-			.or_insert(int!(50));
-		power_levels_content
-			.events
-			.entry(CallMember)
-			.or_insert(int!(50));
-	}
 
 	Ok(power_levels_content)
 }

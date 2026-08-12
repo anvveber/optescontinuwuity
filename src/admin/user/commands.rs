@@ -745,6 +745,15 @@ impl crate::Context<'_> {
 
 		let state_lock = self.services.rooms.state.mutex.lock(room_id.as_str()).await;
 
+		let room_version_rules = self
+			.services
+			.rooms
+			.state
+			.get_room_version(&room_id)
+			.await?
+			.rules()
+			.unwrap();
+
 		let mut room_power_levels = self
 			.services
 			.rooms
@@ -752,8 +761,11 @@ impl crate::Context<'_> {
 			.get_room_power_levels(&room_id)
 			.await;
 
-		let user_can_demote_self =
-			room_power_levels.user_can_change_user_power_level(&user_id, &user_id);
+		let user_can_demote_self = room_power_levels.user_can_change_user_power_level(
+			&room_version_rules.authorization,
+			&user_id,
+			&user_id,
+		);
 
 		if !user_can_demote_self {
 			return Err!("User is not allowed to modify their own power levels in the room.",);
