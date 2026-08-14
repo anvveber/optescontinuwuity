@@ -78,8 +78,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.prepare.outputs.metadata_labels }}
           annotations: ${{ steps.prepare.outputs.metadata_annotations }}
-          cache-from: type=gha
-          # cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE_PATH }}-buildcache:release-${{ matrix.slug }}
+          cache-to: type=registry,ref=${{ env.IMAGE_PATH }}-buildcache:release-${{ matrix.slug }},mode=max,ignore-error=true
           sbom: true
           outputs: |
             ${{ env.BUILTIN_REGISTRY_ENABLED == 'true' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PATH) || format('type=image,"name={0}",push=false', env.IMAGE_PATH) }}
@@ -166,8 +166,8 @@ jobs:
           platforms: ${{ matrix.platform }}
           labels: ${{ steps.prepare.outputs.metadata_labels }}
           annotations: ${{ steps.prepare.outputs.metadata_annotations }}
-          cache-from: type=gha
-          # cache-to: type=gha,mode=max
+          cache-from: type=registry,ref=${{ env.IMAGE_PATH }}-buildcache:maxperf-${{ matrix.slug }}
+          cache-to: type=registry,ref=${{ env.IMAGE_PATH }}-buildcache:maxperf-${{ matrix.slug }},mode=max,ignore-error=true
           sbom: true
           outputs: |
             ${{ env.BUILTIN_REGISTRY_ENABLED == 'true' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PATH) || format('type=image,"name={0}",push=false', env.IMAGE_PATH) }}

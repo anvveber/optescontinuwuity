@@ -57,6 +57,8 @@ ENV CARGO_SBOM_VERSION=0.9.1
 ENV LDDTREE_VERSION=0.5.0
 # renovate: datasource=crate depName=timelord-cli
 ENV TIMELORD_VERSION=3.0.1
+# renovate: datasource=crate depName=cargo-chef
+ENV CARGO_CHEF_VERSION=0.1.78
 
 # Install unpackaged tools
 RUN <<EOF
@@ -65,6 +67,7 @@ RUN <<EOF
     cargo binstall --no-confirm cargo-sbom --version $CARGO_SBOM_VERSION
     cargo binstall --no-confirm lddtree --version $LDDTREE_VERSION
     cargo binstall --no-confirm timelord-cli --version $TIMELORD_VERSION
+    cargo binstall --no-confirm cargo-chef --version $CARGO_CHEF_VERSION
 EOF
 
 # Set up xx (cross-compilation scripts)
@@ -133,7 +136,34 @@ EOF
 # Prepare output directories
 RUN mkdir /out
 
+FROM toolchain AS planner
+
+COPY . .
+RUN cargo chef prepare --recipe-path recipe.json
+
 FROM toolchain AS builder
+
+ARG TARGETPLATFORM
+ARG RUST_PROFILE=release
+ARG CARGO_FEATURES="default"
+
+COPY --from=planner /app/recipe.json recipe.json
+RUN --mount=type=cache,target=/usr/local/cargo/registry \
+    --mount=type=cache,target=/usr/local/cargo/git/db \
+    bash <<'EOF'
+    set -euo pipefail
+    set -o allexport
+    . /etc/environment
+
+    if echo "${CARGO_FEATURES}" | grep -q "http3"; then
+        export RUSTFLAGS="${RUSTFLAGS} --cfg reqwest_unstable"
+    fi
+
+    cargo chef cook --locked --profile "${RUST_PROFILE}" \
+        --target "$(xx-cargo --print-target-triple)" \
+        --no-default-features --features "${CARGO_FEATURES}" \
+        --package conduwuit --recipe-path recipe.json
+EOF
 
 
 # Get source
@@ -143,8 +173,6 @@ COPY . .
 RUN --mount=type=cache,target=/timelord/ \
     echo "Restoring timestamps from timelord cache"; \
     timelord sync --source-dir /app --cache-dir /timelord;
-
-ARG TARGETPLATFORM
 
 # Verify environment configuration
 RUN xx-cargo --print-target-triple
@@ -163,13 +191,9 @@ ENV GIT_REMOTE_COMMIT_URL=$GIT_REMOTE_COMMIT_URL
 ENV CONDUWUIT_VERSION_EXTRA=$CONDUWUIT_VERSION_EXTRA
 ENV CONTINUWUITY_VERSION_EXTRA=$CONTINUWUITY_VERSION_EXTRA
 
-ARG RUST_PROFILE=release
-ARG CARGO_FEATURES="default"
-
 # Build the binary
 RUN --mount=type=cache,target=/usr/local/cargo/registry \
     --mount=type=cache,target=/usr/local/cargo/git/db \
-    --mount=type=cache,target=/app/target,id=continuwuity-cargo-target-${TARGET_CPU}-${TARGETPLATFORM}-${RUST_PROFILE} \
     bash <<'EOF'
     set -euo pipefail
     set -o allexport
