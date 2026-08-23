@@ -746,6 +746,21 @@ pub struct Config {
 	#[serde(default = "default_pusher_idle_timeout")]
 	pub pusher_idle_timeout: u64,
 
+	/// Include the event type in push notifications sent for HTTP pushers
+	/// registered with the "event_id_only" format.
+	///
+	/// By default such notifications only carry the event ID, the room ID and
+	/// the unread counts: the push gateway learns nothing about the event
+	/// itself. Enabling this adds only the event's `type` (e.g.
+	/// "m.call.invite"), which lets a push gateway distinguish an incoming
+	/// call from a message without seeing any content, sender or display
+	/// name. This is required by VoIP push flows such as iOS PushKit, where
+	/// every push must be reported to CallKit immediately.
+	///
+	/// default: false
+	#[serde(default)]
+	pub pusher_event_id_only_include_event_type: bool,
+
 	/// Maximum time to receive a request from a client (seconds).
 	///
 	/// default: 75

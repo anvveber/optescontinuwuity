@@ -1,0 +1,1 @@
+Added the `pusher_event_id_only_include_event_type` config option to include the event type in push notifications for HTTP pushers registered with the `event_id_only` format, so a push gateway can tell an incoming call apart from a message without seeing any content, sender or display name.

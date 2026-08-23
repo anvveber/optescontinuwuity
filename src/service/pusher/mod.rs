@@ -472,6 +472,14 @@ impl Service {
 					notify.counts = NotificationCounts::default();
 				}
 
+				if event_id_only && self.services.config.pusher_event_id_only_include_event_type {
+					// Only the event type is metadata: no content, no sender, no
+					// display name. This lets a push gateway tell an incoming
+					// call apart from a message (e.g. iOS PushKit, where every
+					// push must be reported to CallKit immediately).
+					notify.event_type = Some(event.kind().to_owned());
+				}
+
 				if !event_id_only {
 					if *event.kind() == TimelineEventType::RoomEncrypted
 						|| tweaks.iter().any(|t| {
