@@ -261,27 +261,25 @@ fn get_dns_resolver(server: &Arc<Server>) -> Result<Arc<TokioResolver>> {
 	let (sys_conf, mut opts) = hickory_resolver::system_conf::read_system_conf()
 		.map_err(|e| err!(error!("Failed to configure DNS resolver from system: {e}")))?;
 
-	let mut conf = hickory_resolver::config::ResolverConfig::default();
+	let name_servers = sys_conf
+		.name_servers()
+		.iter()
+		.cloned()
+		.map(|mut ns| {
+			if config.query_over_tcp_only {
+				ns.connections = vec![ConnectionConfig::tcp()];
+			}
 
-	if let Some(domain) = sys_conf.domain() {
-		conf.set_domain(domain.clone());
-	}
+			ns.trust_negative_responses = !config.query_all_nameservers;
+			ns
+		})
+		.collect();
 
-	for sys_conf in sys_conf.search() {
-		conf.add_search(sys_conf.clone());
-	}
-
-	for sys_conf in sys_conf.name_servers() {
-		let mut ns = sys_conf.clone();
-
-		if config.query_over_tcp_only {
-			ns.connections = vec![ConnectionConfig::tcp()];
-		}
-
-		ns.trust_negative_responses = !config.query_all_nameservers;
-
-		conf.add_name_server(ns);
-	}
+	let conf = hickory_resolver::config::ResolverConfig::from_parts(
+		sys_conf.domain.clone(),
+		sys_conf.search,
+		name_servers,
+	);
 
 	opts.cache_size = u64::from(config.dns_cache_entries);
 	opts.preserve_intermediates = true;
