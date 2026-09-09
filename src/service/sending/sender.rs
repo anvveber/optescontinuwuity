@@ -821,7 +821,7 @@ impl Service {
 			| SendingEvent::Flush => None,
 		}));
 
-		let txn_id = unique_txn_id(&txn_hash);
+		let txn_id = unique_txn_id(txn_hash);
 
 		let mut request = ruma::api::appservice::event::push_events::v1::Request::new(
 			txn_id.as_str().into(),
@@ -951,7 +951,7 @@ impl Service {
 			.chain(edus.iter().map(|raw| raw.json().get().as_bytes()));
 
 		let txn_hash = calculate_hash(preimage);
-		let txn_id = unique_txn_id(&txn_hash);
+		let txn_id = unique_txn_id(txn_hash);
 		let mut request = send_transaction_message::v1::Request::new(
 			txn_id.as_str().into(),
 			self.server.name.clone(),
