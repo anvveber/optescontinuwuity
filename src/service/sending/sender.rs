@@ -821,10 +821,12 @@ impl Service {
 			| SendingEvent::Flush => None,
 		}));
 
-		let txn_id = &*URL_SAFE_NO_PAD.encode(txn_hash);
+		let txn_id = unique_txn_id(&txn_hash);
 
-		let mut request =
-			ruma::api::appservice::event::push_events::v1::Request::new(txn_id.into(), pdu_jsons);
+		let mut request = ruma::api::appservice::event::push_events::v1::Request::new(
+			txn_id.as_str().into(),
+			pdu_jsons,
+		);
 		request.ephemeral = edu_jsons;
 		request.to_device = Vec::new(); // TODO
 
@@ -942,17 +944,18 @@ impl Service {
 			return Ok(Destination::Federation(server));
 		}
 
+		let now = MilliSecondsSinceUnixEpoch::now();
 		let preimage = pdus
 			.iter()
 			.map(|raw| raw.get().as_bytes())
 			.chain(edus.iter().map(|raw| raw.json().get().as_bytes()));
 
 		let txn_hash = calculate_hash(preimage);
-		let txn_id = &*URL_SAFE_NO_PAD.encode(txn_hash);
+		let txn_id = unique_txn_id(&txn_hash);
 		let mut request = send_transaction_message::v1::Request::new(
-			txn_id.into(),
+			txn_id.as_str().into(),
 			self.server.name.clone(),
-			MilliSecondsSinceUnixEpoch::now(),
+			now,
 		);
 		request.pdus = pdus;
 		request.edus = edus;
@@ -1020,4 +1023,16 @@ impl Service {
 			to_raw_value(&pdu_json).expect("CanonicalJson is valid serde_json::Value"),
 		)
 	}
+}
+
+/// Federation/appservice transaction ids must be unique even when the payload
+/// is identical. A content hash collides for typing EDUs (`room_id` +
+/// `user_id` + `typing` bool; no timeout). Remotes cache txn ids and skip
+/// re-applying `m.typing`, so clients see typing once and then never again.
+fn unique_txn_id(content_hash: impl AsRef<[u8]>) -> String {
+	format!(
+		"{}-{}",
+		URL_SAFE_NO_PAD.encode(content_hash),
+		u64::from(MilliSecondsSinceUnixEpoch::now().get()),
+	)
 }
