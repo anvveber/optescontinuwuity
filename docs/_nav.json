@@ -38,5 +38,9 @@
     {
         "text": "Security",
         "link": "/security"
+    },
+    {
+        "text": "Changelog",
+        "link": "/changelog"
     }
 ]

@@ -39,7 +39,15 @@
         "name": "guides",
         "label": "Guides"
     },
+    {
+        "type": "divider"
+    },
     "security",
+    {
+        "type": "file",
+        "name": "changelog",
+        "label": "Changelog"
+    },
     {
         "type": "dir-section-header",
         "name": "community",
