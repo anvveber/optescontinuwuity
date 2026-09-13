@@ -102,4 +102,47 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
 
 ## Troubleshooting
 
+### Push notifications not making sounds/not being sent
+
+This is likely an issue with one's _push rules_, which can be configured within the Matrix clients. Continuwuity also provides an `!admin users reset-push-rules` command, which restores the rules to the default of notifying for every message.
+
+Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in the development room and open an issue.
+
+### Various "Could not send request to pusher" log entries
+
+If you find spurious log entries like this in your Continuwuity deployment:
+
+```txt
+WARN push{user_id="@user:example.com" pushkey="very-long-string-of-letters" events=1}:send_push_notice:send_notice:send_request: conduwuit_service::pusher: Could not send request to pusher https//push.example.com: error sending request for url (https://push.example.com/_matrix/push/v1/notify)
+```
+
+Then, your server is most likely sending push requests to too many non-functional targets.
+
+Active Matrix clients periodically renew their pushkeys as the old ones expire, and consequently register them against Continuwuity. As these pushers build up over time, the homeserver will keep sending more requests to an increasing number of "dead" push endpoints. This results in the errors seen above, and can heavily impact performance if not mitigated.
+
+To work around this issue, the following actions can be made:
+
+- Delete all pushers of a user with the `!admin query pusher delete-all-user` command. This command doesn't break push by a lot, as active clients usually renew their pushers the next time they log on.
+- Alternatively, delete one's own pushers from a client that supports doing so. Currently this only includes FluffyChat and Element Classic/SchildiChat Legacy.
+
+While clients are supposed to automatically delete old pushers under their own control, this behaviour has not been observed extensively. A further discussion of this issue can be found in [#2242][issue-2242].
+
+[issue-2242]: https://forgejo.ellis.link/continuwuation/continuwuity/issues/2242
+
 ## Related Documentation
+
+Specifications:
+
+- [Matrix specification for the Push Gateway API][spec-push-gateway-api]
+- [Matrix Client-Server API for push notifications][spec-c-s-push-notifications]
+- [UnifiedPush][unifiedpush-spec]
+
+Future specifications:
+
+- [MSC4174: Web push][MSC4174]
+- [Web Push RFCs][webpush-rfcs]
+
+[webpush-rfcs]: https://datatracker.ietf.org/wg/webpush/documents/
+[spec-push-gateway-api]: https://spec.matrix.org/latest/push-gateway-api/
+[spec-c-s-push-notifications]: https://spec.matrix.org/latest/client-server-api/#push-notifications
+[unifiedpush-spec]: https://unifiedpush.org/developers/spec/definitions/
