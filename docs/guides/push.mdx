@@ -48,6 +48,58 @@ Therefore, Continuwuity's role within this system is to keep track of client-reg
 
 ## UnifiedPush
 
+[UnifiedPush][unifiedpush] is an open and decentralised push system that is commonly used on Android as an alternative to Google's proprietary Firebase backend. It generally works well with Continuwuity and is supported by a wide range of Android Matrix clients.
+
+[unifiedpush]: https://unifiedpush.org
+
+### ntfy
+
+[ntfy][ntfy] is an easy-to-install push application, and has plenty of publicly available instances. Its server can also be selfhosted and includes an embedded Matrix push gateway.
+
+Some tutorials on selfhosting ntfy can be found below:
+
+- [Element's tutorial on Unified Push and ntfy][element-ntfy]
+- [Official ntfy self-hosting tutorial][official-ntfy-selfhosting]
+
+:::warning Avoid using ntfy.sh
+Avoid using the `https://ntfy.sh` push server, which is configured as a default in the ntfy app. This server is known to ratelimit Matrix notifications aggressively.
+:::
+
+[ntfy]: https://ntfy.sh
+[element-ntfy]: https://docs.element.io/latest/element-support/element-androidios-client-settings/using-unified-push-and-ntfy-for-push-notifications/
+[official-ntfy-selfhosting]: https://docs.ntfy.sh/install/
+
+### Other UnifiedPush distributors
+
+To find a list of UnifiedPush distributors, visit this [page][unifiedpush-distributors].
+
+[unifiedpush-distributors]: https://unifiedpush.org/users/distributors/
+
+Community tutorials for selfhosting some of these UnifiedPush stacks can be found below. Unless stated otherwise, they are all tested against Element X Android as the client.
+
+- [Self-hosting Sunup for Matrix and UnifiedPush][kimiblock-selfhosting-sunup], by Kimiblock.
+    - Push gateway: [common-proxies]
+    - Push server: [autopush-rs]
+    - Push app: [Sunup][sunup]
+- [Matrix notifications on Android, powered by XMPP][stratself-xmpp], by stratself.
+    - Push gateway: [common-proxies]
+    - Push server: [ejabberd's mod_unified_push]
+    - Push app: [Conversations] (and forks)
+- [Element X push notifications via Conversations][alfredolin-xmpp], by Alfredo Lin.
+    - Push gateway: [common-proxies]
+    - Push server: [Prosody's mod_unified_push]
+    - Push app: [Conversations]
+
+[kimiblock-selfhosting-sunup]: https://blog.kimiblock.top/2025/09/11/selfhosting-sunup/
+[stratself-xmpp]: https://muoi.me/~stratself/articles/matrix-notifs-xmpp
+[alfredolin-xmpp]: https://alfredolin.eu/blog/2026/07/24/element-x-push-notifications-via-conversations/
+[common-proxies]: https://codeberg.org/UnifiedPush/common-proxies/
+[sunup]: https://codeberg.org/Sunup/android
+[autopush-rs]: https://github.com/mozilla-services/autopush-rs
+[ejabberd's mod_unified_push]: https://github.com/processone/ejabberd-contrib/tree/master/mod_unified_push
+[Prosody's mod_unified_push]: https://modules.prosody.im/mod_unified_push
+[Conversations]: https://conversations.im
+
 ## Troubleshooting
 
 ## Related Documentation
