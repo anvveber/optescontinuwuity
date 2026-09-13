@@ -154,6 +154,12 @@ pub(super) static MAPS: &[Descriptor] = &[
 		..descriptor::SEQUENTIAL
 	},
 	Descriptor {
+		name: "pduid_redactionpending",
+		key_size_hint: Some(16),
+		val_size_hint: Some(8),
+		..descriptor::SEQUENTIAL_SMALL
+	},
+	Descriptor {
 		name: "publicroomids",
 		..descriptor::RANDOM_SMALL
 	},

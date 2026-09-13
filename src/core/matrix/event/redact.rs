@@ -52,6 +52,10 @@ pub(super) fn is_redacted<E: Event>(event: &E) -> bool {
 		return false;
 	};
 
+	if !unsigned.get().contains("redacted_because") {
+		return false;
+	}
+
 	let Ok(unsigned) = ExtractRedactedBecause::deserialize(unsigned) else {
 		return false;
 	};

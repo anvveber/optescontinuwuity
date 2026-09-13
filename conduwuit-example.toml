@@ -1481,6 +1481,11 @@
 #
 #allow_sticky_events = false
 
+# How long to keep the original content of a redacted event on disk, in
+# seconds. Clients and other servers always receive the redacted event.
+#
+#redaction_retention_secs = 0
+
 # Maximum time federation user can indicate typing.
 #
 #typing_federation_timeout_s = 30

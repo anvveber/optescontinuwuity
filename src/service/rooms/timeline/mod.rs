@@ -6,25 +6,36 @@ mod data;
 mod helpers;
 mod redact;
 
-use std::{fmt::Write, sync::Arc};
+use std::{
+	fmt::Write,
+	sync::{
+		Arc,
+		atomic::{AtomicBool, Ordering},
+	},
+	time::Duration,
+};
 
 use async_trait::async_trait;
 pub use conduwuit_core::matrix::pdu::{PduId, RawPduId};
 use conduwuit_core::{
-	Result, Server, at, err,
+	Result, Server, at, debug, err, error,
 	matrix::{
 		event::Event,
 		pdu::{PduCount, PduEvent},
 	},
-	utils::{MutexMap, MutexMapGuard, future::TryExtExt, stream::TryIgnore},
+	utils::{self, MutexMap, MutexMapGuard, future::TryExtExt, stream::TryIgnore},
 	warn,
 };
-use futures::{Future, Stream, TryStreamExt, pin_mut};
+use futures::{Future, Stream, StreamExt, TryStreamExt, pin_mut};
 use ruma::{
-	CanonicalJsonObject, EventId, OwnedEventId, OwnedRoomId, RoomId,
-	events::room::encrypted::Relation,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedRoomId, RoomId,
+	events::{TimelineEventType, room::encrypted::Relation},
 };
 use serde::Deserialize;
+use tokio::{
+	sync::Notify,
+	time::{MissedTickBehavior, interval},
+};
 
 use self::data::Data;
 pub use self::{create::pdu_fits, data::PdusIterItem};
@@ -56,6 +67,8 @@ struct ExtractBody {
 }
 
 pub struct Service {
+	interrupt: Notify,
+	pending_redactions: AtomicBool,
 	services: Services,
 	db: Data,
 	pub mutex_insert: RoomMutexMap,
@@ -86,6 +99,8 @@ struct Services {
 	user: Dep<rooms::user::Service>,
 	users: Dep<users::Service>,
 }
+
+const SWEEP_INTERVAL_SECS: u64 = 60 * 60;
 
 type RoomMutexMap = MutexMap<OwnedRoomId, ()>;
 pub type RoomMutexGuard = MutexMapGuard<OwnedRoomId, ()>;
@@ -124,8 +139,31 @@ impl crate::Service for Service {
 			},
 			db: Data::new(&args),
 			mutex_insert: RoomMutexMap::new(),
+			interrupt: Notify::new(),
+			pending_redactions: AtomicBool::new(true),
 		}))
 	}
+
+	#[tracing::instrument(skip_all, name = "redaction_retention", level = "debug")]
+	async fn worker(self: Arc<Self>) -> Result<()> {
+		let mut i = interval(Duration::from_secs(SWEEP_INTERVAL_SECS));
+		i.set_missed_tick_behavior(MissedTickBehavior::Delay);
+		loop {
+			let applied = self.apply_expired_redactions().await;
+			if applied > 0 {
+				debug!("Applied {applied} expired redactions");
+			}
+
+			tokio::select! {
+				() = self.interrupt.notified() => break,
+				_ = i.tick() => (),
+			}
+		}
+
+		Ok(())
+	}
+
+	fn interrupt(&self) { self.interrupt.notify_waiters(); }
 
 	async fn memory_usage(&self, out: &mut (dyn Write + Send)) -> Result {
 		let mutex_insert = self.mutex_insert.len();
@@ -155,7 +193,10 @@ impl Service {
 
 	#[tracing::instrument(skip(self), level = "debug")]
 	pub async fn latest_pdu_in_room(&self, room_id: &RoomId) -> Result<impl Event> {
-		self.db.latest_pdu_in_room(room_id).await
+		let mut pdu = self.db.latest_pdu_in_room(room_id).await?;
+		self.redact_recorded(&mut pdu).await?;
+
+		Ok(pdu)
 	}
 
 	#[tracing::instrument(skip(self), level = "debug")]
@@ -168,6 +209,103 @@ impl Service {
 		self.db.room_activity(room_id).await
 	}
 
+	async fn apply_expired_redactions(&self) -> usize {
+		let retention = self.services.config.redaction_retention_secs;
+		let cutoff =
+			utils::millis_since_unix_epoch().saturating_sub(retention.saturating_mul(1000));
+
+		let pending: Vec<_> = self.db.pending_redactions().collect().await;
+
+		let mut applied: usize = 0;
+		let mut remaining: usize = 0;
+		for (pdu_id, at) in pending {
+			if at > cutoff {
+				remaining = remaining.saturating_add(1);
+				continue;
+			}
+
+			match self.apply_redaction(&pdu_id).await {
+				| Ok(()) => applied = applied.saturating_add(1),
+				| Err(e) => {
+					remaining = remaining.saturating_add(1);
+					error!(?pdu_id, "Failed to apply recorded redaction: {e}");
+				},
+			}
+		}
+
+		self.pending_redactions
+			.store(remaining > 0, Ordering::Relaxed);
+
+		applied
+	}
+
+	fn mark_redaction_pending(&self, pdu_id: &RawPduId) {
+		self.db.mark_redaction_pending(pdu_id);
+		self.pending_redactions.store(true, Ordering::Relaxed);
+	}
+
+	async fn apply_redaction(&self, pdu_id: &RawPduId) -> Result {
+		let mut pdu = self.db.get_pdu_from_id(pdu_id).await?;
+		let room_version_id = self
+			.services
+			.state
+			.get_room_version(&pdu.room_id_or_hash())
+			.await?;
+
+		pdu.apply_recorded_redaction(&room_version_id)?;
+
+		let obj = utils::to_canonical_object(&pdu)?;
+		self.db.replace_pdu(pdu_id, &obj).await?;
+		self.db.remove_redaction_pending(pdu_id);
+
+		Ok(())
+	}
+
+	fn redact_recorded<'a>(
+		&'a self,
+		pdu: &'a mut PduEvent,
+	) -> impl Future<Output = Result> + Send + 'a {
+		// A create event is never redacted, and resolving the room version reads one.
+		let pending = self.pending_redactions.load(Ordering::Relaxed)
+			&& *pdu.kind() != TimelineEventType::RoomCreate
+			&& pdu.is_redacted();
+
+		async move {
+			if !pending {
+				return Ok(());
+			}
+
+			// Boxed: resolving the room version comes back through here.
+			Box::pin(self.redact_now(pdu)).await
+		}
+	}
+
+	async fn redact_now(&self, pdu: &mut PduEvent) -> Result {
+		let room_version_id = self
+			.services
+			.state
+			.get_room_version(&pdu.room_id_or_hash())
+			.await?;
+
+		pdu.apply_recorded_redaction(&room_version_id)
+	}
+
+	async fn redact_recorded_json(&self, json: &mut CanonicalJsonObject) -> Result {
+		let recorded = self.pending_redactions.load(Ordering::Relaxed)
+			&& matches!(json.get("unsigned"), Some(CanonicalJsonValue::Object(unsigned))
+				if unsigned.contains_key("redacted_because"));
+
+		if !recorded {
+			return Ok(());
+		}
+
+		let mut pdu: PduEvent = serde_json::from_value(serde_json::to_value(&*json)?)?;
+		self.redact_recorded(&mut pdu).await?;
+		*json = utils::to_canonical_object(&pdu)?;
+
+		Ok(())
+	}
+
 	/// Returns the `count` of this pdu's id.
 	pub async fn get_pdu_count(&self, event_id: &EventId) -> Result<PduCount> {
 		self.db.get_pdu_count(event_id).await
@@ -175,16 +313,21 @@ impl Service {
 
 	/// Returns the json of a pdu.
 	pub async fn get_pdu_json(&self, event_id: &EventId) -> Result<CanonicalJsonObject> {
-		self.db.get_pdu_json(event_id).await
+		let mut json = self.db.get_pdu_json(event_id).await?;
+		self.redact_recorded_json(&mut json).await?;
+
+		Ok(json)
 	}
 
 	/// Returns the json of a pdu.
-	#[inline]
 	pub async fn get_non_outlier_pdu_json(
 		&self,
 		event_id: &EventId,
 	) -> Result<CanonicalJsonObject> {
-		self.db.get_non_outlier_pdu_json(event_id).await
+		let mut json = self.db.get_non_outlier_pdu_json(event_id).await?;
+		self.redact_recorded_json(&mut json).await?;
+
+		Ok(json)
 	}
 
 	pub async fn non_outlier_pdu_exists(&self, event_id: &EventId) -> bool {
@@ -198,31 +341,39 @@ impl Service {
 	}
 
 	/// Returns the pdu.
-	#[inline]
 	pub async fn get_non_outlier_pdu(&self, event_id: &EventId) -> Result<PduEvent> {
-		self.db.get_non_outlier_pdu(event_id).await
+		let mut pdu = self.db.get_non_outlier_pdu(event_id).await?;
+		self.redact_recorded(&mut pdu).await?;
+
+		Ok(pdu)
 	}
 
 	/// Returns the pdu.
 	///
 	/// Checks the `eventid_outlierpdu` Tree if not found in the timeline.
-	#[inline]
 	pub async fn get_pdu(&self, event_id: &EventId) -> Result<PduEvent> {
-		self.db.get_pdu(event_id).await
+		let mut pdu = self.db.get_pdu(event_id).await?;
+		self.redact_recorded(&mut pdu).await?;
+
+		Ok(pdu)
 	}
 
 	/// Returns the pdu.
 	///
 	/// This does __NOT__ check the outliers `Tree`.
-	#[inline]
 	pub async fn get_pdu_from_id(&self, pdu_id: &RawPduId) -> Result<PduEvent> {
-		self.db.get_pdu_from_id(pdu_id).await
+		let mut pdu = self.db.get_pdu_from_id(pdu_id).await?;
+		self.redact_recorded(&mut pdu).await?;
+
+		Ok(pdu)
 	}
 
 	/// Returns the pdu as a `BTreeMap<String, CanonicalJsonValue>`.
-	#[inline]
 	pub async fn get_pdu_json_from_id(&self, pdu_id: &RawPduId) -> Result<CanonicalJsonObject> {
-		self.db.get_pdu_json_from_id(pdu_id).await
+		let mut json = self.db.get_pdu_json_from_id(pdu_id).await?;
+		self.redact_recorded_json(&mut json).await?;
+
+		Ok(json)
 	}
 
 	/// Checks if pdu exists
@@ -261,6 +412,7 @@ impl Service {
 	) -> impl Stream<Item = Result<PdusIterItem>> + Send + 'a {
 		self.db
 			.pdus_rev(room_id, until.unwrap_or_else(PduCount::max))
+			.and_then(move |item| self.redact_recorded_item(item))
 	}
 
 	/// Forward iteration starting after `from`.
@@ -270,6 +422,15 @@ impl Service {
 		room_id: &'a RoomId,
 		from: Option<PduCount>,
 	) -> impl Stream<Item = Result<PdusIterItem>> + Send + 'a {
-		self.db.pdus(room_id, from.unwrap_or_else(PduCount::min))
+		self.db
+			.pdus(room_id, from.unwrap_or_else(PduCount::min))
+			.and_then(move |item| self.redact_recorded_item(item))
+	}
+
+	async fn redact_recorded_item(&self, item: PdusIterItem) -> Result<PdusIterItem> {
+		let (count, mut pdu) = item;
+		self.redact_recorded(&mut pdu).await?;
+
+		Ok((count, pdu))
 	}
 }

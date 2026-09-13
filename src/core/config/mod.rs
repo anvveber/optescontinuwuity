@@ -1742,6 +1742,13 @@ pub struct Config {
 	#[serde(default)]
 	pub allow_sticky_events: bool,
 
+	/// How long to keep the original content of a redacted event on disk, in
+	/// seconds. Clients and other servers always receive the redacted event.
+	///
+	/// default: 0
+	#[serde(default)]
+	pub redaction_retention_secs: u64,
+
 	/// Maximum time federation user can indicate typing.
 	///
 	/// default: 30

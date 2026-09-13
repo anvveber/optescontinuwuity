@@ -3,7 +3,10 @@ use std::sync::Arc;
 use conduwuit::{
 	Err, PduCount, PduEvent, Result, at, err,
 	result::NotFound,
-	utils::{self, stream::TryReadyExt},
+	utils::{
+		self,
+		stream::{ReadyExt, TryIgnore, TryReadyExt},
+	},
 };
 use database::{Database, Deserialized, Json, KeyVal, Map};
 use futures::{FutureExt, Stream, TryFutureExt, TryStreamExt, future::select_ok, pin_mut};
@@ -16,6 +19,7 @@ pub(super) struct Data {
 	eventid_outlierpdu: Arc<Map>,
 	eventid_pduid: Arc<Map>,
 	pduid_pdu: Arc<Map>,
+	pduid_redactionpending: Arc<Map>,
 	roomid_lasttimelinecount: Arc<Map>,
 	userroomid_highlightcount: Arc<Map>,
 	userroomid_notificationcount: Arc<Map>,
@@ -36,6 +40,7 @@ impl Data {
 			eventid_outlierpdu: db["eventid_outlierpdu"].clone(),
 			eventid_pduid: db["eventid_pduid"].clone(),
 			pduid_pdu: db["pduid_pdu"].clone(),
+			pduid_redactionpending: db["pduid_redactionpending"].clone(),
 			roomid_lasttimelinecount: db["roomid_lasttimelinecount"].clone(),
 			userroomid_highlightcount: db["userroomid_highlightcount"].clone(),
 			userroomid_notificationcount: db["userroomid_notificationcount"].clone(),
@@ -232,6 +237,26 @@ impl Data {
 		self.pduid_pdu.raw_put(pdu_id, Json(pdu_json));
 
 		Ok(())
+	}
+
+	pub(super) fn mark_redaction_pending(&self, pdu_id: &RawPduId) {
+		self.pduid_redactionpending
+			.insert(pdu_id, utils::millis_since_unix_epoch().to_be_bytes());
+	}
+
+	pub(super) fn remove_redaction_pending(&self, pdu_id: &RawPduId) {
+		self.pduid_redactionpending.remove(pdu_id);
+	}
+
+	pub(super) fn pending_redactions(&self) -> impl Stream<Item = (RawPduId, u64)> + Send + '_ {
+		self.pduid_redactionpending
+			.raw_stream()
+			.ignore_err()
+			.ready_filter_map(|(key, val)| {
+				let at = val.try_into().ok().map(u64::from_be_bytes)?;
+
+				Some((RawPduId::from(key), at))
+			})
 	}
 
 	/// Returns an iterator over all events and their tokens in a room that

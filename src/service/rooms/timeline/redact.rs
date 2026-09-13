@@ -24,9 +24,9 @@ impl super::Service {
 		};
 
 		let mut pdu = self
+			.db
 			.get_pdu_from_id(&pdu_id)
 			.await
-			.map(Event::into_pdu)
 			.map_err(|e| {
 				err!(Database(error!(?pdu_id, %event_id, ?e, "PDU ID points to invalid PDU.")))
 			})?;
@@ -39,18 +39,30 @@ impl super::Service {
 			}
 		}
 
-		let room_version_id = self
-			.services
-			.state
-			.get_room_version(&pdu.room_id_or_hash())
-			.await?;
+		let retained = self.services.config.redaction_retention_secs > 0;
 
-		pdu.redact(&room_version_id, Some(reason.event_id()))?;
+		if retained {
+			pdu.mark_redacted(&reason.to_value());
+		} else {
+			let room_version_id = self
+				.services
+				.state
+				.get_room_version(&pdu.room_id_or_hash())
+				.await?;
+
+			pdu.redact(&room_version_id, Some(reason.event_id()))?;
+		}
 
 		let obj = utils::to_canonical_object(&pdu).map_err(|e| {
 			err!(Database(error!(%event_id, ?e, "Failed to convert PDU to canonical JSON")))
 		})?;
 
-		self.replace_pdu(&pdu_id, &obj).await
+		self.replace_pdu(&pdu_id, &obj).await?;
+
+		if retained {
+			self.mark_redaction_pending(&pdu_id);
+		}
+
+		Ok(())
 	}
 }
