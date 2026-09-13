@@ -1,6 +1,50 @@
+import { Tab, Tabs } from '@rspress/core/theme';
+
 # Push notifications
 
+Matrix clients receive notifications in the following ways:
+
+- **In-band notifications**, which are retrieved when the client actively syncs with the server.
+- **Push notifications**, which are posted by the server via an external push service to the client. This is commonly used for mobile devices to receive out-of-band notifications.
+
+This page is concerned with the latter use case.
+
 ## Overview
+
+The push system works as follows:
+
+<Tabs groupId="push-ops">
+<Tab label="Registration">
+<img src="./push-registration.webp"
+    alt="Diagram showing the push registration flow"
+    style= {{height:300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
+/>
+
+_([excalidraw file of the diagrams](./push-notifications.excalidraw))_
+
+A client registers a pusher with Continuwuity, bringing its own pushkey and push gateway URL.
+
+- The pushkey is a unique target URL, provided by the push backend that the client hooks up to.
+- The [push gateway][spec-push-gateway-api] URL is usually pre-configured by the app. However, some clients (such as Element X) attempts to detect a push gateway on the _same URL as the push provider_ and use it, before falling back to a hardcoded one.
+
+</Tab>
+
+<Tab label="Operation">
+<img src="./push-operation.webp"
+    alt="Diagram showing the push operation"
+    style={{height:300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
+/>
+
+_([excalidraw file of the diagrams](./push-notifications.excalidraw))_
+
+Continuwuity pushes messages to the push gateway, which then converts it into a suitable format and forwards it to the push provider server and then the push app. This push app then wakes up the client to fetch new messages from Continuwuity.
+
+Finally, the client calculates, against a set of _push rules_, to determine whether the fetched message should be notified to users or not.
+</Tab>
+
+</Tabs>
+
+Therefore, Continuwuity's role within this system is to keep track of client-registered pushers and send relevant payloads via their configured push gateway. To view and manage these pushers, use the [`!admin query pusher`](../reference/admin/query.md#admin-query-pusher) set of commands.
 
 ## UnifiedPush
 
