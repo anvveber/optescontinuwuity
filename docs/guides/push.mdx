@@ -64,7 +64,12 @@ Continuwuity is working on a Web Push implementation following the works of [MSC
 
 [UnifiedPush][unifiedpush] is a common, open notifications system supported by many Matrix clients on Android. Using the same push gateway mechanism, it requires no homeserver-specific configuration. Below are notes for some known UnifiedPush distributors.
 
+:::note UP-Example
+The [UP-Example] app can be used to test and debug your UnifiedPush installation
+:::
+
 [unifiedpush]: https://unifiedpush.org
+[UP-Example]: https://codeberg.org/UnifiedPush/android-example
 
 ### ntfy
 
@@ -103,6 +108,9 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
     - Push gateway: [common-proxies]
     - Push server: [Prosody's mod_unified_push]
     - Push app: [Conversations]
+- Nextcloud's NextPush flow, which uses the following stack:
+    - Push server + push gateway: [uppush] (see selfhosting guidance here)
+    - Push app: [NextPush Android]
 
 [kimiblock-selfhosting-sunup]: https://blog.kimiblock.top/2025/09/11/selfhosting-sunup/
 [stratself-xmpp]: https://muoi.me/~stratself/articles/matrix-notifs-xmpp
@@ -113,6 +121,8 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
 [ejabberd's mod_unified_push]: https://github.com/processone/ejabberd-contrib/tree/master/mod_unified_push
 [Prosody's mod_unified_push]: https://modules.prosody.im/mod_unified_push
 [Conversations]: https://conversations.im
+[uppush]: https://codeberg.org/NextPush/uppush
+[NextPush Android]: https://codeberg.org/NextPush/nextpush-android
 
 ## Troubleshooting
 
