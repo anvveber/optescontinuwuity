@@ -107,7 +107,7 @@
       "boundElements": [
         {
           "type": "text",
-          "id": "Pv7XifVr-baY3wmAtIBor"
+          "id": "Pv7XifVr-beY3wmAtIBor"
         },
         {
           "id": "XnNUCxZVwQ4LW6slNUYFh",
@@ -123,7 +123,7 @@
       "locked": false
     },
     {
-      "id": "Pv7XifVr-baY3wmAtIBor",
+      "id": "Pv7XifVr-beY3wmAtIBor",
       "type": "text",
       "x": 165.2829035522301,
       "y": 139.24750630399365,
