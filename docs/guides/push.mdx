@@ -17,7 +17,7 @@ The push system works as follows:
 <Tab label="Registration">
 <img src="./push-registration.webp"
     alt="Diagram showing the push registration flow"
-    style= {{height:300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
+    style= {{"max-height":300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
 />
 
 _([excalidraw file of the diagrams](/guides/push-notifications.excalidraw))_
@@ -32,7 +32,7 @@ A client registers a pusher with Continuwuity, bringing its own pushkey and push
 <Tab label="Operation">
 <img src="./push-operation.webp"
     alt="Diagram showing the push operation"
-    style={{height:300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
+    style={{"max-height":300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
 />
 
 _([excalidraw file of the diagrams](/guides/push-notifications.excalidraw))_
@@ -62,10 +62,10 @@ Continuwuity is working on a Web Push implementation following the works of [MSC
 
 ## UnifiedPush
 
-[UnifiedPush][unifiedpush] is a common, open notifications system supported by many Matrix clients on Android. Using the same push gateway mechanism, it requires no homeserver-specific configuration. Below are notes for some known UnifiedPush distributors.
+[UnifiedPush][unifiedpush] is a common, open notifications system supported by many Matrix clients on Android. Using the same push gateway mechanism as other push services, it requires no additional support from the homeserver side. Below are notes for some known UnifiedPush distributors.
 
-:::note UP-Example
-The [UP-Example] app can be used to test and debug your UnifiedPush installation
+:::info UP-Example
+The [UP-Example] app can be used to test and debug your UnifiedPush installation.
 :::
 
 [unifiedpush]: https://unifiedpush.org
