@@ -55,17 +55,17 @@ curl https://push.example.com/_matrix/push/v1/notify
 ## Correct output: {"unifiedpush":{"gateway":"matrix"}}
 ```
 
-Continuwuity is working on a Web Push implementation following the works of [MSC4174]. This push method allows sending end-to-end-encrypted payloads directly towards the push provider, bypassing the need for a push gateway. Developments of this feature can be tracked in [#2122][pr-2122].
+Continuwuity is working on a Web Push implementation following the works of [MSC4174]. This push method allows sending end-to-end-encrypted payloads directly towards the push provider, bypassing the need for a push gateway. Development of this feature can be tracked in [#2122][pr-2122].
 
 [pr-2122]: https://forgejo.ellis.link/continuwuation/continuwuity/pulls/2122
 [MSC4174]: https://github.com/matrix-org/matrix-spec-proposals/pull/4174
 
 ## UnifiedPush
 
-[UnifiedPush][unifiedpush] is a common, open notifications system supported by many Matrix clients on Android. Using the same push gateway mechanism as other push services, it requires no additional support from the homeserver side. Below are notes for some known UnifiedPush distributors.
+[UnifiedPush][unifiedpush] is a decentralized, open notifications system on Android and Linux that is supported by many Matrix clients. Using the same push gateway mechanism as other push services, it requires no additional support from the homeserver side. Below are notes for some known UnifiedPush distributors.
 
-:::info UP-Example
-The [UP-Example] app can be used to test and debug your UnifiedPush installation.
+:::info Debugging UnifiedPush
+To debug and test your UnifiedPush installation, use the [UP-Example] app for Android and the [UnifiedPush Troubleshooter] app for Linux distributions.
 :::
 
 [unifiedpush]: https://unifiedpush.org
@@ -130,7 +130,7 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
 
 This is likely an issue with one's _push rules_, which can be configured within the Matrix clients. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
 
-Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in the development room and open an issue.
+Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room](https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org), or open an issue.
 
 ### Various "Could not send request to pusher" log entries
 
