@@ -7,7 +7,7 @@ Matrix clients receive notifications in the following ways:
 - **In-band notifications**, which are retrieved when the client actively syncs with the server.
 - **Push notifications**, which are posted by the server via an external push service to the client. This is commonly used for mobile devices to receive out-of-band notifications, and is the focal topic of this page.
 
-Generally, push notifications work out-of-the-box with your mobile device's preconfigured setup. The details below are mostly useful for advanced use cases, such as when using an alternative push backend (e.g. UnifiedPush) or selfhosting your own.
+Generally, push notifications work out-of-the-box with your mobile device's preconfigured setup. The details below are useful for advanced use cases, such as when using an alternative push backend (e.g. UnifiedPush) or selfhosting your own.
 
 ## Overview
 
@@ -50,12 +50,12 @@ Therefore, Continuwuity's role within this system is to keep track of client-reg
 
 As per the [spec][spec-push-gateway-api], Matrix push gateways must be available on the `/_matrix/push/v1/notify` path of a domain. To test that a push gateway is accessible by the homeserver, make a request for it from the homeserver's IP:
 
-```bash
+```txt
 curl https://push.example.com/_matrix/push/v1/notify
-## Correct output: {"unifiedpush":{"gateway":"matrix"}}
+{"unifiedpush":{"gateway":"matrix"}}
 ```
 
-Continuwuity is working on a Web Push implementation following the works of [MSC4174]. This push method allows sending end-to-end-encrypted payloads directly towards the push provider, bypassing the need for a push gateway. Development of this feature can be tracked in [#2122][pr-2122].
+Continuwuity is working on a Web Push implementation following the works of [MSC4174]. This push method allows sending end-to-end-encrypted payloads directly towards the push provider, removing the need for a push gateway. Development of this feature can be tracked in [#2122][pr-2122].
 
 [pr-2122]: https://forgejo.ellis.link/continuwuation/continuwuity/pulls/2122
 [MSC4174]: https://github.com/matrix-org/matrix-spec-proposals/pull/4174
@@ -80,8 +80,8 @@ Some tutorials on selfhosting ntfy can be found below:
 - [Official ntfy self-hosting tutorial][official-ntfy-selfhosting]
 - [Element's tutorial on Unified Push and ntfy][element-ntfy]
 
-:::warning Avoid using ntfy.sh
-Avoid using the `https://ntfy.sh` push server, which is configured as a default in the ntfy app. This server is known to ratelimit requests aggressively.
+:::warning Avoid ntfy.sh
+Avoid using the `https://ntfy.sh` push server, which is configured as the default in the ntfy app. This server is known to ratelimit requests aggressively.
 :::
 
 [ntfy]: https://ntfy.sh
@@ -90,7 +90,7 @@ Avoid using the `https://ntfy.sh` push server, which is configured as a default 
 
 ### Other UnifiedPush distributors
 
-Other UnifiedPush distributors typically requires selfhosting a Matrix push gateway (such as [common-proxies]) on the same domain as the push provider. To find a list of them, visit this [page][unifiedpush-distributors].
+Other UnifiedPush distributors typically requires selfhosting a separate Matrix push gateway (such as [common-proxies]) on the same domain as the push provider. To find a list of them, visit this [page][unifiedpush-distributors].
 
 [unifiedpush-distributors]: https://unifiedpush.org/users/distributors/
 
@@ -109,7 +109,7 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
     - Push server: [Prosody's mod_unified_push]
     - Push app: [Conversations]
 - Nextcloud's NextPush flow, which uses the following stack:
-    - Push server + push gateway: [uppush] (see selfhosting guidance here)
+    - Push server + push gateway: [uppush] (selfhosting tutorial included)
     - Push app: [NextPush Android]
 
 [kimiblock-selfhosting-sunup]: https://blog.kimiblock.top/2025/09/11/selfhosting-sunup/
