@@ -70,6 +70,7 @@ To debug and test your UnifiedPush installation, use the [UP-Example] app for An
 
 [unifiedpush]: https://unifiedpush.org
 [UP-Example]: https://codeberg.org/UnifiedPush/android-example
+[UnifiedPush Troubleshooter]: https://flathub.org/en/apps/org.unifiedpush.Troubleshooter
 
 ### ntfy
 
@@ -130,7 +131,9 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
 
 This is likely an issue with one's _push rules_, which can be configured within the Matrix clients. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
 
-Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room](https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org), or open an issue.
+Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room][support-room], or open an issue.
+
+[support-room]: https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org
 
 ### Various "Could not send request to pusher" log entries
 
@@ -146,7 +149,7 @@ Active Matrix clients periodically renew their pushkeys as the old ones expire, 
 
 To work around this issue, the following actions can be made:
 
-- Delete all pushers of a user with the [`!admin query pusher delete-all-user`](../reference/admin/query##admin-query-pusher-delete-all-user) command. This command doesn't break push by a lot, as active clients usually renew their pushers the next time they log on.
+- Delete all pushers of a user with the [`!admin query pusher delete-all-user`](../reference/admin/query##admin-query-pusher-delete-all-user) command. This command is generally not very disruptive, as active clients will re-register new pushers the next time they log on.
 - Alternatively, delete one's own pushers from a client that supports doing so. Currently this only includes FluffyChat and Element Classic/SchildiChat Legacy.
 
 While clients are supposed to automatically delete old pushers under their own control, this behaviour has not been observed extensively. A further discussion of this issue can be found in [#2242][issue-2242].
