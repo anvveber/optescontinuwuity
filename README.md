@@ -2,7 +2,12 @@
 
 ## A community-driven [Matrix](https://matrix.org/) homeserver
 
-[![Chat on Matrix][matrix-chat-badge]][matrix-chatroom] [![Join the space][matrix-space-badge]][matrix-space]
+<div class="no-zoom">
+
+[![Chat on Matrix][matrix-chat-badge]][matrix-chatroom]
+[![Join the space][matrix-space-badge]][matrix-space]
+
+</div>
 
 [matrix-chat-badge]: https://img.shields.io/matrix/continuwuity%3Acontinuwuity.org?server_fqdn=matrix.continuwuity.org&fetchMode=summary&logo=matrix
 [matrix-chatroom]: https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org
@@ -11,6 +16,8 @@
 
 [continuwuity] is a Matrix homeserver written in Rust.
 It's the official community continuation of the [conduwuit](https://github.com/girlbossceo/conduwuit) homeserver.
+
+<div class="badges no-zoom">
 
 [![forgejo.ellis.link][forge-badge]][forge-link]
 [![Releases][forge-releases-badge]][forge-releases-link]
@@ -22,24 +29,26 @@ It's the official community continuation of the [conduwuit](https://github.com/g
 [![Codeberg][codeberg-badge]][codeberg-link] [![Stars][codeberg-stars-badge]][codeberg-stars-link] -
 [![GitLab][gitlab-badge]][gitlab-link] [![Stars][gitlab-stars-badge]][gitlab-stars-link]
 
-<a style="display:flex; margin-top:2rem" href="https://opencollective.com/continuwuity" target="_blank">
+<a style="display:flex; margin:3rem 0" href="https://opencollective.com/continuwuity" target="_blank">
 <img style="margin:auto" src="https://opencollective.com/webpack/donate/button@2x.png?color=blue" width="250"/>
 </a>
+
+</div>
 
 [forge-badge]: https://img.shields.io/badge/Ellis%20Git-main+packages-green?style=flat&logo=forgejo&labelColor=fff
 [forge-link]: https://forgejo.ellis.link/continuwuation/continuwuity
 [forge-releases-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/release.svg?style=flat&label=Latest%20release&labelColor=fff&color=green
 [forge-releases-link]: https://forgejo.ellis.link/continuwuation/continuwuity
-[forge-stars-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/stars.svg?style=flat
+[forge-stars-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/stars.svg?style=flat&labelColor=fff&color=8a5cd0
 [forge-stars-link]: https://forgejo.ellis.link/continuwuation/continuwuity/stars
-[forge-issues-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/issues/open.svg?style=flat
+[forge-issues-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/issues/open.svg?style=flat&labelColor=fff&color=8a5cd0
 [forge-issues-link]: https://forgejo.ellis.link/continuwuation/continuwuity/issues?state=open
-[forge-pulls-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/pulls/open.svg?style=flat
+[forge-pulls-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/pulls/open.svg?style=flat&labelColor=fff&color=8a5cd0
 [forge-pulls-link]: https://forgejo.ellis.link/continuwuation/continuwuity/pulls?state=open
 
 [github-badge]: https://img.shields.io/badge/GitHub-mirror-blue?style=flat&logo=github&labelColor=fff&logoColor=24292f
 [github-link]: https://github.com/continuwuity/continuwuity
-[github-stars-badge]: https://img.shields.io/github/stars/continuwuity/continuwuity?style=flat
+[github-stars-badge]: https://img.shields.io/github/stars/continuwuity/continuwuity?style=flat&logo=github
 [gitlab-badge]:https://img.shields.io/badge/GitLab-mirror-blue?style=flat&logo=gitlab&labelColor=fff
 [gitlab-link]: https://gitlab.com/continuwuity/continuwuity
 [gitlab-stars-badge]: https://img.shields.io/gitlab/stars/continuwuity/continuwuity?style=flat
