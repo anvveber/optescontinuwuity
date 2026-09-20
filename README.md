@@ -13,6 +13,7 @@
 It's the official community continuation of the [conduwuit](https://github.com/girlbossceo/conduwuit) homeserver.
 
 [![forgejo.ellis.link][forge-badge]][forge-link]
+[![Releases][forge-releases-badge]][forge-releases-link]
 [![Stars][forge-stars-badge]][forge-stars-link]
 [![Issues][forge-issues-badge]][forge-issues-link]
 [![Pull Requests][forge-pulls-badge]][forge-pulls-link]
@@ -27,6 +28,8 @@ It's the official community continuation of the [conduwuit](https://github.com/g
 
 [forge-badge]: https://img.shields.io/badge/Ellis%20Git-main+packages-green?style=flat&logo=forgejo&labelColor=fff
 [forge-link]: https://forgejo.ellis.link/continuwuation/continuwuity
+[forge-releases-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/release.svg?style=flat&label=Latest%20release&labelColor=fff&color=green
+[forge-releases-link]: https://forgejo.ellis.link/continuwuation/continuwuity
 [forge-stars-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/stars.svg?style=flat
 [forge-stars-link]: https://forgejo.ellis.link/continuwuation/continuwuity/stars
 [forge-issues-badge]: https://forgejo.ellis.link/continuwuation/continuwuity/badges/issues/open.svg?style=flat
