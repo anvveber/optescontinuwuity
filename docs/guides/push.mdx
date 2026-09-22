@@ -4,7 +4,7 @@ import { Tab, Tabs } from '@rspress/core/theme';
 
 Matrix clients receive notifications in the following ways:
 
-- **In-band notifications**, which are retrieved when the client actively syncs with the server.
+- **In-band notifications**, which are shown when the client actively syncs with the server.
 - **Push notifications**, which are posted by the server via an external push service to the client. This is commonly used for mobile devices to receive out-of-band notifications, and is the focal topic of this page.
 
 Generally, push notifications work out-of-the-box with your mobile device's preconfigured setup. The details below are useful for advanced use cases, such as when using an alternative push backend (e.g. UnifiedPush) or selfhosting your own.
@@ -127,12 +127,17 @@ Community tutorials for selfhosting some of these UnifiedPush stacks can be foun
 
 ## Troubleshooting
 
-### Push notifications not making sounds/not being sent
+Issues with push can arise due other components of the system that is not your server (for example, the connection fails between the push gateway and the push server). Make sure you check the logs of these components for debugging as well.
 
-This is likely an issue with one's _push rules_, which can be configured within the Matrix clients. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
+### Push notifications not making sounds/not being seen
 
-Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room][support-room], or open an issue.
+This is likely an issue with one's _push rules_, which determines what events are shown to users as notifications. These can, however, due note that some clients. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
 
+Another potential reason may be that background services for push are being killed by your operating system, which results in very late or no push notifications being seen at all. This is a [well-known problem][dontkillmyapp] with many Android-based devices. To fix this, follow your operating system's instructions to allow your Push App and Client App to be exempt from background restrictions.
+
+Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room][support-room] or open an issue.
+
+[dontkillmyapp]: https://dontkillmyapp.com
 [support-room]: https://matrix.to/#/#continuwuity:continuwuity.org?via=continuwuity.org&via=ellis.link&via=explodie.org&via=matrix.org
 
 ### Various "Could not send request to pusher" log entries
@@ -143,7 +148,13 @@ If you find spurious log entries like this in your Continuwuity deployment:
 WARN push{user_id="@user:example.com" pushkey="very-long-string-of-letters" events=1}:send_push_notice:send_notice:send_request: conduwuit_service::pusher: Could not send request to pusher https//push.example.com: error sending request for url (https://push.example.com/_matrix/push/v1/notify)
 ```
 
-Then, your server is most likely sending push requests to too many invalid targets.
+Then, your server is most likely sending push requests to too many invalid targets. This could be due to one of the following reasons:
+
+#### Connection issues between the server and the push gateway
+
+Verify that connection to the push gateway is working correctly. This may include checking firewall rules, DNS, and that the push gateway is online. To check whether requests from the homeserver have successfully went out, one could also try enabling debug logs on the push gateway.
+
+#### Expired push endpoints
 
 Active Matrix clients periodically renew their pushkeys as the old ones expire, and consequently register them against Continuwuity. As these pushers build up over time, the homeserver will keep sending more requests to an increasing number of "dead" push endpoints. This results in the errors seen above, and can heavily impact performance if not mitigated.
 
