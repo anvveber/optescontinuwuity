@@ -307,13 +307,13 @@ async fn get_register_email_validate(
 	let email = session.consume();
 
 	response!(
-		complete_registration(
+		Box::pin(complete_registration(
 			&services,
 			session_store,
 			completed_registration,
 			Some(email),
 			&client
-		)
+		))
 		.await?
 	)
 }
@@ -504,8 +504,14 @@ async fn begin_registration(
 	} else {
 		// If email isn't required we can immediately complete registration
 		Ok(response!(
-			complete_registration(services, session_store, completed_registration, None, client)
-				.await?
+			Box::pin(complete_registration(
+				services,
+				session_store,
+				completed_registration,
+				None,
+				client
+			))
+			.await?
 		))
 	}
 }

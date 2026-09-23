@@ -10,7 +10,7 @@ use conduwuit::{
 	},
 	warn,
 };
-use futures::{Stream, TryFutureExt, try_join};
+use futures::{Stream, StreamExt, TryFutureExt, pin_mut, try_join};
 use ruma::{
 	OwnedEventId, OwnedUserId, RoomId, UserId,
 	events::{
@@ -59,6 +59,22 @@ impl Service {
 	) {
 		self.db.readreceipt_update(user_id, room_id, event).await;
 		self.services.sync.wake_all_joined(room_id).await;
+	}
+
+	/// Gets the latest public read receipt from the user in the room.
+	pub async fn user_readreceipt(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+	) -> Option<Raw<AnySyncEphemeralRoomEvent>> {
+		let count = self.db.readreceipt_count(room_id, user_id).await?;
+		let receipts = self.db.readreceipts_since(room_id, count.saturating_sub(1));
+
+		pin_mut!(receipts);
+		receipts
+			.next()
+			.await
+			.and_then(|(user, _, receipt)| (user == user_id).then_some(receipt))
 	}
 
 	/// Gets the latest private read receipt from the user in the room

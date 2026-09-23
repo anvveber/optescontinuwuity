@@ -162,7 +162,13 @@ impl From<u64> for Count {
 impl FromStr for Count {
 	type Err = Error;
 
-	fn from_str(token: &str) -> Result<Self, Self::Err> { Ok(Self::from_signed(token.parse()?)) }
+	/// Also accepts a sliding sync `pos`, which MSC4186 lets clients paginate
+	/// from; its count comes before the `_`.
+	fn from_str(token: &str) -> Result<Self, Self::Err> {
+		let count = token.split_once('_').map_or(token, |(count, _)| count);
+
+		Ok(Self::from_signed(count.parse()?))
+	}
 }
 
 impl PartialOrd for Count {
@@ -175,4 +181,17 @@ impl Ord for Count {
 
 impl Default for Count {
 	fn default() -> Self { Self::Normal(0) }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::Count;
+
+	#[test]
+	fn sliding_sync_positions_parse_as_their_count() {
+		assert_eq!("42".parse::<Count>().unwrap(), Count::Normal(42));
+		assert_eq!("42_7".parse::<Count>().unwrap(), Count::Normal(42));
+		assert_eq!("-3".parse::<Count>().unwrap(), Count::Backfilled(-3));
+		"x_7".parse::<Count>().unwrap_err();
+	}
 }

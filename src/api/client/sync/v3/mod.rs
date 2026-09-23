@@ -23,7 +23,7 @@ use ruma::{
 	api::client::{
 		filter::FilterDefinition,
 		sync::sync_events::{
-			self, DeviceLists,
+			self,
 			v3::{
 				Filter, GlobalAccountData, InviteState, InvitedRoom, KnockState, KnockedRoom,
 				Presence, Rooms, ToDevice,
@@ -40,7 +40,7 @@ use service::{
 	rooms::lazy_loading::{self, MemberSet, Options as _},
 };
 
-use super::{load_timeline, share_encrypted_room};
+use super::DeviceListUpdates;
 use crate::{
 	Ruma,
 	client::{
@@ -54,37 +54,6 @@ use crate::{
 /// joined and left rooms. If the number of events sent since the last sync
 /// exceeds this number, the `timeline` will be `limited`.
 const DEFAULT_TIMELINE_LIMIT: usize = 30;
-
-/// A collection of updates to users' device lists, used for E2EE.
-struct DeviceListUpdates {
-	changed: HashSet<OwnedUserId>,
-	left: HashSet<OwnedUserId>,
-}
-
-impl DeviceListUpdates {
-	fn new() -> Self {
-		Self {
-			changed: HashSet::new(),
-			left: HashSet::new(),
-		}
-	}
-
-	fn merge(&mut self, other: Self) {
-		self.changed.extend(other.changed);
-		self.left.extend(other.left);
-	}
-
-	fn is_empty(&self) -> bool { self.changed.is_empty() && self.left.is_empty() }
-}
-
-impl From<DeviceListUpdates> for DeviceLists {
-	fn from(val: DeviceListUpdates) -> Self {
-		assign!(Self::new(), {
-			changed: val.changed.into_iter().collect(),
-			left: val.left.into_iter().collect(),
-		})
-	}
-}
 
 /// References to common data needed to calculate the sync response.
 #[derive(Clone, Copy)]
