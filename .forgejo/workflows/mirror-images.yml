@@ -12,7 +12,7 @@ on:
       dry_run:
         description: 'Dry run (check only, no actual mirroring)'
         required: false
-        default: false
+        default: true
         type: boolean
   push:
     branches:
