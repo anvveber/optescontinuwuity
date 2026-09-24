@@ -162,7 +162,7 @@ To fix this, configure `ip_range_denylist` to exclude your push gateway or push 
 
 This is likely an issue with one's _push rules_, which determines what events are shown to users as notifications. Check your push rules in the clients' notifications settings and tweak accordingly. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
 
-Another potential reason may be that background services for push are being frequently terminated by your operating system, a [well-known problem][dontkillmyapp] with many Android-based devices. To fix this, follow your operating system's instructions to allow your Push App (and sometimes, your Client App as well) to be exempt from background restrictions.
+Another potential reason may be that background services for push are being frequently terminated by your operating system, a [well-known problem][dontkillmyapp] with many Android-based devices. To fix this, follow your operating system's instructions to allow your Push App to be exempt from background restrictions.
 
 Otherwise, if you find Continuwuity not sending push notifications according to the spec, feel free to discuss in our [support room][support-room] or open an issue.
 
