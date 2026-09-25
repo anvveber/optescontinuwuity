@@ -6,7 +6,7 @@ use std::{borrow::ToOwned, collections::HashSet, sync::Arc, time::Duration};
 
 use async_trait::async_trait;
 use conduwuit::{
-	Error, Result, Server, checked, debug, debug_warn, error, result::LogErr, trace, warn,
+	Error, Result, Server, checked, debug, debug_warn, error, result::LogErr, trace,
 };
 use database::Database;
 use futures::{Stream, StreamExt, TryFutureExt, stream::FuturesUnordered};
@@ -234,7 +234,7 @@ impl Service {
 			// servers, then in a later step we split it by destination
 			// server.
 			match self.calculate_and_persist_recipient_users(user_id).await {
-				| Ok(Some((new_stream_id, delta))) => {
+				| Some((new_stream_id, delta)) => {
 					update.prev_id = Some(
 						prev_recipients
 							.stream_id
@@ -244,16 +244,13 @@ impl Service {
 					update.stream_id = Some(new_stream_id.try_into().expect("js_int overflowed"));
 					update.recipients = delta;
 				},
-				| Ok(None) => {
+				| None => {
 					update.stream_id = Some(
 						prev_recipients
 							.stream_id
 							.try_into()
 							.expect("js_int overflowed"),
 					);
-				},
-				| Err(e) => {
-					warn!("Failed to calculate presence recipients for {user_id}: {e}");
 				},
 			}
 
@@ -266,7 +263,7 @@ impl Service {
 				.chain(update.recipients.delete.iter())
 				.map(|u| u.server_name().to_owned())
 				.dedup()
-				.collect::<Vec<_>>()
+				.collect::<HashSet<_>>()
 		};
 
 		for server in destinations {
@@ -315,21 +312,15 @@ impl Service {
 		self.db.get_recipients(user_id).await
 	}
 
-	pub async fn set_recipients(
-		&self,
-		user_id: &UserId,
-		recipients: PresenceRecipients,
-	) -> Result<()> {
-		self.db.set_recipients(user_id, recipients).await
+	pub fn set_recipients(&self, user_id: &UserId, recipients: PresenceRecipients) -> Result<()> {
+		self.db.set_recipients(user_id, recipients)
 	}
 
 	pub async fn has_recipients(&self, user_id: &UserId) -> bool {
 		self.db.has_recipients(user_id).await
 	}
 
-	pub async fn remove_recipients(&self, user_id: &UserId) -> () {
-		self.db.remove_recipients(user_id).await;
-	}
+	pub fn remove_recipients(&self, user_id: &UserId) { self.db.remove_recipients(user_id); }
 
 	/// Checks if some local requesting_user has permission to view the presence
 	/// of a target_user
@@ -366,7 +357,7 @@ impl Service {
 	) -> Result<()> {
 		let mut recipients = self.get_recipients(user_id).await?;
 		recipients.apply_delta(new_stream_id, delta);
-		self.set_recipients(user_id, recipients).await
+		self.set_recipients(user_id, recipients)
 	}
 
 	// Unset online/unavailable presence to offline on startup
@@ -611,7 +602,7 @@ impl Service {
 	pub async fn calculate_and_persist_recipient_users(
 		&self,
 		sending_user: &UserId,
-	) -> Result<Option<(i64, PresenceRecipientListUpdates)>> {
+	) -> Option<(i64, PresenceRecipientListUpdates)> {
 		let current_recipients = self.get_recipients(sending_user).await.unwrap_or_default();
 		let recipient_users = self.calculate_recipient_users(sending_user).await;
 
@@ -619,12 +610,12 @@ impl Service {
 
 		if delta.is_empty() {
 			debug!("No changes in presence recipients for {sending_user}, using previous stream");
-			return Ok(None);
+			return None;
 		}
 
-		let stream_id = self.services.globals.next_count()?.cast_signed();
+		let stream_id = current_recipients.stream_id.wrapping_add(1);
 		let recipients = PresenceRecipients::new(stream_id, recipient_users);
-		self.set_recipients(sending_user, recipients).await.ok();
+		self.set_recipients(sending_user, recipients).ok();
 
 		debug!(
 			"Presence recipients for {} changed (+{}, -{}) stream {}",
@@ -634,7 +625,7 @@ impl Service {
 			stream_id,
 		);
 
-		Ok(Some((stream_id, delta)))
+		Some((stream_id, delta))
 	}
 
 	/// Ask a remote server for a user's presence recipients.
@@ -668,7 +659,7 @@ impl Service {
 			"Storing {} presence recipients for {sending_user} from remote server",
 			recipients.recipient_users.len()
 		);
-		self.set_recipients(sending_user, recipients.clone()).await
+		self.set_recipients(sending_user, recipients)
 	}
 }
 

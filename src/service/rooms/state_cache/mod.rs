@@ -1,7 +1,10 @@
 mod update;
 mod via;
 
-use std::{collections::HashMap, sync::Arc};
+use std::{
+	collections::{HashMap, HashSet},
+	sync::Arc,
+};
 
 use conduwuit::{
 	Pdu, Result, SyncRwLock,
@@ -192,14 +195,10 @@ impl Service {
 	}
 
 	/// Returns all servers that can see a user by sharing at least one room.
-	pub async fn servers_seeing_user(&self, user_id: &UserId) -> Vec<OwnedServerName> {
-		let rooms = self
-			.rooms_joined(user_id)
-			.collect::<Vec<OwnedRoomId>>()
-			.await;
-		let mut servers = Vec::new();
+	pub async fn servers_seeing_user(&self, user_id: &UserId) -> HashSet<OwnedServerName> {
+		let mut servers = HashSet::new();
 
-		for room_id in rooms {
+		while let Some(room_id) = self.rooms_joined(user_id).next().await {
 			servers.extend(
 				self.room_servers(&room_id)
 					.collect::<Vec<OwnedServerName>>()
@@ -207,8 +206,6 @@ impl Service {
 			);
 		}
 
-		servers.sort_unstable();
-		servers.dedup();
 		servers
 	}
 

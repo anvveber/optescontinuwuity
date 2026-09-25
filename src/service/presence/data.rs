@@ -14,7 +14,7 @@ use crate::{Dep, globals, users};
 pub(crate) struct Data {
 	presenceid_presence: Arc<Map>,
 	userid_presenceid: Arc<Map>,
-	userid_recipients: Arc<Map>,
+	userid_presencerecipients: Arc<Map>,
 	services: Services,
 }
 
@@ -29,7 +29,7 @@ impl Data {
 		Self {
 			presenceid_presence: db["presenceid_presence"].clone(),
 			userid_presenceid: db["userid_presenceid"].clone(),
-			userid_recipients: db["userid_recipients"].clone(),
+			userid_presencerecipients: db["userid_presencerecipients"].clone(),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				users: args.depend::<users::Service>("users"),
@@ -147,31 +147,32 @@ impl Data {
 	}
 
 	pub(super) async fn get_recipients(&self, user_id: &UserId) -> Result<PresenceRecipients> {
-		let bytes = self.userid_recipients.get(user_id).await?;
+		let bytes = self.userid_presencerecipients.get(user_id).await?;
 		let recipients = PresenceRecipients::from_json_bytes(&bytes)?;
 
 		Ok(recipients)
 	}
 
-	pub(super) async fn set_recipients(
+	pub(super) fn set_recipients(
 		&self,
 		user_id: &UserId,
 		recipients: PresenceRecipients,
 	) -> Result<()> {
-		self.userid_recipients.raw_put(user_id, Json(recipients));
+		self.userid_presencerecipients
+			.raw_put(user_id, Json(recipients));
 
 		Ok(())
 	}
 
 	pub(super) async fn has_recipients(&self, user_id: &UserId) -> bool {
-		self.userid_recipients.exists(user_id).await.is_ok()
+		self.userid_presencerecipients.exists(user_id).await.is_ok()
 	}
 
 	// Presence recipients lists are removed if we receive an EDU with no
 	// `stream_id`. This probably means that the sending server has disabled
 	// MSC4495.
-	pub(super) async fn remove_recipients(&self, user_id: &UserId) {
-		self.userid_recipients.remove(user_id);
+	pub(super) fn remove_recipients(&self, user_id: &UserId) {
+		self.userid_presencerecipients.remove(user_id);
 	}
 
 	#[inline]

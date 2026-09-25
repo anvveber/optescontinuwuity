@@ -22,7 +22,7 @@ use futures::{FutureExt, Stream, StreamExt, TryFutureExt, TryStreamExt};
 use http::StatusCode;
 use itertools::Itertools;
 use ruma::{
-	CanonicalJsonObject, Int, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
+	CanonicalJsonObject, OwnedEventId, OwnedRoomId, OwnedUserId, RoomId, ServerName, UserId,
 	api::{
 		error::{ErrorKind, LimitExceededErrorData},
 		federation::transactions::{
@@ -428,11 +428,9 @@ async fn handle_edu_presence_update(
 			},
 
 			// Incremental update
-			| Some(prev_id)
-				if current_recipients.stream_id == <Int as Into<i64>>::into(prev_id) =>
-			{
-				// Stream ID matches our last known ID for this user, apply the incremental
-				// update
+			| Some(prev_id) if current_recipients.stream_id == i64::from(prev_id) => {
+				// Stream ID matches our last known ID for this user, apply the
+				// incremental update
 				services
 					.presence
 					.apply_recipients_delta(&update.user_id, stream_id, update.recipients)
@@ -458,7 +456,7 @@ async fn handle_edu_presence_update(
 		// remove this user's recipients tracking data so we can share with
 		// all local users again.
 		if services.presence.has_recipients(&update.user_id).await {
-			services.presence.remove_recipients(&update.user_id).await;
+			services.presence.remove_recipients(&update.user_id);
 		}
 	}
 

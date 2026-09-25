@@ -1262,26 +1262,29 @@ impl crate::Context<'_> {
 
 		Ok(())
 	}
-	
+
 	pub(super) async fn recalculate_presence_recipients(&self, user_id: OwnedUserId) -> Result {
 		self.bail_restricted()?;
 
-		let out = match self
+		match self
 			.services
 			.presence
 			.calculate_and_persist_recipient_users(&user_id)
 			.await
 		{
-			| Ok(Some((stream_id, delta))) => {
-				format!(
-					"Recalculated presence recipients for {user_id} at stream ID \
-					 {stream_id}.\n\n```rs\n{delta:#?}\n```"
-				)
+			| Some((stream_id, delta)) => {
+				self.write_str(&format!(
+					"Recalculated presence recipients for {user_id} at stream ID {stream_id}."
+				))
+				.await?;
+				self.write_str(&format!("Delta:\n{delta:#?}")).await?;
 			},
-			| Ok(None) => format!("No changes to presence recipients for {user_id}."),
-			| Err(e) => format!("Failed to recalculate presence recipients for {user_id}: {e}"),
-		};
+			| None => {
+				self.write_str(&format!("No changes to presence recipients for {user_id}."))
+					.await?;
+			},
+		}
 
-		self.write_str(&out).await
+		Ok(())
 	}
 }
