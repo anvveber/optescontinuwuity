@@ -110,11 +110,11 @@ Avoid using the `https://ntfy.sh` push server, which is configured as the defaul
 
 ### Other UnifiedPush distributors
 
-Other UnifiedPush distributors typically requires selfhosting a separate Matrix push gateway (such as [common-proxies]) on the same domain as the push provider. To find a list of them, visit this [page][unifiedpush-distributors].
+To find a list of other UnifiedPush distributors, visit this [page][unifiedpush-distributors].
 
 [unifiedpush-distributors]: https://unifiedpush.org/users/distributors/
 
-Community tutorials for selfhosting some of these UnifiedPush stacks can be found below. Unless stated otherwise, they are all tested against Element X Android as the client, and use the push gateway mechanism (but should be perfectly compatible with Web Push as well).
+Community tutorials for selfhosting some of these stacks can be found below. Unless stated otherwise, they are all tested against Element X Android and the push gateway mechanism (but should be fine with Web Push as well).
 
 - [Self-hosting Sunup for Matrix and UnifiedPush][kimiblock-selfhosting-sunup], by Kimiblock.
     - Push gateway: [common-proxies]
@@ -150,13 +150,13 @@ Issues with push can arise due to other components of the system that is not you
 
 ### Locally hosted push gateways / push providers
 
-Outbound requests, including push notifications, follows the `ip_range_denylist` config option which refuse loopback and private-range destinations by default. This would break against push components that are self-hosted on a LAN address, and will result in these log entries at push creation time:
+Outbound requests, including push notifications, follows the `ip_range_denylist` config option which refuses loopback and private-range destinations by default. This would break against push components that are self-hosted on a LAN address, and will result in these log entries at push creation time:
 
 ```txt
-ERR push{user_id="@user:example.com" pushkey="[REDACTED]" events=1}:send_push_notice:send_notice{user="@xxx:example.com"}:send_webpush_notice{user="@xxx:example.com"}:deliver_webpush{user="@xxx:example.com" prio="low"}: conduwuit_service::pusher::webpush: Could not reach the push service: Not allowed to send requests to this IP user=@xxx:example.com pushkey=[REDACTED]
+WARN conduwuit_service::pusher: Pusher URL is a forbidden remote address url=https://push.example.com/_matrix/push/v1/notify
 ```
 
-To fix this, configure `ip_range_denylist` to exclude your push gateway or push server's address from the array, and restart your server to apply the changes.
+To fix this, configure `ip_range_denylist` to exclude your push gateway or push server's address from the array, and restart Continuwuity to apply the changes.
 
 ### Push notifications not making sounds/not being seen
 
@@ -202,7 +202,7 @@ Specifications:
 
 - [Matrix specification for the Push Gateway API][spec-push-gateway-api]
 - [Matrix Client-Server API for push notifications][spec-c-s-push-notifications]
-- [UnifiedPush][unifiedpush-spec]
+- [UnifiedPush specifications][unifiedpush-spec]
 - [MSC4174: Web push][MSC4174]
 - [Web Push RFCs][webpush-rfcs]
 
