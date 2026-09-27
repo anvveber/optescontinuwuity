@@ -53,6 +53,10 @@ A client registers a pusher with Continuwuity, supplying the following details:
 3. The push app wakes the client, which decrypts the payload, and if needed, fetches new messages from Continuwuity.
 4. Finally the client calculates against a set of _push rules_ to determine whether the pushed message(s) should be notified to users.
 
+Note that this mechanism does not require a push gateway component.
+
+[MSC4174]: https://github.com/matrix-org/matrix-spec-proposals/pull/4174
+
 </Tab>
 
 </Tabs>
@@ -60,25 +64,6 @@ A client registers a pusher with Continuwuity, supplying the following details:
 _([excalidraw file of the diagrams](/guides/push-notifications.excalidraw))_
 
 Therefore, Continuwuity's role within this system is to keep track of client-registered _pushers_ and send relevant payloads to them. To view and manage these pushers, use the [`!admin query pusher`](../reference/admin/query.md#admin-query-pusher) set of commands.
-
-### Push Gateways
-
-The push gateway URL is usually pre-configured by the app. However, some clients (such as Element X) implement [Gateway Discovery], and attempt to detect a push gateway _on the same domain as the push provider_, before falling back to a hardcoded one.
-
-Per the [spec][spec-push-gateway-api], these push gateways must be available on the `/_matrix/push/v1/notify` path of said domain. To test that a push gateway is accessible to the homeserver, make a request for it from the homeserver's IP:
-
-```txt
-curl https://push.example.com/_matrix/push/v1/notify
-{"unifiedpush":{"gateway":"matrix"}}
-```
-
-[Gateway Discovery]: https://unifiedpush.org/users/gateway/#discovery--hosting
-
-### Web Push
-
-Continuwuity implements Web Push according to [MSC4174], which works out of the box with most push providers. Note that this mechanism does not require a push gateway component.
-
-[MSC4174]: https://github.com/matrix-org/matrix-spec-proposals/pull/4174
 
 ## UnifiedPush
 
@@ -93,6 +78,19 @@ Below are notes for some known UnifiedPush distributors.
 [unifiedpush]: https://unifiedpush.org
 [UP-Example]: https://codeberg.org/UnifiedPush/android-example
 [UnifiedPush Troubleshooter]: https://flathub.org/en/apps/org.unifiedpush.Troubleshooter
+
+### UnifiedPush and Push Gateway
+
+The push gateway URL is usually pre-configured by the app. However, some clients (such as Element X) implement UnifiedPush's [Gateway Discovery] mechanism, and attempt to detect a push gateway _on the same domain as the push provider_, before falling back to a hardcoded one.
+
+Per the [spec][spec-push-gateway-api], these push gateways must be available on the `/_matrix/push/v1/notify` path of said domain. To test that a push gateway is accessible to the homeserver, make a request for it from the homeserver's IP:
+
+```txt
+curl https://push.example.com/_matrix/push/v1/notify
+{"unifiedpush":{"gateway":"matrix"}}
+```
+
+[Gateway Discovery]: https://unifiedpush.org/users/gateway/#discovery--hosting
 
 ### ntfy
 
