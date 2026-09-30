@@ -91,5 +91,9 @@ sha1.workspace = true
 tokio.workspace = true
 tracing.workspace = true
 
+[dev-dependencies]
+rustls = { workspace = true, features = ["ring"] }
+tempfile = "3"
+
 [lints]
 workspace = true

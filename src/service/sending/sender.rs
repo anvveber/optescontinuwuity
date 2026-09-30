@@ -52,7 +52,13 @@ use ruma::{
 };
 use serde_json::value::{RawValue as RawJsonValue, to_raw_value};
 
-use super::{Destination, EduBuf, EduVec, Msg, SendingEvent, Service, data::QueueItem};
+use super::{
+	Destination, EduBuf, EduVec, Msg, SendingEvent, Service, data::QueueItem,
+	to_device::ToDeviceDelivery,
+};
+
+#[cfg(test)]
+mod tests;
 
 #[derive(Debug)]
 enum TransactionStatus {
@@ -116,9 +122,14 @@ impl Service {
 			.get(id)
 			.map(|(_, receiver)| receiver.clone())
 			.expect("Missing channel for sender worker");
+		let mut retry_timer = tokio::time::interval(Duration::from_secs(1));
+		retry_timer.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
 		while !receiver.is_closed() {
 			tokio::select! {
+				_ = retry_timer.tick() => {
+					self.retry_appservices(futures, statuses).await;
+				},
 				Some(response) = futures.next() => {
 					self.handle_response(response, futures, statuses).await;
 				},
@@ -127,6 +138,38 @@ impl Service {
 					Err(_) => return,
 				},
 			}
+		}
+	}
+
+	// The mutable borrow keeps these non-Sync futures Send across awaits.
+	#[allow(clippy::needless_pass_by_ref_mut)]
+	async fn retry_appservices<'a>(
+		&'a self,
+		futures: &mut SendingFutures<'a>,
+		statuses: &mut CurTransactionStatus,
+	) {
+		let min = Duration::from_secs(self.server.config.sender_retry_backoff_base);
+		let max = Duration::from_secs(self.server.config.sender_retry_backoff_limit);
+		let destinations: Vec<_> = statuses
+			.iter()
+			.filter_map(|(dest, status)| match (dest, status) {
+				| (Destination::Appservice(_), TransactionStatus::Failed(tries, time))
+					if time.elapsed() >= min.saturating_mul(*tries).min(max) =>
+					Some(dest.clone()),
+				| _ => None,
+			})
+			.collect();
+		for dest in destinations {
+			self.handle_request(
+				Msg {
+					dest,
+					event: SendingEvent::Flush,
+					queue_id: Vec::new(),
+				},
+				futures,
+				statuses,
+			)
+			.await;
 		}
 	}
 
@@ -221,6 +264,13 @@ impl Service {
 		futures: &mut SendingFutures<'a>,
 		statuses: &mut CurTransactionStatus,
 	) {
+		// Recovery or batching may have consumed this notification's event.
+		if matches!(msg.dest, Destination::Appservice(_))
+			&& !msg.queue_id.is_empty()
+			&& !self.db.is_queued(&msg.queue_id).await
+		{
+			return;
+		}
 		let iv = vec![(msg.queue_id, msg.event)];
 		match self.select_events(&msg.dest, iv, statuses).await {
 			| Ok(Some(events)) => {
@@ -301,7 +351,11 @@ impl Service {
 			let over_budget =
 				self.server.config.startup_netburst_keep >= 0 && entry.len() >= keep;
 
-			if over_budget && !self.survives_netburst_trim(&event).await {
+			// Trimming an appservice retry would change its transaction ID.
+			if over_budget
+				&& !matches!(dest, Destination::Appservice(_))
+				&& !self.survives_netburst_trim(&event).await
+			{
 				warn!(
 					startup_netburst_keep = self.server.config.startup_netburst_keep,
 					queue_size = entry.len(),
@@ -318,6 +372,17 @@ impl Service {
 			if self.server.config.startup_netburst && !events.is_empty() {
 				statuses.insert(dest.clone(), TransactionStatus::Running);
 				futures.push(self.send_events(dest, events));
+			}
+		}
+
+		if self.server.config.startup_netburst {
+			let pending = self.db.queued_appservices().collect::<HashSet<_>>().await;
+			for dest in pending {
+				if self.shard_id(&dest) != id || statuses.contains_key(&dest) {
+					continue;
+				}
+				statuses.insert(dest.clone(), TransactionStatus::Running);
+				self.handle_response_ok(&dest, futures, statuses).await;
 			}
 		}
 	}
@@ -371,14 +436,15 @@ impl Service {
 		let _cork = self.db.db.cork();
 		let mut events = Vec::new();
 
-		// Must retry any previous transaction for this remote.
-		if retry {
+		// Resume active transactions even when startup netburst is disabled.
+		if retry || matches!(dest, Destination::Appservice(_)) {
 			self.db
 				.active_requests_for(dest)
-				.ready_for_each(|(_, e)| events.push(e))
+				.ready_for_each(|(_, event)| events.push(event))
 				.await;
-
-			return Ok(Some(events));
+			if retry || !events.is_empty() {
+				return Ok(Some(events));
+			}
 		}
 
 		// Compose the next transaction
@@ -799,6 +865,7 @@ impl Service {
 				.filter(|event| matches!(event, SendingEvent::Edu(_)))
 				.count(),
 		);
+		let mut to_device = Vec::new();
 		for event in &events {
 			match event {
 				| SendingEvent::Pdu(pdu_id) => {
@@ -812,12 +879,18 @@ impl Service {
 							edu_jsons.push(Raw::from_json(edu));
 						}
 					},
+				| SendingEvent::ToDevice(delivery) => {
+					let delivery = serde_json::from_slice::<ToDeviceDelivery>(delivery).map_err(
+						|error| (Destination::Appservice(id.clone()), Box::new(error.into())),
+					)?;
+					to_device.push(delivery);
+				},
 				| SendingEvent::Flush => {}, // flush only; no new content
 			}
 		}
 
 		let txn_hash = calculate_hash(events.iter().filter_map(|e| match e {
-			| SendingEvent::Edu(b) => Some(&**b),
+			| SendingEvent::Edu(b) | SendingEvent::ToDevice(b) => Some(&**b),
 			| SendingEvent::Pdu(b) => Some(b.as_ref()),
 			| SendingEvent::Flush => None,
 		}));
@@ -827,10 +900,30 @@ impl Service {
 		let mut request =
 			ruma::api::appservice::event::push_events::v1::Request::new(txn_id.into(), pdu_jsons);
 		request.ephemeral = edu_jsons;
-		request.to_device = Vec::new(); // TODO
+		request.to_device = to_device
+			.iter()
+			.map(|delivery| {
+				Raw::from_json(
+					to_raw_value(&delivery.event).expect("to-device event can be serialized"),
+				)
+			})
+			.collect();
 
 		match self.send_appservice_request(appservice, request).await {
-			| Ok(_) => Ok(Destination::Appservice(id)),
+			| Ok(response) => {
+				if response.is_some() {
+					for delivery in to_device {
+						if delivery.delete_after_delivery {
+							self.db.todeviceid_events.del((
+								&delivery.event.to_user_id,
+								&delivery.event.to_device_id,
+								delivery.count,
+							));
+						}
+					}
+				}
+				Ok(Destination::Appservice(id))
+			},
 			| Err(e) => Err((Destination::Appservice(id), Box::new(e))),
 		}
 	}
@@ -869,7 +962,7 @@ impl Service {
 						pdus.push(pdu);
 					}
 				},
-				| SendingEvent::Edu(_) | SendingEvent::Flush => {
+				| SendingEvent::Edu(_) | SendingEvent::ToDevice(_) | SendingEvent::Flush => {
 					// Push gateways don't need EDUs (?) and flush only;
 					// no new content
 				},

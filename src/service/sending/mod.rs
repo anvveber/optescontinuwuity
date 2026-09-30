@@ -3,6 +3,7 @@ mod appservice;
 mod data;
 mod dest;
 mod sender;
+mod to_device;
 
 use std::{
 	fmt::Debug,
@@ -28,6 +29,7 @@ use ruma::{
 		path_builder::PathBuilder,
 	},
 };
+pub(crate) use to_device::ToDeviceMessage;
 use tokio::{task, task::JoinSet};
 
 use self::data::Data;
@@ -75,9 +77,10 @@ struct Msg {
 #[allow(clippy::module_name_repetitions)]
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum SendingEvent {
-	Pdu(RawPduId), // pduid
-	Edu(EduBuf),   // edu json
-	Flush,         // none
+	Pdu(RawPduId),    // pduid
+	Edu(EduBuf),      // edu json
+	ToDevice(EduBuf), // appservice to-device delivery
+	Flush,            // none
 }
 
 pub type EduBuf = SmallVec<[u8; EDU_BUF_CAP]>;

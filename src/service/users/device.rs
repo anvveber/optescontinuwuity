@@ -13,9 +13,8 @@ use ruma::{
 	DeviceId, MilliSecondsSinceUnixEpoch, OwnedDeviceId, OwnedUserId, UserId,
 	api::client::device::Device, assign, events::AnyToDeviceEvent, serde::Raw, uint,
 };
-use serde_json::json;
 
-use crate::users::increment;
+use crate::{sending::ToDeviceMessage, users::increment};
 
 #[must_use]
 #[derive(Clone)]
@@ -222,17 +221,16 @@ impl super::Service {
 		event_type: &str,
 		content: serde_json::Value,
 	) {
-		let count = self.services.globals.next_count().unwrap();
-
-		let key = (target_user_id, target_device_id, count);
-		self.db.todeviceid_events.put(
-			key,
-			Json(json!({
-				"type": event_type,
-				"sender": sender,
-				"content": content,
-			})),
-		);
+		self.services
+			.sending
+			.send_to_device(ToDeviceMessage {
+				to_user_id: target_user_id.to_owned(),
+				to_device_id: target_device_id.to_owned(),
+				event_type: event_type.to_owned(),
+				sender: sender.to_owned(),
+				content,
+			})
+			.await;
 
 		self.services.sync.wake(target_user_id).await;
 	}

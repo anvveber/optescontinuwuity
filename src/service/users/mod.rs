@@ -22,7 +22,7 @@ use serde::{Deserialize, Serialize};
 use crate::{
 	Dep, account_data, admin, appservice, config, firstrun, globals, oauth, presence,
 	rooms::{self, alias, membership},
-	sync, threepid,
+	sending, sync, threepid,
 };
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -69,6 +69,7 @@ struct Services {
 	state_accessor: Dep<rooms::state_accessor::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
 	sync: Dep<sync::Service>,
+	sending: Dep<sending::Service>,
 	threepid: Dep<threepid::Service>,
 	timeline: Dep<rooms::timeline::Service>,
 }
@@ -122,6 +123,7 @@ impl crate::Service for Service {
 					.depend::<rooms::state_accessor::Service>("rooms::state_accessor"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				sync: args.depend::<sync::Service>("sync"),
+				sending: args.depend::<sending::Service>("sending"),
 				threepid: args.depend::<threepid::Service>("threepid"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
 			},

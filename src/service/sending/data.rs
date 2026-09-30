@@ -1,10 +1,10 @@
-use std::{fmt::Debug, sync::Arc};
+use std::{borrow::Cow, fmt::Debug, sync::Arc};
 
 use conduwuit::{
 	Error, Result, at, utils,
 	utils::{ReadyExt, stream::TryIgnore},
 };
-use database::{Database, Deserialized, Map};
+use database::{Batch, Database, Deserialized, Map};
 use futures::{Stream, StreamExt};
 use ruma::{ServerName, UserId};
 
@@ -20,6 +20,7 @@ pub struct Data {
 	servercurrentevent_data: Arc<Map>,
 	servernameevent_data: Arc<Map>,
 	servername_educount: Arc<Map>,
+	pub(super) todeviceid_events: Arc<Map>,
 	pub(super) db: Arc<Database>,
 	services: Services,
 }
@@ -35,6 +36,7 @@ impl Data {
 			servercurrentevent_data: db["servercurrentevent_data"].clone(),
 			servernameevent_data: db["servernameevent_data"].clone(),
 			servername_educount: db["servername_educount"].clone(),
+			todeviceid_events: db["todeviceid_events"].clone(),
 			db: args.db.clone(),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
@@ -46,13 +48,19 @@ impl Data {
 		self.servercurrentevent_data.remove(key);
 	}
 
+	pub(super) async fn is_queued(&self, key: &[u8]) -> bool {
+		self.servernameevent_data.get(key).await.is_ok()
+	}
+
 	pub(super) async fn delete_all_active_requests_for(&self, destination: &Destination) {
 		let prefix = destination.get_prefix();
+		let mut batch = self.servercurrentevent_data.batch();
 		self.servercurrentevent_data
 			.raw_keys_prefix(&prefix)
 			.ignore_err()
-			.ready_for_each(|key| self.servercurrentevent_data.remove(key))
+			.ready_for_each(|key| batch.remove(&self.servercurrentevent_data, key))
 			.await;
+		batch.commit();
 	}
 
 	pub(super) async fn delete_all_requests_for(&self, destination: &Destination) {
@@ -74,14 +82,16 @@ impl Data {
 	where
 		I: Iterator<Item = &'a QueueItem>,
 	{
+		let mut batch = self.servercurrentevent_data.batch();
 		events
 			.filter(|(key, _)| !key.is_empty())
 			.for_each(|(key, val)| {
-				let val = if let SendingEvent::Edu(val) = &val { &**val } else { &[] };
+				let val = serialize_event(val);
 
-				self.servercurrentevent_data.insert(key, val);
-				self.servernameevent_data.remove(key);
+				batch.insert(&self.servercurrentevent_data, key, val);
+				batch.remove(&self.servernameevent_data, key);
 			});
+		batch.commit();
 	}
 
 	#[inline]
@@ -136,20 +146,24 @@ impl Data {
 
 		self.servernameevent_data.insert_batch(
 			keys.iter()
-				.map(Vec::as_slice)
 				.zip(requests.map(at!(0)))
-				.map(|(key, event)| {
-					let value = if let SendingEvent::Edu(value) = &event {
-						&**value
-					} else {
-						&[]
-					};
-
-					(key, value)
-				}),
+				.map(|(key, event)| (key, serialize_event(event))),
 		);
 
 		keys
+	}
+
+	pub(super) fn queue_to_device(
+		&self,
+		batch: &mut Batch,
+		dest: &Destination,
+		event: &SendingEvent,
+		count: u64,
+	) -> Key {
+		let mut key = dest.get_prefix();
+		key.extend_from_slice(&count.to_be_bytes());
+		batch.insert(&self.servernameevent_data, &key, serialize_event(event));
+		key
 	}
 
 	pub fn queued_requests(
@@ -173,12 +187,38 @@ impl Data {
 		self.servername_educount.raw_put(server_name, last_count);
 	}
 
+	pub(super) fn queued_appservices(&self) -> impl Stream<Item = Destination> + Send + '_ {
+		self.servernameevent_data
+			.raw_stream_from(b"+")
+			.ignore_err()
+			.ready_take_while(|(key, _)| key.starts_with(b"+"))
+			.map(|(key, val)| {
+				parse_servercurrentevent(key, val)
+					.expect("invalid queued appservice event")
+					.0
+			})
+	}
+
 	pub async fn get_latest_educount(&self, server_name: &ServerName) -> u64 {
 		self.servername_educount
 			.get(server_name)
 			.await
 			.deserialized()
 			.unwrap_or(0)
+	}
+}
+
+fn serialize_event(event: &SendingEvent) -> Cow<'_, [u8]> {
+	match event {
+		| SendingEvent::Edu(value) => Cow::Borrowed(value),
+		| SendingEvent::ToDevice(value) => {
+			// NUL distinguishes deliveries from legacy JSON EDUs.
+			let mut encoded = Vec::with_capacity(value.len().saturating_add(1));
+			encoded.push(0);
+			encoded.extend_from_slice(value);
+			Cow::Owned(encoded)
+		},
+		| SendingEvent::Pdu(_) | SendingEvent::Flush => Cow::Borrowed(&[]),
 	}
 }
 
@@ -198,7 +238,9 @@ fn parse_servercurrentevent(key: &[u8], value: &[u8]) -> Result<(Destination, Se
 
 		(
 			Destination::Appservice(server),
-			if value.is_empty() {
+			if let Some(value) = value.strip_prefix(&[0]) {
+				SendingEvent::ToDevice(value.into())
+			} else if value.is_empty() {
 				SendingEvent::Pdu(event.into())
 			} else {
 				SendingEvent::Edu(value.into())
@@ -255,4 +297,29 @@ fn parse_servercurrentevent(key: &[u8], value: &[u8]) -> Result<(Destination, Se
 			},
 		)
 	})
+}
+
+#[cfg(test)]
+mod tests {
+	use super::{Destination, SendingEvent, parse_servercurrentevent, serialize_event};
+
+	#[test]
+	fn msc4203_queue_encoding_preserves_legacy_events() {
+		let key = b"+bridge\xFF\0\0\0\0\0\0\0\x01";
+		let edu = SendingEvent::Edu(br#"{"type":"m.typing","content":{}}"#.as_slice().into());
+		let encoded = serialize_event(&edu);
+		assert_eq!(encoded.as_ref(), br#"{"type":"m.typing","content":{}}"#);
+		assert_eq!(
+			parse_servercurrentevent(key, &encoded).unwrap(),
+			(Destination::Appservice("bridge".into()), edu)
+		);
+
+		let delivery = SendingEvent::ToDevice(br#"{"count":1,"event":{}}"#.as_slice().into());
+		let encoded = serialize_event(&delivery);
+		assert_eq!(encoded[0], 0);
+		assert_eq!(
+			parse_servercurrentevent(key, &encoded).unwrap(),
+			(Destination::Appservice("bridge".into()), delivery)
+		);
+	}
 }

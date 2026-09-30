@@ -44,6 +44,16 @@ appservice can send requests to the homeserver. You don't need to restart
 Continuwuity, but if it doesn't work, restarting while the appservice is running
 could help.
 
+## To-device messages
+
+Appservices automatically receive [MSC4203](https://github.com/matrix-org/matrix-spec-proposals/pull/4203)
+to-device messages for users in their namespaces and their sender user.
+Transactions use `de.sorunome.msc2409.to_device`, with `to_user_id` and
+`to_device_id`, regardless of `receive_ephemeral`.
+
+After the appservice accepts a transaction, messages for exclusive namespaces
+are removed from the device inbox. Non-exclusive messages remain in `/sync`.
+
 ## Appservice-specific instructions
 
 ### Remove an appservice

@@ -47,6 +47,9 @@ use tracing::instrument;
 
 use crate::Ruma;
 
+#[cfg(test)]
+mod tests;
+
 type ResolvedMap = BTreeMap<OwnedEventId, Result>;
 type Pdu = (OwnedRoomId, OwnedEventId, CanonicalJsonObject);
 
