@@ -3,7 +3,7 @@ use conduwuit_core::{
 	matrix::event::Event,
 	utils::{self},
 };
-use ruma::EventId;
+use ruma::{EventId, signatures::content_hash};
 
 use super::ExtractBody;
 use crate::rooms::short::ShortRoomId;
@@ -45,13 +45,18 @@ impl super::Service {
 			.get_room_version(&pdu.room_id_or_hash())
 			.await?;
 
-		if !pdu.is_redacted()
-			&& self
-				.services
-				.config
-				.allow_moderators_to_view_redacted_content
+		if self
+			.services
+			.config
+			.allow_moderators_to_view_redacted_content
 		{
-			self.db.save_unredacted_content(&pdu_id, &pdu.content);
+			let mut pdu_json = self.get_pdu_json_from_id(&pdu_id).await?;
+			pdu_json.remove("event_id");
+			if content_hash(&pdu_json)
+				.is_ok_and(|hash| hash.encode() == pdu.hashes.sha256.trim_end_matches('='))
+			{
+				self.db.save_unredacted_content(&pdu_id, &pdu.content);
+			}
 		}
 
 		pdu.redact(&room_version_id, Some(reason.event_id()))?;
