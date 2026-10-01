@@ -16,7 +16,7 @@ Continuwuity supports two push methods: the legacy **Matrix Push Gateway** and t
 <Tabs groupId="push-ops">
 <Tab label="Registration">
 <img src="./push-registration.webp"
-    alt="A diagram showing the push registration flow. See description below."
+    alt="Diagram showing the push registration flow. See description below."
     style= {{"max-height":300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
 />
 
@@ -29,7 +29,7 @@ Continuwuity supports two push methods: the legacy **Matrix Push Gateway** and t
 
 <Tab label="Operation (Push Gateway)">
 <img src="./push-operation-gateway.webp"
-    alt="A diagram showing the push operation with the Push Gateway method. See description below."
+    alt="Diagram showing the push operation with the Push Gateway method. See description below."
     style={{"max-height":300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
 />
 
@@ -43,7 +43,7 @@ Continuwuity supports two push methods: the legacy **Matrix Push Gateway** and t
 
 <Tab label="Operation (Web Push)">
 <img src="./push-operation-webpush.webp"
-    alt="A diagram showing the push operation with the Web Push method. See description below."
+    alt="Diagram showing the push operation with the Web Push method. See description below."
     style={{"max-height":300,display:"flex",margin:"1rem auto","border-radius":"5px"}}
 />
 
@@ -66,13 +66,11 @@ Therefore, Continuwuity's role within this system is to keep track of client-reg
 
 ## UnifiedPush
 
-[UnifiedPush][unifiedpush] is a decentralized, open notifications system on Android and Linux that is supported by many Matrix clients. It is compatible with both the Web Push and Push Gateway mechanisms, and therefore requires no additional setup from the homeserver.
+[UnifiedPush][unifiedpush] is an open, self-hostable notifications system that is supported by many Matrix clients on Android and Linux. It is compatible with both the Web Push and Push Gateway mechanisms, and therefore requires no additional setup from the homeserver.
 
 :::info Debugging UnifiedPush
 To debug and test your UnifiedPush installation, use the [UP-Example] app for Android and the [UnifiedPush Troubleshooter] app for Linux distributions.
 :::
-
-Below are notes for some known UnifiedPush distributors.
 
 [unifiedpush]: https://unifiedpush.org
 [UP-Example]: https://codeberg.org/UnifiedPush/android-example
@@ -80,7 +78,7 @@ Below are notes for some known UnifiedPush distributors.
 
 ### UnifiedPush and push gateways
 
-The push gateway URL is usually pre-configured by the app. However, some clients (such as Element X) implement UnifiedPush's [Gateway Discovery] mechanism, and attempt to detect a push gateway _on the same domain as the push provider_, before falling back to a hardcoded one.
+The push gateway URL is usually pre-configured by the client app. However, some clients (such as Element X) implement UnifiedPush's [Gateway Discovery] mechanism, and attempt to detect a push gateway _on the same domain as the push provider_, before falling back to a hardcoded one.
 
 Per the [spec][spec-push-gateway-api], these push gateways must be available on the `/_matrix/push/v1/notify` path of said domain. To test that a push gateway is accessible to the homeserver, make a request for it from the homeserver's IP:
 
@@ -93,7 +91,7 @@ curl https://push.example.com/_matrix/push/v1/notify
 
 ### ntfy
 
-[ntfy][ntfy] is an easy-to-install push application, and has plenty of publicly available instances. Its server includes an embedded Matrix push gateway and can be self-hosted.
+[ntfy][ntfy] is a widely supported UnifiedPush implementation, with an easy-to-install push app and plenty of publicly available instances. Its server includes an embedded Matrix push gateway and can be self-hosted.
 
 Some tutorials on self-hosting ntfy can be found below:
 
@@ -114,7 +112,7 @@ To find a list of other UnifiedPush distributors, visit this [page][unifiedpush-
 
 [unifiedpush-distributors]: https://unifiedpush.org/users/distributors/
 
-Community tutorials for selfhosting some of these stacks can be found below. Unless stated otherwise, they are all tested against Element X Android and the push gateway mechanism, but they should work with Web Push as well.
+Community tutorials for selfhosting some of these stacks are listed below. Unless stated otherwise, they are all tested against Element X Android and the push gateway mechanism, but they should work with Web Push as well.
 
 - [Self-hosting Sunup for Matrix and UnifiedPush][kimiblock-selfhosting-sunup], by Kimiblock.
     - Push gateway: [common-proxies]
@@ -160,7 +158,7 @@ To fix this, remove your push gateway or push server's address from `ip_range_de
 
 ### Push notifications not audible/not displaying
 
-This is likely an issue with one's _push rules_, which determines which events are shown to users as notifications. Check your push rules in the client's notifications settings and tweak accordingly. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
+This is likely an issue with your account's _push rules_, which determines which events are shown to to the user as notifications. Check these push rules in the client's notifications settings and tweak accordingly. Continuwuity also provides an [`!admin users reset-push-rules`](../reference/admin/users#admin-users-reset-push-rules) command, which restores the rules to the default of notifying for every message.
 
 Another reason may be that push background services are frequently being terminated by your operating system, which is a [well-known problem][dontkillmyapp] with many Android-based systems. To fix this, follow your operating system's instructions to exempt your push app from background restrictions.
 
