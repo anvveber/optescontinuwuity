@@ -62,15 +62,10 @@ pub(super) async fn collect(
 		return Ok(None);
 	}
 
-	// acknowledged by `pos`, whose count would skip anything left unsent
-	let limit = if config.since.is_some() {
-		config
-			.limit
-			.map_or(DEFAULT_LIMIT, usize_from_ruma)
-			.clamp(1, DEFAULT_LIMIT)
-	} else {
-		usize::MAX
-	};
+	let limit = config
+		.limit
+		.map_or(DEFAULT_LIMIT, usize_from_ruma)
+		.clamp(1, DEFAULT_LIMIT);
 
 	let mut messages: Vec<_> = services
 		.users

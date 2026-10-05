@@ -49,7 +49,12 @@ pub(super) async fn collect(
 		.wide_filter_map(async |room_id| {
 			let since = previous.since(room_id, context.since());
 			let timeline = rooms.timelines.get(room_id);
-			let receipts = room_receipts(services, syncing_user, room_id, since, timeline).await;
+			let initial = rooms
+				.rooms
+				.get(room_id)
+				.is_some_and(|room| room.initial == Some(true));
+			let receipts =
+				room_receipts(services, syncing_user, room_id, since, timeline, initial).await;
 
 			(!receipts.is_empty())
 				.then(|| (room_id.clone(), pack_receipts(Box::new(receipts.into_iter()))))
@@ -68,24 +73,28 @@ async fn room_receipts(
 	room_id: &RoomId,
 	since: u64,
 	timeline: Option<&SentTimeline>,
+	initial: bool,
 ) -> Vec<Raw<AnySyncEphemeralRoomEvent>> {
 	let read_receipt = &services.rooms.read_receipt;
 	let entering = since == 0;
 
+	// the client has not seen these events, so it needs the receipts on them
+	let sent_timeline = timeline.filter(|_| entering || initial);
+
 	// a receipt for a timeline event can only be newer than the timeline
-	let scan_from = if entering {
-		timeline.and_then(|timeline| timeline.since)
-	} else {
-		Some(since)
-	};
+	let scan_from =
+		[(!entering).then_some(since), sent_timeline.and_then(|timeline| timeline.since)]
+			.into_iter()
+			.flatten()
+			.min();
 
 	let mut receipts: Vec<_> = OptionFuture::from(scan_from.map(|scan_from| {
 		read_receipt
 			.readreceipts_since(room_id, Some(scan_from))
-			.ready_filter(|(read_user, _, receipt)| {
-				!entering
+			.ready_filter(|(read_user, count, receipt)| {
+				(!entering && *count > since)
 					|| (read_user != syncing_user
-						&& timeline
+						&& sent_timeline
 							.is_some_and(|timeline| receipts_any(receipt, &timeline.event_ids)))
 			})
 			.filter_map(async |(read_user, _, receipt)| {
