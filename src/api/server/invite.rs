@@ -10,6 +10,7 @@ use conduwuit::{
 	utils::hash::sha256,
 	warn,
 };
+use conduwuit_service::sync::WakeKind;
 use ruma::{
 	CanonicalJsonObject, CanonicalJsonValue, OwnedEventId, OwnedRoomId, OwnedUserId, ServerName,
 	UserId,
@@ -191,7 +192,10 @@ pub(crate) async fn create_invite_route(
 			.update_joined_count(&body.room_id)
 			.await;
 
-		services.sync.wake(&recipient_user).await;
+		services
+			.sync
+			.wake(&recipient_user, &[WakeKind::Timeline])
+			.await;
 
 		for appservice in services.appservice.read().await.values() {
 			if appservice.is_user_match(&recipient_user) {

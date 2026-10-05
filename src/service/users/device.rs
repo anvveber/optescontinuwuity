@@ -15,7 +15,7 @@ use ruma::{
 };
 use serde_json::json;
 
-use crate::users::increment;
+use crate::{sync::WakeKind, users::increment};
 
 #[must_use]
 #[derive(Clone)]
@@ -236,7 +236,10 @@ impl super::Service {
 			})),
 		);
 
-		self.services.sync.wake(target_user_id).await;
+		self.services
+			.sync
+			.wake(target_user_id, &[WakeKind::ToDevice])
+			.await;
 	}
 
 	/// Gets all to-device events between the two counts.

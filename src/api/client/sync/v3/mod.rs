@@ -16,7 +16,7 @@ use conduwuit::{
 		stream::{BroadbandExt, Tools, WidebandExt},
 	},
 };
-use conduwuit_service::Services;
+use conduwuit_service::{Services, sync::WakeKind};
 use futures::{FutureExt, StreamExt, TryFutureExt, future::OptionFuture};
 use ruma::{
 	DeviceId, OwnedUserId, RoomId, UserId,
@@ -170,7 +170,10 @@ pub(crate) async fn sync_events_route(
 		.update_device_last_seen(sender_user, Some(sender_device), client_ip)
 		.await;
 
-	let mut wake_receiver = services.sync.subscribe_to_wake(sender_user).await;
+	let mut wake_receiver = services
+		.sync
+		.subscribe_to_wake(sender_user, &WakeKind::ALL)
+		.await;
 	let response = build_sync_events(&services, &body).await?;
 	if body.body.full_state
 		|| !(response.rooms.is_empty()
@@ -186,7 +189,7 @@ pub(crate) async fn sync_events_route(
 	// Stop hanging if new info arrives
 	let default = Duration::from_secs(30);
 	let duration = cmp::min(body.body.timeout.unwrap_or(default), default);
-	_ = tokio::time::timeout(duration, wake_receiver.changed()).await;
+	_ = tokio::time::timeout(duration, wake_receiver.woken()).await;
 
 	// Retry returning data
 	build_sync_events(&services, &body).await

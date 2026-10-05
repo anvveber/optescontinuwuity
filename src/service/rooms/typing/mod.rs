@@ -12,7 +12,12 @@ use ruma::{
 };
 use tokio::sync::RwLock;
 
-use crate::{Dep, globals, sending, sending::EduBuf, sync, users};
+use crate::{
+	Dep, globals, sending,
+	sending::EduBuf,
+	sync::{self, WakeKind},
+	users,
+};
 
 pub struct Service {
 	server: Arc<Server>,
@@ -71,7 +76,10 @@ impl Service {
 			.await
 			.insert(room_id.to_owned(), self.services.globals.next_count()?);
 
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Typing])
+			.await;
 
 		// update federation
 		if self.services.globals.user_is_local(user_id) {
@@ -97,7 +105,10 @@ impl Service {
 			.await
 			.insert(room_id.to_owned(), self.services.globals.next_count()?);
 
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Typing])
+			.await;
 
 		// update federation
 		if self.services.globals.user_is_local(user_id) {
@@ -139,7 +150,10 @@ impl Service {
 				.await
 				.insert(room_id.to_owned(), self.services.globals.next_count()?);
 
-			self.services.sync.wake_all_joined(room_id).await;
+			self.services
+				.sync
+				.wake_all_joined(room_id, &[WakeKind::Typing])
+				.await;
 
 			// update federation
 			for user in &removable {

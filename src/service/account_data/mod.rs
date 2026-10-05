@@ -16,7 +16,10 @@ use ruma::{
 };
 use serde::Deserialize;
 
-use crate::{Dep, globals, sync};
+use crate::{
+	Dep, globals,
+	sync::{self, WakeKind},
+};
 
 #[derive(Debug)]
 pub enum AnyRawAccountDataEvent {
@@ -86,7 +89,10 @@ impl Service {
 			self.db.roomuserdataid_accountdata.remove(&prev);
 		}
 
-		self.services.sync.wake(user_id).await;
+		self.services
+			.sync
+			.wake(user_id, &[WakeKind::AccountData])
+			.await;
 
 		Ok(())
 	}

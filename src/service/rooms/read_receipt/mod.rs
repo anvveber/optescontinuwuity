@@ -21,7 +21,10 @@ use ruma::{
 };
 
 use self::data::{Data, ReceiptItem};
-use crate::{Dep, rooms, sync};
+use crate::{
+	Dep, rooms,
+	sync::{self, WakeKind},
+};
 
 pub struct Service {
 	services: Services,
@@ -58,7 +61,10 @@ impl Service {
 		event: &ReceiptEvent,
 	) {
 		self.db.readreceipt_update(user_id, room_id, event).await;
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Receipts])
+			.await;
 	}
 
 	/// Gets the latest public read receipt from the user in the room.

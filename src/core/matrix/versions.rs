@@ -40,6 +40,12 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		// Simplified Sliding sync (https://github.com/matrix-org/matrix-spec-proposals/pull/4186)
 		// Expected for spec v1.19
 		("org.matrix.simplified_msc3575".to_owned(), true),
+		// Sliding sync extensions (https://github.com/matrix-org/matrix-spec-proposals/pull/4508)
+		("org.matrix.msc4508".to_owned(), true),
+		("org.matrix.msc4538".to_owned(), true),
+		("org.matrix.msc4543".to_owned(), true),
+		("org.matrix.msc4548".to_owned(), true),
+		("org.matrix.msc4551".to_owned(), true),
 		// invite filtering (https://github.com/matrix-org/matrix-spec-proposals/pull/4155)
 		("org.matrix.msc4155".to_owned(), true),
 		// profile change propagation (https://github.com/matrix-org/matrix-spec-proposals/pull/4466)
