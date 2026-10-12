@@ -2,7 +2,7 @@ mod instruments;
 mod process;
 mod tests;
 
-use std::sync::atomic::AtomicU32;
+use std::sync::{Arc, atomic::AtomicU32};
 
 use opentelemetry::metrics::Meter;
 pub use opentelemetry::{KeyValue, metrics::AsyncInstrument};
@@ -30,7 +30,7 @@ pub struct Metrics {
 	runtime_intervals: std::sync::Mutex<Option<RuntimeIntervals>>,
 
 	// TODO: move stats
-	pub requests_handle_active: AtomicU32,
+	pub requests_handle_active: Arc<AtomicU32>,
 	pub requests_handle_finished: AtomicU32,
 	pub requests_panic: AtomicU32,
 
@@ -53,11 +53,16 @@ impl Metrics {
 		let runtime_intervals = runtime_monitor.as_ref().map(RuntimeMonitor::intervals);
 
 		let runtime_metrics = runtime.as_ref().map(runtime::Handle::metrics);
+		let requests_handle_active = Arc::new(AtomicU32::new(0));
 
 		Self {
 			_runtime: runtime.clone(),
 
-			instruments: Instruments::new(&meter, runtime_metrics.clone()),
+			instruments: Instruments::new(
+				&meter,
+				runtime_metrics.clone(),
+				requests_handle_active.clone(),
+			),
 			meter,
 			registry,
 
@@ -71,7 +76,7 @@ impl Metrics {
 			#[cfg(tokio_unstable)]
 			runtime_intervals: std::sync::Mutex::new(runtime_intervals),
 
-			requests_handle_active: AtomicU32::new(0),
+			requests_handle_active,
 			requests_handle_finished: AtomicU32::new(0),
 			requests_panic: AtomicU32::new(0),
 		}
