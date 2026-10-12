@@ -590,6 +590,7 @@ version = "0.3.0"
 
 [workspace.dependencies.resolvematrix]
 version = "1.4.0"
+features = ["unstable-msc4188"]
 
 [workspace.dependencies.serde_urlencoded]
 version = "0.7.1"
