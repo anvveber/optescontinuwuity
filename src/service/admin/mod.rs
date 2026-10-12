@@ -17,7 +17,10 @@ use conduwuit_core::{
 pub use create::create_admin_room;
 use futures::{Future, FutureExt, StreamExt, TryFutureExt};
 use loole::{Receiver, Sender};
-pub use msc4391::Describer;
+pub use msc4391::{
+	CommandDescription, DefaultValue, Describer, Invocation, LiteralType, Parameter, Primitive,
+	Schema, Text,
+};
 use ruma::{
 	OwnedEventId, OwnedMxcUri, OwnedRoomId, OwnedUserId, RoomId, UInt, UserId,
 	api::client::discovery::discover_support::{Contact, ContactRole},

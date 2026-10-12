@@ -9,8 +9,8 @@ use ruma::{
 	OwnedEventId, UserId,
 	events::{Mentions, StateEventType},
 };
-use serde::Deserialize;
-use serde_json::{Value, value::to_raw_value};
+use serde::{Deserialize, Serialize};
+use serde_json::{Map, Value, value::to_raw_value};
 use sha2::{Digest, Sha256};
 
 use super::{CommandInput, InvocationSource, Service};
@@ -18,8 +18,118 @@ use super::{CommandInput, InvocationSource, Service};
 const COMMAND_DESCRIPTION_EVENT: &str = "org.matrix.msc4391.command_description";
 
 /// Prototype of the command describer, supplied by the reloadable admin
-/// module: each admin command's name and its description event content.
-pub type Describer = fn() -> Vec<(String, Value)>;
+/// module: each admin command's description event content.
+pub type Describer = fn() -> Vec<CommandDescription>;
+
+/// Content of an `org.matrix.msc4391.command_description` event.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CommandDescription {
+	/// Space-separated command name, e.g. `users reset-password`.
+	pub command: String,
+	pub parameters: Vec<Parameter>,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub description: Option<Text>,
+	#[serde(default, skip_serializing_if = "Vec::is_empty")]
+	/// Other full names the command answers to.
+	pub aliases: Vec<String>,
+}
+
+/// One argument of a command: its key, type, and whether it may be omitted.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Parameter {
+	pub key: String,
+	pub schema: Schema,
+	#[serde(default, skip_serializing_if = "std::ops::Not::not")]
+	/// Absent from the wire when false, since MSC4391 defaults to required.
+	pub optional: bool,
+	#[serde(default, skip_serializing_if = "Option::is_none")]
+	pub description: Option<Text>,
+	#[serde(rename = "fi.mau.default_value", default, skip_serializing_if = "Option::is_none")]
+	/// What the command uses when the argument is omitted; informational.
+	pub default_value: Option<DefaultValue>,
+}
+
+/// Extensible-events text, plain body only.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Text {
+	#[serde(rename = "m.text")]
+	pub parts: Vec<TextPart>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+pub struct TextPart {
+	pub body: String,
+}
+
+impl Text {
+	#[must_use]
+	pub fn new(body: &impl ToString) -> Self {
+		Self {
+			parts: vec![TextPart { body: body.to_string() }],
+		}
+	}
+}
+
+/// The type of a parameter, as an MSC4391 `schema_type`-tagged object.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(tag = "schema_type", rename_all = "snake_case")]
+pub enum Schema {
+	Primitive {
+		#[serde(rename = "type")]
+		kind: Primitive,
+	},
+	/// A room ID or alias, or a fixed set of choices.
+	Union {
+		variants: Vec<Self>,
+	},
+	Literal {
+		literal_type: LiteralType,
+		value: String,
+	},
+	Array {
+		items: Box<Self>,
+	},
+}
+
+/// Primitive types MSC4391 names. Matrix identifiers are sent as references
+/// (`room_id`, `event_id`) or plain strings; see `scalar` in the admin module.
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum Primitive {
+	Boolean,
+	Integer,
+	String,
+	UserId,
+	RoomId,
+	RoomAlias,
+	EventId,
+	ServerName,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum LiteralType {
+	String,
+}
+
+/// The `fi.mau.default_value` extension: an integer where the argument is one,
+/// otherwise the default as clap spells it.
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum DefaultValue {
+	Integer(i64),
+	String(String),
+}
+
+/// Content of an `org.matrix.msc4391.command` invocation. The arguments are
+/// untrusted and are checked against the command's schemas.
+#[derive(Debug, Deserialize)]
+pub struct Invocation {
+	pub command: String,
+	/// Argument values by parameter key; absent or `null` means none.
+	#[serde(default)]
+	pub arguments: Option<Map<String, Value>>,
+}
 
 #[derive(Deserialize)]
 struct CommandContent {
@@ -51,15 +161,15 @@ impl Service {
 		let server_user = &self.services.globals.server_user;
 		let event_type = StateEventType::from(COMMAND_DESCRIPTION_EVENT);
 
-		let wanted: BTreeMap<String, Value> = describe()
+		let wanted: BTreeMap<String, CommandDescription> = describe()
 			.into_iter()
-			.map(|(command, content)| (state_key(&command, server_user), content))
+			.map(|content| (state_key(&content.command, server_user), content))
 			.collect();
 		let state_lock = self.services.state.mutex.lock(&room_id).await;
 		let mut sent = 0_usize;
 
 		for (key, content) in &wanted {
-			let current: Option<Value> = self
+			let current: Option<CommandDescription> = self
 				.services
 				.state_accessor
 				.room_state_get_content(&room_id, &event_type, key.as_str())

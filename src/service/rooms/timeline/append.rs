@@ -121,9 +121,7 @@ impl super::Service {
 			.await?;
 
 		// Process admin commands for federation events
-		if *pdu.kind() == TimelineEventType::RoomMessage
-			|| *pdu.kind() == TimelineEventType::from("m.room.bot.command")
-		{
+		if *pdu.kind() == TimelineEventType::RoomMessage {
 			self.services.admin.handle_room_message(pdu, false).await?;
 		}
 
