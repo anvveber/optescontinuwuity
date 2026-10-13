@@ -16,6 +16,8 @@ prometheus_metrics_token_file = "/run/secrets/prometheus_metrics_token"
 
 The endpoint is served over plain HTTP on its own listener, which defaults to `127.0.0.1:9100`. When binding to a non-loopback address, set `prometheus_metrics_token` or `prometheus_metrics_token_file`. The file takes priority over the inline token.
 
+To listen on a UNIX socket instead, set `prometheus_metrics_unix_socket_path`.
+
 ```yaml
 scrape_configs:
   - job_name: continuwuity

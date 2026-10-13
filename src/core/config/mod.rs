@@ -1051,6 +1051,12 @@ pub struct Config {
 	#[serde(default = "default_prometheus_metrics_address")]
 	pub prometheus_metrics_address: SocketAddr,
 
+	/// A UNIX socket for the Prometheus metrics endpoint to listen on instead
+	/// of `prometheus_metrics_address`, with `unix_socket_perms` permissions.
+	///
+	/// example: "/run/continuwuity/metrics.sock"
+	pub prometheus_metrics_unix_socket_path: Option<PathBuf>,
+
 	/// Bearer token required to scrape the Prometheus metrics endpoint. When
 	/// set, requests must include an `Authorization: Bearer <token>` header.
 	///

@@ -1,45 +1,85 @@
-use std::{sync::Arc, time::Duration};
+#[cfg(unix)]
+use std::path::Path;
+use std::sync::Arc;
 
 use axum::{Router, extract::State, response::IntoResponse, routing::get};
-use axum_server::{Handle as ServerHandle, bind};
 use conduwuit::{
 	Result, err, error, info, metrics::PROMETHEUS_CONTENT_TYPE, utils::string::constant_time_eq,
+	warn,
 };
 use conduwuit_service::Services;
 use http::{HeaderMap, StatusCode, header};
-use tokio::sync::broadcast;
+#[cfg(unix)]
+use tokio::{fs, net::UnixListener};
+use tokio::{net::TcpListener, sync::broadcast};
 
 pub(super) async fn serve(
 	services: &Arc<Services>,
 	mut shutdown: broadcast::Receiver<()>,
 ) -> Result {
-	let server = &services.server;
-	let config = &server.config;
+	let config = &services.server.config;
 	if !config.allow_prometheus_metrics {
 		return Ok(());
 	}
 
-	let addr = config.prometheus_metrics_address;
 	let app = Router::new()
 		.route("/metrics", get(scrape))
-		.with_state(services.clone())
-		.into_make_service();
+		.with_state(services.clone());
+	let shutdown = async move { _ = shutdown.recv().await };
 
-	let handle = ServerHandle::new();
-	let mut task = server
-		.runtime()
-		.spawn(bind(addr).handle(handle.clone()).serve(app));
+	#[cfg(unix)]
+	if let Some(path) = &config.prometheus_metrics_unix_socket_path {
+		let listener = bind_unix(path, config.unix_socket_perms).await?;
+		info!("Serving metrics at {path:?}");
+		let result = axum::serve(listener, app)
+			.with_graceful_shutdown(shutdown)
+			.await;
 
-	info!("Serving metrics on {addr}");
-	tokio::select! {
-		result = &mut task => result,
-		_ = shutdown.recv() => {
-			handle.graceful_shutdown(Some(Duration::from_secs(config.client_shutdown_timeout)));
-			task.await
-		},
+		if let Err(e) = fs::remove_file(path).await {
+			warn!(?path, "Failed to remove UNIX socket file: {e}");
+		}
+
+		return result.map_err(|e| err!(error!("metrics listener failed: {e}")));
 	}
-	.map_err(|e| err!(error!("metrics listener task failed: {e}")))?
-	.map_err(|e| err!(Config("prometheus_metrics_address", "{e}")))
+
+	let addr = config.prometheus_metrics_address;
+	let listener = TcpListener::bind(addr)
+		.await
+		.map_err(|e| err!(Config("prometheus_metrics_address", "{e}")))?;
+	info!("Serving metrics on {addr}");
+
+	axum::serve(listener, app)
+		.with_graceful_shutdown(shutdown)
+		.await
+		.map_err(|e| err!(error!("metrics listener failed: {e}")))
+}
+
+#[cfg(unix)]
+async fn bind_unix(path: &Path, perms: u32) -> Result<UnixListener> {
+	use std::os::unix::fs::PermissionsExt;
+
+	if path.exists() {
+		warn!("Removing existing UNIX socket {path:?} (unclean shutdown?)...");
+		fs::remove_file(path)
+			.await
+			.map_err(|e| err!("Failed to remove existing UNIX socket {path:?}: {e}"))?;
+	}
+
+	let dir = path.parent().unwrap_or_else(|| Path::new("/"));
+	fs::create_dir_all(dir)
+		.await
+		.map_err(|e| err!("Failed to create {dir:?} for socket {path:?}: {e}"))?;
+
+	let listener =
+		UnixListener::bind(path).map_err(|e| err!("Failed to bind listener {path:?}: {e}"))?;
+
+	let mode = u32::from_str_radix(&perms.to_string(), 8)
+		.map_err(|e| err!("Invalid unix_socket_perms {perms}: {e}"))?;
+	fs::set_permissions(path, std::fs::Permissions::from_mode(mode))
+		.await
+		.map_err(|e| err!("Failed to set socket {path:?} permissions: {e}"))?;
+
+	Ok(listener)
 }
 
 async fn scrape(
