@@ -27,8 +27,8 @@ use conduwuit_core::{
 };
 use futures::{FutureExt, StreamExt, TryFutureExt, pin_mut};
 use ruma::{
-	CanonicalJsonObject, CanonicalJsonValue, EventId, MilliSecondsSinceUnixEpoch, OwnedEventId,
-	OwnedRoomId, OwnedServerName, RoomId, RoomVersionId, ServerName, UserId,
+	CanonicalJsonObject, CanonicalJsonValue, EventId, OwnedEventId, OwnedRoomId, OwnedServerName,
+	RoomId, RoomVersionId, ServerName, UserId,
 	events::{
 		AnySyncTimelineEvent, GlobalAccountDataEventType, TimelineEventType,
 		push_rules::PushRulesEvent,
@@ -398,17 +398,9 @@ impl super::Service {
 		let count2 = PduCount::Normal(self.services.globals.next_count().unwrap());
 		let pdu_id: RawPduId = PduId { shortroomid, shorteventid: count2 }.into();
 
-		// Remote timestamps are untrusted, so index remote events by when we
-		// received them
-		let index_ts = if self.services.globals.user_is_local(pdu.sender()) {
-			pdu.origin_server_ts()
-		} else {
-			MilliSecondsSinceUnixEpoch::now()
-		};
-
 		// Insert pdu
 		self.db
-			.append_pdu(&pdu_id, pdu, room_id, &pdu_json, count2, index_ts)
+			.append_pdu(&pdu_id, pdu, room_id, &pdu_json, count2, pdu.origin_server_ts())
 			.await;
 
 		drop(insert_lock);
