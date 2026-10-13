@@ -194,11 +194,15 @@ pub fn check(config: &Config) -> Result {
 		);
 	}
 
-	if config.allow_prometheus_metrics && config.prometheus_metrics_token.is_none() {
+	if config.allow_prometheus_metrics
+		&& config.prometheus_metrics_token.is_none()
+		&& config.prometheus_metrics_token_file.is_none()
+		&& !config.prometheus_metrics_address.ip().is_loopback()
+	{
 		warn!(
-			"The Prometheus metrics endpoint is enabled without `prometheus_metrics_token`. \
-			 Anyone who can reach /_continuwuity/metrics can read server metrics unless access \
-			 is restricted at your reverse proxy."
+			"The Prometheus metrics endpoint is listening on {} without a \
+			 `prometheus_metrics_token`. Anyone who can reach it can read server metrics.",
+			config.prometheus_metrics_address
 		);
 	}
 
