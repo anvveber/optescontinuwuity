@@ -114,9 +114,9 @@ https://matrix.example.com {
 ### Tuning your trusted servers
 
 :::info Vet your trusted servers!
-Trusted servers are your first point of contact when obtaining public keys from other servers, and they could theoretically impersonate other servers and cause significant harm to your deployment. Please thoroughly verify your trusted servers' credibility before adding them to your configuration.
+Trusted servers are your first point of contact when obtaining public keys from other servers. They could theoretically impersonate other servers and cause significant harm to your deployment. Please thoroughly verify your trusted servers' credibility before adding them to your configuration.
 
-If you need suggestions for trusted servers, ask in the Continuwuity main room.
+If you need suggestions for trusted servers, ask in the Continuwuity support room.
 :::
 
 Trusted servers are queried sequentially in the order they are listed. If you have multiple trusted servers configured, put the faster ones first:
@@ -127,8 +127,6 @@ trusted_servers = ["codestorm.net","starstruck.systems","unredacted.org","matrix
 ```
 
 Avoid prioritising `matrix.org` as your primary trusted server, as it tends to be quite slow.
-
-Some users have also reported that increasing `trusted_server_batch_size` has helped with faster joins for huge rooms. Start with doubling the default to `2048` until you find a suitable value.
 
 ### Enable HTTP/3 on your reverse proxy
 
