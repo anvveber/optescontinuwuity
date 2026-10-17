@@ -30,6 +30,9 @@ pub struct ConnectionState {
 	pub rooms: HashMap<OwnedRoomId, RoomState>,
 	pub left_rooms: HashMap<OwnedRoomId, LeftRoom>,
 	pub list_counts: BTreeMap<String, usize>,
+	/// Whether the acknowledged response delivered every to-device message up
+	/// to its `pos`.
+	pub to_device_through_pos: bool,
 }
 
 #[derive(Clone, Debug)]
@@ -56,6 +59,7 @@ pub struct ConnectionUpdate {
 	pub rooms: HashMap<OwnedRoomId, RoomState>,
 	pub left_rooms: Option<HashMap<OwnedRoomId, LeftRoom>>,
 	pub list_counts: Option<BTreeMap<String, usize>>,
+	pub to_device_through_pos: bool,
 }
 
 /// A sliding sync `pos`, sent as `{count}_{seq}`.
@@ -85,6 +89,8 @@ impl ConnectionState {
 		if let Some(list_counts) = update.list_counts {
 			self.list_counts = list_counts;
 		}
+
+		self.to_device_through_pos = update.to_device_through_pos;
 	}
 }
 

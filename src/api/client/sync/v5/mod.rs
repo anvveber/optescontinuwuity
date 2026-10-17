@@ -1,3 +1,4 @@
+mod extensions;
 mod lists;
 mod room;
 
@@ -9,10 +10,12 @@ use conduwuit_service::{
 	Services,
 	sync::{ConnectionKey, ConnectionState, ConnectionUpdate},
 };
-use ruma::{UserId, api::client::sync::sync_events::v5, assign, presence::PresenceState};
+use ruma::{
+	DeviceId, UserId, api::client::sync::sync_events::v5, assign, presence::PresenceState, uint,
+};
 use tokio::time::{Instant, timeout_at};
 
-use self::{lists::select_rooms, room::build_rooms};
+use self::{extensions::build_extensions, lists::select_rooms, room::build_rooms};
 use crate::{Ruma, client_ip::ClientIp};
 
 /// The longest a request waits for changes. [MSC4186] leaves this to the
@@ -32,6 +35,9 @@ const MAX_ENTRIES: usize = 100;
 struct SyncContext<'a> {
 	/// The ID of the user requesting this sync.
 	syncing_user: &'a UserId,
+	/// The ID of the device requesting this sync, which will belong to
+	/// `syncing_user`.
+	syncing_device: &'a DeviceId,
 	request: &'a v5::Request,
 	connection: &'a ConnectionState,
 	/// The global count as of when we started building the response, which
@@ -61,7 +67,7 @@ pub(crate) async fn sync_events_v5_route(
 		.await;
 
 	let mut request = body.body;
-	validate(&request)?;
+	validate(&request, services.globals.current_count()?)?;
 
 	if services.config.allow_local_presence && request.set_presence != PresenceState::Offline {
 		services
@@ -78,6 +84,15 @@ pub(crate) async fn sync_events_v5_route(
 
 	let pos = request.pos.take();
 	let connection = services.sync.begin_request(&key, pos.as_deref())?;
+
+	extensions::acknowledge_to_device(
+		services,
+		syncing_user,
+		syncing_device,
+		&request,
+		&connection,
+	)
+	.await;
 
 	// a request without a position must be answered straight away
 	let timeout = connection
@@ -98,6 +113,7 @@ pub(crate) async fn sync_events_v5_route(
 	loop {
 		let context = SyncContext {
 			syncing_user,
+			syncing_device,
 			request: &request,
 			connection: &connection,
 			next_batch: services.globals.current_count()?,
@@ -128,7 +144,7 @@ pub(crate) async fn sync_events_v5_route(
 	}
 }
 
-fn validate(request: &v5::Request) -> Result {
+fn validate(request: &v5::Request, current_count: u64) -> Result {
 	let too_many = request.lists.len() > MAX_ENTRIES
 		|| request.room_subscriptions.len() > MAX_ENTRIES
 		|| request.lists.values().any(|list| {
@@ -146,6 +162,23 @@ fn validate(request: &v5::Request) -> Result {
 		)));
 	}
 
+	let extensions = &request.extensions;
+	if extensions.to_device.limit == Some(uint!(0)) {
+		return Err!(Request(BadJson("Extension limits must be positive.")));
+	}
+
+	// a position past the stream would acknowledge messages not yet delivered
+	let invalid = |since: Option<&str>| {
+		since.is_some_and(|since| {
+			!since
+				.parse::<u64>()
+				.is_ok_and(|since| since <= current_count)
+		})
+	};
+	if invalid(extensions.to_device.since.as_deref()) {
+		return Err!(Request(InvalidParam("Invalid extension `since`.")));
+	}
+
 	Ok(())
 }
 
@@ -160,19 +193,27 @@ async fn build_response(
 	let selected = started.elapsed();
 	let counts_changed = *selection.counts() != context.connection.list_counts;
 	let rooms = build_rooms(services, context, &selection).await;
+	let built_rooms = started.elapsed();
+	let extensions = build_extensions(services, context).await?;
 	if cfg!(debug_assertions) {
-		log_build(context, selection.rooms.len(), [selected, started.elapsed()]);
+		log_build(context, selection.rooms.len(), [selected, built_rooms, started.elapsed()]);
 	}
 
 	let response = assign!(v5::Response::new(String::new()), {
 		txn_id: context.request.txn_id.clone(),
 		lists: selection.lists(),
 		rooms: rooms.rooms,
+		extensions,
 	});
 
 	let update = ConnectionUpdate {
 		rooms: rooms.updates,
 		left_rooms: selection.left_rooms.take(),
+		to_device_through_pos: response
+			.extensions
+			.to_device
+			.as_ref()
+			.is_some_and(|to_device| to_device.next_batch == context.next_batch.to_string()),
 		list_counts: counts_changed.then(|| selection.counts().clone()),
 	};
 
@@ -180,21 +221,31 @@ async fn build_response(
 }
 
 /// Logs how long each phase of building a response took. `phases` are the
-/// elapsed times after selecting rooms and building them.
-fn log_build(context: SyncContext<'_>, rooms: usize, phases: [Duration; 2]) {
-	let [selected, total] = phases;
+/// elapsed times after selecting rooms, building them and building the
+/// extensions.
+fn log_build(context: SyncContext<'_>, rooms: usize, phases: [Duration; 3]) {
+	let [selected, built_rooms, total] = phases;
 
 	debug!(
 		conn_id = ?context.request.conn_id.as_deref(),
 		rooms,
 		?selected,
-		rooms_took = ?total.saturating_sub(selected),
+		rooms_took = ?built_rooms.saturating_sub(selected),
+		extensions_took = ?total.saturating_sub(built_rooms),
 		?total,
 		"built sliding sync response"
 	);
 }
 
-fn is_empty(response: &v5::Response) -> bool { response.rooms.is_empty() }
+fn is_empty(response: &v5::Response) -> bool {
+	let extensions = &response.extensions;
+
+	response.rooms.is_empty()
+		&& extensions
+			.to_device
+			.as_ref()
+			.is_none_or(|to_device| to_device.events.is_empty())
+}
 
 #[cfg(test)]
 mod tests {
@@ -203,6 +254,36 @@ mod tests {
 	use super::*;
 
 	fn response() -> v5::Response { v5::Response::new(String::new()) }
+
+	fn to_device_request() -> v5::Request {
+		let mut request = v5::Request::new();
+		request.extensions.to_device.enabled = Some(true);
+		request
+	}
+
+	#[test]
+	fn an_extension_position_must_have_been_issued() {
+		let mut request = to_device_request();
+		request.extensions.to_device.since = Some("10".to_owned());
+		validate(&request, 10).unwrap();
+
+		request.extensions.to_device.since = Some("11".to_owned());
+		validate(&request, 10).unwrap_err();
+
+		request.extensions.to_device.since = Some("not-a-position".to_owned());
+		validate(&request, 10).unwrap_err();
+	}
+
+	#[test]
+	fn an_extension_limit_must_be_positive() {
+		let mut request = to_device_request();
+		request.extensions.to_device.limit = Some(uint!(0));
+
+		validate(&request, 10).unwrap_err();
+
+		request.extensions.to_device.limit = Some(uint!(1));
+		validate(&request, 10).unwrap();
+	}
 
 	#[test]
 	fn a_fresh_response_is_empty() {
@@ -217,5 +298,13 @@ mod tests {
 			.insert(owned_room_id!("!a:example.com"), response::Room::default());
 
 		assert!(!is_empty(&response));
+	}
+
+	#[test]
+	fn an_empty_to_device_batch_does_not_count() {
+		let mut response = response();
+		response.extensions.to_device = Some(response::ToDevice::default());
+
+		assert!(is_empty(&response));
 	}
 }
