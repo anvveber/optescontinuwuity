@@ -241,6 +241,7 @@ fn is_empty(response: &v5::Response) -> bool {
 	let extensions = &response.extensions;
 
 	response.rooms.is_empty()
+		&& extensions.e2ee.device_lists.is_empty()
 		&& extensions
 			.to_device
 			.as_ref()
@@ -249,21 +250,25 @@ fn is_empty(response: &v5::Response) -> bool {
 
 #[cfg(test)]
 mod tests {
-	use ruma::{api::client::sync::sync_events::v5::response, owned_room_id};
+	use ruma::{
+		api::client::sync::sync_events::{DeviceLists, v5::response},
+		owned_room_id, owned_user_id,
+	};
 
 	use super::*;
 
 	fn response() -> v5::Response { v5::Response::new(String::new()) }
 
-	fn to_device_request() -> v5::Request {
+	fn encryption_request() -> v5::Request {
 		let mut request = v5::Request::new();
 		request.extensions.to_device.enabled = Some(true);
+		request.extensions.e2ee.enabled = Some(true);
 		request
 	}
 
 	#[test]
 	fn an_extension_position_must_have_been_issued() {
-		let mut request = to_device_request();
+		let mut request = encryption_request();
 		request.extensions.to_device.since = Some("10".to_owned());
 		validate(&request, 10).unwrap();
 
@@ -276,7 +281,7 @@ mod tests {
 
 	#[test]
 	fn an_extension_limit_must_be_positive() {
-		let mut request = to_device_request();
+		let mut request = encryption_request();
 		request.extensions.to_device.limit = Some(uint!(0));
 
 		validate(&request, 10).unwrap_err();
@@ -301,9 +306,19 @@ mod tests {
 	}
 
 	#[test]
-	fn an_empty_to_device_batch_does_not_count() {
+	fn extension_data_makes_the_response_non_empty() {
+		let mut device_lists = response();
+		device_lists.extensions.e2ee.device_lists =
+			assign!(DeviceLists::new(), { changed: vec![owned_user_id!("@a:example.com")] });
+
+		assert!(!is_empty(&device_lists));
+	}
+
+	#[test]
+	fn key_counts_and_an_empty_to_device_batch_do_not_count() {
 		let mut response = response();
 		response.extensions.to_device = Some(response::ToDevice::default());
+		response.extensions.e2ee.device_unused_fallback_key_types = Some(Vec::new());
 
 		assert!(is_empty(&response));
 	}

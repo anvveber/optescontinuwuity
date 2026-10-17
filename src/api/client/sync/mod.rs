@@ -4,7 +4,7 @@ mod v5;
 use std::collections::{HashSet, VecDeque};
 
 use conduwuit::{
-	Event, PduCount, Result, debug_warn, err,
+	Event, PduCount, Result, at, debug_warn, err,
 	matrix::pdu::{EventHash, PduEvent},
 	ref_at,
 	result::LogErr,
@@ -18,12 +18,48 @@ use conduwuit_service::{Services, rooms::short::ShortStateHash};
 use futures::{StreamExt, pin_mut};
 use ruma::{
 	EventId, OwnedUserId, RoomId, UserId,
-	events::{StateEventType, TimelineEventType},
+	api::client::sync::sync_events::DeviceLists,
+	assign,
+	events::{
+		StateEventType, TimelineEventType,
+		room::member::{MembershipState, RoomMemberEventContent},
+	},
 	uint,
 };
 use serde_json::value::RawValue;
 
 pub(crate) use self::{v3::sync_events_route, v5::sync_events_v5_route};
+
+/// A collection of updates to users' device lists, used for E2EE.
+struct DeviceListUpdates {
+	changed: HashSet<OwnedUserId>,
+	left: HashSet<OwnedUserId>,
+}
+
+impl DeviceListUpdates {
+	fn new() -> Self {
+		Self {
+			changed: HashSet::new(),
+			left: HashSet::new(),
+		}
+	}
+
+	fn merge(&mut self, other: Self) {
+		self.changed.extend(other.changed);
+		self.left.extend(other.left);
+	}
+
+	fn is_empty(&self) -> bool { self.changed.is_empty() && self.left.is_empty() }
+}
+
+impl From<DeviceListUpdates> for DeviceLists {
+	fn from(val: DeviceListUpdates) -> Self {
+		assign!(Self::new(), {
+			changed: val.changed.into_iter().collect(),
+			left: val.left.into_iter().collect(),
+		})
+	}
+}
 
 #[derive(Default)]
 pub(crate) struct TimelinePdus {
@@ -216,6 +252,70 @@ async fn shortstatehash_after_count(
 		.await
 		.map(Some)
 		.map_err(|err| err!("PDU after count has no shortstatehash: {err}"))
+}
+
+/// Collects the device list changes `room_id` contributes between `since` and
+/// `until`: users whose keys changed, members who joined, and members who left
+/// and no longer share an encrypted room with `syncing_user`.
+///
+/// `state_events` are the room's state changes in that range.
+async fn room_device_list_updates(
+	services: &Services,
+	syncing_user: &UserId,
+	room_id: &RoomId,
+	since: Option<u64>,
+	until: u64,
+	state_events: &[PduEvent],
+) -> DeviceListUpdates {
+	let mut device_list_updates = DeviceListUpdates::new();
+
+	// add users with changed keys to the `changed` list
+	services
+		.users
+		.room_keys_changed(room_id, since, Some(until))
+		.map(at!(0))
+		.ready_for_each(|user_id| {
+			device_list_updates.changed.insert(user_id);
+		})
+		.await;
+
+	for state_event in state_events {
+		if state_event.kind != TimelineEventType::RoomMember {
+			continue;
+		}
+
+		let Some(content): Option<RoomMemberEventContent> = state_event.get_content().ok() else {
+			continue;
+		};
+
+		let Some(user_id): Option<OwnedUserId> = state_event
+			.state_key
+			.as_ref()
+			.and_then(|key| key.parse().ok())
+		else {
+			continue;
+		};
+
+		if user_id == syncing_user {
+			continue;
+		}
+
+		match content.membership {
+			// `changed` may be a superset
+			| MembershipState::Join => {
+				device_list_updates.changed.insert(user_id);
+			},
+			| MembershipState::Leave
+				if !share_encrypted_room(services, syncing_user, &user_id, Some(room_id))
+					.await =>
+			{
+				device_list_updates.left.insert(user_id);
+			},
+			| _ => (),
+		}
+	}
+
+	device_list_updates
 }
 
 /// Fetch the user IDs to include in the `m.heroes` property of the room

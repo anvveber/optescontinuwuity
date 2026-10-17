@@ -5,7 +5,7 @@ use std::{
 
 use axum::extract::State;
 use conduwuit::{
-	Err, Result, debug, debug_warn, err,
+	Err, PduCount, Result, debug, debug_warn, err,
 	result::FlatOk,
 	utils::{IterStream, TryFutureExtExt, stream::WidebandExt},
 };
@@ -359,15 +359,16 @@ pub(crate) async fn get_key_changes_route(
 
 	let mut device_list_updates = HashSet::new();
 
-	let from = body
-		.from
-		.parse()
-		.map_err(|_| err!(Request(InvalidParam("Invalid `from`."))))?;
+	// PduCount also accepts a sliding sync `pos`
+	let parse_token = |token: &str| match token.parse() {
+		| Ok(PduCount::Normal(count)) => Some(count),
+		| _ => None,
+	};
 
-	let to = body
-		.to
-		.parse()
-		.map_err(|_| err!(Request(InvalidParam("Invalid `to`."))))?;
+	let from =
+		parse_token(&body.from).ok_or_else(|| err!(Request(InvalidParam("Invalid `from`."))))?;
+
+	let to = parse_token(&body.to).ok_or_else(|| err!(Request(InvalidParam("Invalid `to`."))))?;
 
 	device_list_updates.extend(
 		services

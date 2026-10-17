@@ -21,7 +21,7 @@ use futures::{
 	future::{OptionFuture, join, join3, join4, try_join, try_join3},
 };
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, RoomId,
+	MilliSecondsSinceUnixEpoch, OwnedRoomId, RoomId,
 	api::client::sync::sync_events::{
 		UnreadNotificationsCount,
 		v3::{
@@ -41,14 +41,13 @@ use ruma::{
 use service::{account_data::AnyRawAccountDataEvent, rooms::short::ShortStateHash};
 use tokio::pin;
 
-use super::{load_timeline, share_encrypted_room};
 use crate::client::{
 	TimelinePdus, ignored_filter, is_ignored_pdu,
 	sync::{
-		build_heroes, shortstatehash_after_count,
+		DeviceListUpdates, build_heroes, load_timeline, room_device_list_updates,
+		shortstatehash_after_count,
 		v3::{
-			DEFAULT_TIMELINE_LIMIT, DeviceListUpdates, SyncContext,
-			prepare_lazily_loaded_members,
+			DEFAULT_TIMELINE_LIMIT, SyncContext, prepare_lazily_loaded_members,
 			state::{build_state_incremental, build_state_initial},
 		},
 	},
@@ -396,7 +395,6 @@ async fn build_state_and_timeline(
 			room_id,
 			shortstatehashes,
 			&state_events,
-			joined_since_last_sync,
 		),
 	)
 	.await?;
@@ -789,8 +787,7 @@ async fn build_device_list_updates(
 	}: SyncContext<'_>,
 	room_id: &RoomId,
 	ShortStateHashes { current_shortstatehash, .. }: ShortStateHashes,
-	state_events: &Vec<PduEvent>,
-	joined_since_last_sync: bool,
+	state_events: &[PduEvent],
 ) -> Result<DeviceListUpdates> {
 	let is_encrypted_room = services
 		.rooms
@@ -804,55 +801,15 @@ async fn build_device_list_updates(
 		return Ok(DeviceListUpdates::new());
 	}
 
-	let mut device_list_updates = DeviceListUpdates::new();
-
-	// add users with changed keys to the `changed` list
-	services
-		.users
-		.room_keys_changed(room_id, last_sync_end_count, Some(current_count))
-		.map(at!(0))
-		.ready_for_each(|user_id| {
-			device_list_updates.changed.insert(user_id);
-		})
-		.await;
-
-	// add users who now share encrypted rooms to `changed` and
-	// users who no longer share encrypted rooms to `left`
-	for state_event in state_events {
-		if state_event.kind == RoomMember {
-			let Some(content): Option<RoomMemberEventContent> = state_event.get_content().ok()
-			else {
-				continue;
-			};
-
-			let Some(user_id): Option<OwnedUserId> = state_event
-				.state_key
-				.as_ref()
-				.and_then(|key| key.parse().ok())
-			else {
-				continue;
-			};
-
-			{
-				use MembershipState::*;
-
-				if matches!(content.membership, Leave | Join) {
-					let shares_encrypted_room =
-						share_encrypted_room(services, syncing_user, &user_id, Some(room_id))
-							.await;
-					match content.membership {
-						| Leave if !shares_encrypted_room => {
-							device_list_updates.left.insert(user_id);
-						},
-						| Join if joined_since_last_sync || shares_encrypted_room => {
-							device_list_updates.changed.insert(user_id);
-						},
-						| _ => (),
-					}
-				}
-			}
-		}
-	}
+	let device_list_updates = room_device_list_updates(
+		services,
+		syncing_user,
+		room_id,
+		last_sync_end_count,
+		current_count,
+		state_events,
+	)
+	.await;
 
 	if !device_list_updates.is_empty() {
 		trace!(
