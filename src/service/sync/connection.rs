@@ -1,5 +1,5 @@
 use std::{
-	collections::{BTreeMap, HashMap},
+	collections::{BTreeMap, HashMap, HashSet},
 	fmt,
 	str::FromStr,
 	sync::Arc,
@@ -33,6 +33,7 @@ pub struct ConnectionState {
 	/// Whether the acknowledged response delivered every to-device message up
 	/// to its `pos`.
 	pub to_device_through_pos: bool,
+	pub typing: ExtensionScope,
 }
 
 #[derive(Clone, Debug)]
@@ -53,13 +54,23 @@ pub struct LeftRoom {
 	pub removed: bool,
 }
 
-/// Applied once the client acknowledges the response.
+#[derive(Clone, Debug, Default, Eq, PartialEq)]
+pub struct ExtensionScope {
+	pub enabled: bool,
+	pub rooms: HashSet<OwnedRoomId>,
+	/// When rooms that left the scope were last covered.
+	pub left_at: HashMap<OwnedRoomId, u64>,
+}
+
+/// Changes to a connection's state, applied once the client acknowledges the
+/// response they were built with.
 #[derive(Debug, Default)]
 pub struct ConnectionUpdate {
 	pub rooms: HashMap<OwnedRoomId, RoomState>,
 	pub left_rooms: Option<HashMap<OwnedRoomId, LeftRoom>>,
 	pub list_counts: Option<BTreeMap<String, usize>>,
 	pub to_device_through_pos: bool,
+	pub typing: Option<ExtensionScope>,
 }
 
 /// A sliding sync `pos`, sent as `{count}_{seq}`.
@@ -79,6 +90,44 @@ pub(super) struct Connection {
 	pending: BTreeMap<u64, (Pos, ConnectionUpdate)>,
 }
 
+impl ExtensionScope {
+	/// Returns the count to send `room_id`'s changes from: `count` if the room
+	/// is in scope, the count it left the scope at if it was in scope before,
+	/// or zero if everything must be sent.
+	#[must_use]
+	pub fn since(&self, room_id: &OwnedRoomId, count: u64) -> u64 {
+		if !self.enabled {
+			return 0;
+		}
+
+		if self.rooms.contains(room_id) {
+			return count;
+		}
+
+		self.left_at.get(room_id).copied().unwrap_or(0)
+	}
+
+	/// Returns the scope after this response, covering `rooms` and remembering
+	/// when the rooms that left it were last covered. Returns `None` if the
+	/// scope did not change.
+	#[must_use]
+	pub fn advance(&self, rooms: HashSet<OwnedRoomId>, count: u64) -> Option<Self> {
+		if self.enabled && self.rooms == rooms {
+			return None;
+		}
+
+		let mut left_at = self.left_at.clone();
+		for room_id in self.rooms.difference(&rooms) {
+			left_at.insert(room_id.clone(), count);
+		}
+		for room_id in &rooms {
+			left_at.remove(room_id);
+		}
+
+		Some(Self { enabled: true, rooms, left_at })
+	}
+}
+
 impl ConnectionState {
 	fn apply(&mut self, update: ConnectionUpdate) {
 		self.rooms.extend(update.rooms);
@@ -91,6 +140,9 @@ impl ConnectionState {
 		}
 
 		self.to_device_through_pos = update.to_device_through_pos;
+		if let Some(typing) = update.typing {
+			self.typing = typing;
+		}
 	}
 }
 
@@ -273,5 +325,29 @@ mod tests {
 
 		assert_eq!(connection.pending.len(), MAX_PENDING);
 		assert!(!connection.acknowledge(first));
+	}
+
+	#[test]
+	fn extension_scope_tracks_rooms_entering_and_leaving() {
+		let stays = owned_room_id!("!stays:example.com");
+		let leaves = owned_room_id!("!leaves:example.com");
+		let fresh = owned_room_id!("!fresh:example.com");
+
+		let disabled = ExtensionScope::default();
+		assert_eq!(disabled.since(&stays, 10), 0);
+
+		let scope = disabled
+			.advance(HashSet::from([stays.clone(), leaves.clone()]), 10)
+			.unwrap();
+		assert_eq!(scope.since(&stays, 10), 10);
+		assert_eq!(scope.since(&fresh, 10), 0);
+		assert!(
+			scope
+				.advance(HashSet::from([stays.clone(), leaves.clone()]), 20)
+				.is_none()
+		);
+
+		let scope = scope.advance(HashSet::from([stays]), 20).unwrap();
+		assert_eq!(scope.since(&leaves, 30), 20);
 	}
 }

@@ -1,5 +1,5 @@
 use std::{
-	collections::{BTreeMap, HashMap, HashSet, btree_map::Entry},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet, btree_map::Entry},
 	ops::Range,
 	sync::Arc,
 };
@@ -39,6 +39,8 @@ use crate::client::is_ignored_invite;
 #[derive(Default)]
 pub(super) struct RoomSelection {
 	counts: BTreeMap<String, usize>,
+	pub(super) in_range: BTreeMap<String, Vec<OwnedRoomId>>,
+	pub(super) subscriptions: BTreeSet<OwnedRoomId>,
 	pub(super) rooms: BTreeMap<OwnedRoomId, SelectedRoom>,
 	pub(super) left_rooms: Option<HashMap<OwnedRoomId, LeftRoom>>,
 }
@@ -81,6 +83,12 @@ impl RoomSelection {
 				(list_id.clone(), list)
 			})
 			.collect()
+	}
+
+	pub(super) fn is_joined(&self, room_id: &RoomId) -> bool {
+		self.rooms
+			.get(room_id)
+			.is_some_and(|room| room.membership == MembershipState::Join)
 	}
 
 	fn select(
@@ -163,6 +171,7 @@ pub(super) async fn select_rooms(
 			.filter(|candidate| matches_filters(candidate, list.filters.as_ref()))
 			.collect();
 
+		let mut in_range = Vec::new();
 		for range in list_indices(matching.len(), &list.ranges) {
 			for candidate in &matching[range] {
 				selection.select(
@@ -171,10 +180,12 @@ pub(super) async fn select_rooms(
 					candidate.is_dm,
 					&config,
 				);
+				in_range.push(candidate.room_id.clone());
 			}
 		}
 
 		selection.counts.insert(list_id.clone(), matching.len());
+		selection.in_range.insert(list_id.clone(), in_range);
 	}
 
 	let listed: HashMap<&RoomId, &MembershipState> = candidates
@@ -197,6 +208,7 @@ pub(super) async fn select_rooms(
 			Arc::new(RoomConfig::new(&subscription.required_state, subscription.timeline_limit));
 
 		selection.select(room_id, &membership, direct_rooms.contains(room_id), &config);
+		selection.subscriptions.insert(room_id.clone());
 	}
 
 	Ok(selection)

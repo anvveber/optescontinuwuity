@@ -194,7 +194,7 @@ async fn build_response(
 	let counts_changed = *selection.counts() != context.connection.list_counts;
 	let rooms = build_rooms(services, context, &selection).await;
 	let built_rooms = started.elapsed();
-	let extensions = build_extensions(services, context).await?;
+	let (extensions, scopes) = build_extensions(services, context, &selection).await?;
 	if cfg!(debug_assertions) {
 		log_build(context, selection.rooms.len(), [selected, built_rooms, started.elapsed()]);
 	}
@@ -215,6 +215,7 @@ async fn build_response(
 			.as_ref()
 			.is_some_and(|to_device| to_device.next_batch == context.next_batch.to_string()),
 		list_counts: counts_changed.then(|| selection.counts().clone()),
+		typing: scopes.typing,
 	};
 
 	Ok((response, update))
@@ -241,6 +242,7 @@ fn is_empty(response: &v5::Response) -> bool {
 	let extensions = &response.extensions;
 
 	response.rooms.is_empty()
+		&& extensions.typing.is_empty()
 		&& extensions.e2ee.device_lists.is_empty()
 		&& extensions
 			.to_device
@@ -253,6 +255,7 @@ mod tests {
 	use ruma::{
 		api::client::sync::sync_events::{DeviceLists, v5::response},
 		owned_room_id, owned_user_id,
+		serde::Raw,
 	};
 
 	use super::*;
@@ -307,10 +310,17 @@ mod tests {
 
 	#[test]
 	fn extension_data_makes_the_response_non_empty() {
+		let mut typing = response();
+		typing.extensions.typing.rooms.insert(
+			owned_room_id!("!a:example.com"),
+			Raw::from_json_string("{}".to_owned()).unwrap(),
+		);
+
 		let mut device_lists = response();
 		device_lists.extensions.e2ee.device_lists =
 			assign!(DeviceLists::new(), { changed: vec![owned_user_id!("@a:example.com")] });
 
+		assert!(!is_empty(&typing));
 		assert!(!is_empty(&device_lists));
 	}
 

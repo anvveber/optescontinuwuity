@@ -17,7 +17,10 @@ use tokio::sync::{Mutex, watch};
 
 use self::connection::Connection;
 pub use self::{
-	connection::{ConnectionKey, ConnectionState, ConnectionUpdate, LeftRoom, Pos, RoomState},
+	connection::{
+		ConnectionKey, ConnectionState, ConnectionUpdate, ExtensionScope, LeftRoom, Pos,
+		RoomState,
+	},
 	room_config::{RequiredState, RoomConfig},
 };
 use crate::{Dep, rooms};
