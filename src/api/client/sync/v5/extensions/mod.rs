@@ -1,3 +1,4 @@
+mod account_data;
 mod e2ee;
 mod to_device;
 mod typing;
@@ -6,7 +7,7 @@ use std::collections::HashSet;
 
 use conduwuit::Result;
 use conduwuit_service::{Services, sync::ExtensionScope};
-use futures::future::try_join;
+use futures::future::{join, try_join};
 use ruma::{
 	OwnedRoomId,
 	api::client::sync::sync_events::v5::{self, request::ExtensionRoomConfig},
@@ -17,6 +18,7 @@ pub(super) use self::to_device::acknowledge as acknowledge_to_device;
 use super::{SyncContext, lists::RoomSelection};
 
 pub(super) struct ScopeUpdates {
+	pub(super) account_data: Option<ExtensionScope>,
 	pub(super) typing: Option<ExtensionScope>,
 }
 
@@ -27,18 +29,26 @@ pub(super) async fn build_extensions(
 	context: SyncContext<'_>,
 	selection: &RoomSelection,
 ) -> Result<(v5::response::Extensions, ScopeUpdates)> {
-	let (typing, typing_scope) = typing::collect(services, context, selection).await;
+	let ((account_data, account_data_scope), (typing, typing_scope)) = join(
+		account_data::collect(services, context, selection),
+		typing::collect(services, context, selection),
+	)
+	.await;
 
 	let (e2ee, to_device) =
 		try_join(e2ee::collect(services, context), to_device::collect(services, context)).await?;
 
 	let extensions = assign!(v5::response::Extensions::default(), {
+		account_data,
 		typing,
 		e2ee,
 		to_device,
 	});
 
-	let scopes = ScopeUpdates { typing: typing_scope };
+	let scopes = ScopeUpdates {
+		account_data: account_data_scope,
+		typing: typing_scope,
+	};
 
 	Ok((extensions, scopes))
 }

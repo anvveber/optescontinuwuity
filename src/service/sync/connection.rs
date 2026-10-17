@@ -33,6 +33,7 @@ pub struct ConnectionState {
 	/// Whether the acknowledged response delivered every to-device message up
 	/// to its `pos`.
 	pub to_device_through_pos: bool,
+	pub account_data: ExtensionScope,
 	pub typing: ExtensionScope,
 }
 
@@ -70,6 +71,7 @@ pub struct ConnectionUpdate {
 	pub left_rooms: Option<HashMap<OwnedRoomId, LeftRoom>>,
 	pub list_counts: Option<BTreeMap<String, usize>>,
 	pub to_device_through_pos: bool,
+	pub account_data: Option<ExtensionScope>,
 	pub typing: Option<ExtensionScope>,
 }
 
@@ -140,8 +142,12 @@ impl ConnectionState {
 		}
 
 		self.to_device_through_pos = update.to_device_through_pos;
-		if let Some(typing) = update.typing {
-			self.typing = typing;
+		for (scope, update) in
+			[(&mut self.account_data, update.account_data), (&mut self.typing, update.typing)]
+		{
+			if let Some(update) = update {
+				*scope = update;
+			}
 		}
 	}
 }

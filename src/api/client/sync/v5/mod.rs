@@ -215,6 +215,7 @@ async fn build_response(
 			.as_ref()
 			.is_some_and(|to_device| to_device.next_batch == context.next_batch.to_string()),
 		list_counts: counts_changed.then(|| selection.counts().clone()),
+		account_data: scopes.account_data,
 		typing: scopes.typing,
 	};
 
@@ -242,6 +243,7 @@ fn is_empty(response: &v5::Response) -> bool {
 	let extensions = &response.extensions;
 
 	response.rooms.is_empty()
+		&& extensions.account_data.is_empty()
 		&& extensions.typing.is_empty()
 		&& extensions.e2ee.device_lists.is_empty()
 		&& extensions
