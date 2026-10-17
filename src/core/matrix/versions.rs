@@ -45,6 +45,7 @@ pub fn unstable_features() -> BTreeMap<String, bool> {
 		("org.matrix.msc4538".to_owned(), true),
 		("org.matrix.msc4543".to_owned(), true),
 		("org.matrix.msc4548".to_owned(), true),
+		("org.matrix.msc4551".to_owned(), true),
 		// invite filtering (https://github.com/matrix-org/matrix-spec-proposals/pull/4155)
 		("org.matrix.msc4155".to_owned(), true),
 		// profile change propagation (https://github.com/matrix-org/matrix-spec-proposals/pull/4466)

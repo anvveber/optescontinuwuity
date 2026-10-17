@@ -194,7 +194,7 @@ async fn build_response(
 	let counts_changed = *selection.counts() != context.connection.list_counts;
 	let rooms = build_rooms(services, context, &selection).await;
 	let built_rooms = started.elapsed();
-	let (extensions, scopes) = build_extensions(services, context, &selection).await?;
+	let (extensions, scopes) = build_extensions(services, context, &selection, &rooms).await?;
 	if cfg!(debug_assertions) {
 		log_build(context, selection.rooms.len(), [selected, built_rooms, started.elapsed()]);
 	}
@@ -216,6 +216,7 @@ async fn build_response(
 			.is_some_and(|to_device| to_device.next_batch == context.next_batch.to_string()),
 		list_counts: counts_changed.then(|| selection.counts().clone()),
 		account_data: scopes.account_data,
+		receipts: scopes.receipts,
 		typing: scopes.typing,
 	};
 
@@ -244,6 +245,7 @@ fn is_empty(response: &v5::Response) -> bool {
 
 	response.rooms.is_empty()
 		&& extensions.account_data.is_empty()
+		&& extensions.receipts.is_empty()
 		&& extensions.typing.is_empty()
 		&& extensions.e2ee.device_lists.is_empty()
 		&& extensions

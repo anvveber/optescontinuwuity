@@ -11,7 +11,7 @@ use conduwuit::{
 	result::LogErr,
 	warn,
 };
-use futures::{Stream, TryFutureExt, try_join};
+use futures::{Stream, StreamExt, TryFutureExt, pin_mut, try_join};
 use ruma::{
 	EventId, MilliSecondsSinceUnixEpoch, OwnedEventId, OwnedUserId, RoomId, UserId,
 	api::appservice::event::push_events::v1::EphemeralData,
@@ -77,6 +77,22 @@ impl Service {
 			.send_edu_appservice_room(room_id, buf)
 			.await
 			.log_err();
+	}
+
+	/// Gets the latest public read receipt from the user in the room.
+	pub async fn user_readreceipt(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+	) -> Option<Raw<AnySyncEphemeralRoomEvent>> {
+		let count = self.db.readreceipt_count(room_id, user_id).await?;
+		let receipts = self.db.readreceipts_since(room_id, count.saturating_sub(1));
+
+		pin_mut!(receipts);
+		receipts
+			.next()
+			.await
+			.and_then(|(user, _, receipt)| (user == user_id).then_some(receipt))
 	}
 
 	/// Gets the latest private read receipt from the user in the room

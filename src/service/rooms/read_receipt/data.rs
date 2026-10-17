@@ -4,8 +4,8 @@ use conduwuit::{
 	Result,
 	utils::{ReadyExt, stream::TryIgnore},
 };
-use database::{Deserialized, Json, Map};
-use futures::{Stream, StreamExt};
+use database::{Deserialized, Ignore, Interfix, Json, Map};
+use futures::{Stream, StreamExt, pin_mut};
 use ruma::{
 	CanonicalJsonObject, OwnedRoomId, OwnedUserId, RoomId, UserId,
 	events::{AnySyncEphemeralRoomEvent, receipt::ReceiptEvent},
@@ -84,6 +84,25 @@ impl Data {
 				Ok((user_id, count, Raw::from_json(event)))
 			})
 			.ignore_err()
+	}
+
+	/// Reads the keys only, which is much cheaper than the receipts.
+	pub(super) async fn readreceipt_count(
+		&self,
+		room_id: &RoomId,
+		user_id: &UserId,
+	) -> Option<u64> {
+		let prefix = (room_id, Interfix);
+		let counts = self
+			.readreceiptid_readreceipt
+			.keys_prefix(&prefix)
+			.ignore_err()
+			.ready_filter_map(|(_, count, user): (Ignore, u64, &str)| {
+				(user == user_id.as_str()).then_some(count)
+			});
+
+		pin_mut!(counts);
+		counts.next().await
 	}
 
 	pub(super) fn private_read_set(&self, room_id: &RoomId, user_id: &UserId, pdu_count: u64) {

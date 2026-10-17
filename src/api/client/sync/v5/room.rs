@@ -59,6 +59,23 @@ const BUMP_LOOKBACK: usize = 50;
 pub(super) struct BuiltRooms {
 	pub(super) rooms: BTreeMap<OwnedRoomId, v5::response::Room>,
 	pub(super) updates: HashMap<OwnedRoomId, RoomState>,
+	pub(super) timelines: HashMap<OwnedRoomId, SentTimeline>,
+}
+
+#[derive(Default)]
+pub(super) struct SentTimeline {
+	/// The count before the first event.
+	pub(super) since: Option<u64>,
+	pub(super) event_ids: HashSet<OwnedEventId>,
+}
+
+struct BuiltRoom {
+	room: v5::response::Room,
+	timeline: SentTimeline,
+}
+
+impl From<v5::response::Room> for BuiltRoom {
+	fn from(room: v5::response::Room) -> Self { Self { room, timeline: SentTimeline::default() } }
 }
 
 struct RoomView {
@@ -117,8 +134,8 @@ pub(super) async fn build_rooms(
 			let dm_changed = previous.is_some_and(|previous| previous.is_dm != selected.is_dm);
 			let built = match built {
 				| Some(mut built) => {
-					if built.initial == Some(true) || dm_changed {
-						built.is_dm = Some(selected.is_dm);
+					if built.room.initial == Some(true) || dm_changed {
+						built.room.is_dm = Some(selected.is_dm);
 					}
 
 					Some(built)
@@ -129,7 +146,10 @@ pub(super) async fn build_rooms(
 					update =
 						previous.map(|previous| RoomState { is_dm: selected.is_dm, ..previous });
 
-					Some(assign!(v5::response::Room::new(), { is_dm: Some(selected.is_dm) }))
+					Some(
+						assign!(v5::response::Room::new(), { is_dm: Some(selected.is_dm) })
+							.into(),
+					)
 				},
 				| None => None,
 			};
@@ -137,7 +157,8 @@ pub(super) async fn build_rooms(
 			(built.is_some() || update.is_some()).then(|| (room_id.clone(), built, update))
 		})
 		.ready_fold(BuiltRooms::default(), |mut rooms, (room_id, built, update)| {
-			if let Some(room) = built {
+			if let Some(BuiltRoom { room, timeline }) = built {
+				rooms.timelines.insert(room_id.clone(), timeline);
 				rooms.rooms.insert(room_id.clone(), room);
 			}
 
@@ -198,7 +219,7 @@ async fn build_room(
 	room_id: &RoomId,
 	selected: &SelectedRoom,
 	since: Option<u64>,
-) -> Result<Option<v5::response::Room>> {
+) -> Result<Option<BuiltRoom>> {
 	let config = &selected.config;
 	match &selected.membership {
 		| MembershipState::Join => build_joined(services, context, room_id, config, since).await,
@@ -216,7 +237,7 @@ async fn build_joined(
 	room_id: &RoomId,
 	config: &RoomConfig,
 	since: Option<u64>,
-) -> Result<Option<v5::response::Room>> {
+) -> Result<Option<BuiltRoom>> {
 	let SyncContext { syncing_user, next_batch, .. } = context;
 
 	if let Some(since) = since
@@ -269,7 +290,7 @@ async fn build_stripped(
 	room_id: &RoomId,
 	membership: &MembershipState,
 	since: Option<u64>,
-) -> Result<Option<v5::response::Room>> {
+) -> Result<Option<BuiltRoom>> {
 	let SyncContext { syncing_user, next_batch, .. } = context;
 	let state_cache = &services.rooms.state_cache;
 
@@ -300,11 +321,14 @@ async fn build_stripped(
 		})
 		.map(|pdu| pdu.origin_server_ts);
 
-	Ok(Some(assign!(v5::response::Room::new(), {
-		initial: Some(since.is_none()),
-		invite_state: Some(stripped_state),
-		bump_stamp,
-	})))
+	Ok(Some(
+		assign!(v5::response::Room::new(), {
+			initial: Some(since.is_none()),
+			invite_state: Some(stripped_state),
+			bump_stamp,
+		})
+		.into(),
+	))
 }
 
 async fn build_left(
@@ -313,7 +337,7 @@ async fn build_left(
 	room_id: &RoomId,
 	config: &RoomConfig,
 	since: Option<u64>,
-) -> Result<Option<v5::response::Room>> {
+) -> Result<Option<BuiltRoom>> {
 	let SyncContext { syncing_user, next_batch, .. } = context;
 	let state_cache = &services.rooms.state_cache;
 
@@ -325,12 +349,12 @@ async fn build_left(
 	let Some(leave_pdu) = state_cache.left_state(syncing_user, room_id).await? else {
 		// removed by a server admin
 		let leave_pdu = create_dummy_leave_event(services, syncing_user, room_id);
-		return Ok(Some(leave_only(since, leave_pdu)));
+		return Ok(Some(leave_only(since, leave_pdu).into()));
 	};
 
 	// e.g. a rejected invite to a room nobody here is in
 	if !services.rooms.metadata.exists(room_id).await {
-		return Ok(Some(leave_only(since, leave_pdu)));
+		return Ok(Some(leave_only(since, leave_pdu).into()));
 	}
 
 	let end = services
@@ -350,7 +374,7 @@ async fn build_left(
 		.state_get(shortstatehash, &StateEventType::RoomMember, syncing_user.as_str())
 		.await
 	else {
-		return Ok(Some(leave_only(since, leave_pdu)));
+		return Ok(Some(leave_only(since, leave_pdu).into()));
 	};
 
 	// an unreadable membership must not reveal the history after it
@@ -358,7 +382,7 @@ async fn build_left(
 		.get_content::<RoomMemberEventContent>()
 		.is_ok_and(|content| content.membership == MembershipState::Join)
 	{
-		return Ok(Some(leave_only(since, leave_pdu)));
+		return Ok(Some(leave_only(since, leave_pdu).into()));
 	}
 
 	let join_count = services
@@ -393,7 +417,7 @@ async fn build_timeline_room(
 	config: &RoomConfig,
 	since: Option<u64>,
 	RoomView { start, end, shortstatehash, leave }: RoomView,
-) -> Result<Option<v5::response::Room>> {
+) -> Result<Option<BuiltRoom>> {
 	let SyncContext { syncing_user, .. } = context;
 	let initial = since.is_none();
 
@@ -532,6 +556,16 @@ async fn build_timeline_room(
 		.await;
 
 	let num_live = num_live_events(timeline.iter().map(|(count, _)| count), context.since());
+	let sent_timeline = SentTimeline {
+		since: timeline.iter().find_map(|(count, _)| match count {
+			| PduCount::Normal(count) => Some(count.saturating_sub(1)),
+			| PduCount::Backfilled(_) => None,
+		}),
+		event_ids: timeline
+			.iter()
+			.map(|(_, pdu)| pdu.event_id.clone())
+			.collect(),
+	};
 
 	let room = assign!(v5::response::Room::new(), {
 		name: room_name.filter(|_| changes.name),
@@ -549,7 +583,7 @@ async fn build_timeline_room(
 		heroes,
 	});
 
-	Ok(Some(room))
+	Ok(Some(BuiltRoom { room, timeline: sent_timeline }))
 }
 
 async fn state_changes(

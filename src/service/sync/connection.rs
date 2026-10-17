@@ -34,6 +34,7 @@ pub struct ConnectionState {
 	/// to its `pos`.
 	pub to_device_through_pos: bool,
 	pub account_data: ExtensionScope,
+	pub receipts: ExtensionScope,
 	pub typing: ExtensionScope,
 }
 
@@ -72,6 +73,7 @@ pub struct ConnectionUpdate {
 	pub list_counts: Option<BTreeMap<String, usize>>,
 	pub to_device_through_pos: bool,
 	pub account_data: Option<ExtensionScope>,
+	pub receipts: Option<ExtensionScope>,
 	pub typing: Option<ExtensionScope>,
 }
 
@@ -142,9 +144,11 @@ impl ConnectionState {
 		}
 
 		self.to_device_through_pos = update.to_device_through_pos;
-		for (scope, update) in
-			[(&mut self.account_data, update.account_data), (&mut self.typing, update.typing)]
-		{
+		for (scope, update) in [
+			(&mut self.account_data, update.account_data),
+			(&mut self.receipts, update.receipts),
+			(&mut self.typing, update.typing),
+		] {
 			if let Some(update) = update {
 				*scope = update;
 			}
