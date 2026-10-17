@@ -14,7 +14,10 @@ use ruma::{
 	serde::Raw,
 };
 
-use crate::users::{clean_signatures, parse_master_key, parse_user_signing_key};
+use crate::{
+	sync::WakeKind,
+	users::{clean_signatures, parse_master_key, parse_user_signing_key},
+};
 
 impl super::Service {
 	/// Adds a single one-time key to a device.
@@ -56,7 +59,7 @@ impl super::Service {
 		let count = self.services.globals.next_count().unwrap();
 		self.db.userid_lastonetimekeyupdate.raw_put(user_id, count);
 
-		self.services.sync.wake(user_id).await;
+		self.services.sync.wake(user_id, &[WakeKind::Keys]).await;
 
 		Ok(())
 	}
@@ -154,7 +157,7 @@ impl super::Service {
 			});
 
 		if let Some(result) = one_time_key {
-			self.services.sync.wake(user_id).await;
+			self.services.sync.wake(user_id, &[WakeKind::Keys]).await;
 			return Ok(result);
 		}
 
@@ -187,7 +190,7 @@ impl super::Service {
 				.await?;
 			}
 
-			self.services.sync.wake(user_id).await;
+			self.services.sync.wake(user_id, &[WakeKind::Keys]).await;
 			return Ok((fallback_key_id, fallback_key_value));
 		}
 
@@ -464,7 +467,10 @@ impl super::Service {
 				let key = (&room_id, count);
 				self.db.keychangeid_userid.put_raw(key, user_id);
 
-				self.services.sync.wake_all_joined(&room_id).await;
+				self.services
+					.sync
+					.wake_all_joined(&room_id, &[WakeKind::DeviceLists])
+					.await;
 			})
 			.await;
 

@@ -12,7 +12,7 @@ use std::{
 
 use conduwuit::{Err, Result, SyncMutex, trace, utils::with_lock::WithLock};
 use futures::StreamExt;
-use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, RoomId, UserId};
+use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, RoomId, UserId, events::TimelineEventType};
 use tokio::sync::{Mutex, watch};
 
 use self::connection::Connection;
@@ -46,38 +46,100 @@ struct Services {
 	state_cache: Dep<rooms::state_cache::Service>,
 }
 
+/// What changed for a user, so a long-poll only ends for changes it reports.
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+pub enum WakeKind {
+	Timeline,
+	Typing,
+	Receipts,
+	AccountData,
+	ToDevice,
+	Keys,
+	DeviceLists,
+}
+
+impl WakeKind {
+	pub const ALL: [Self; 7] = [
+		Self::Timeline,
+		Self::Typing,
+		Self::Receipts,
+		Self::AccountData,
+		Self::ToDevice,
+		Self::Keys,
+		Self::DeviceLists,
+	];
+
+	const fn index(self) -> usize {
+		match self {
+			| Self::Timeline => 0,
+			| Self::Typing => 1,
+			| Self::Receipts => 2,
+			| Self::AccountData => 3,
+			| Self::ToDevice => 4,
+			| Self::Keys => 5,
+			| Self::DeviceLists => 6,
+		}
+	}
+
+	/// What a timeline event changes: a membership or encryption event also
+	/// changes who shares an encrypted room.
+	#[must_use]
+	pub fn of_event(kind: &TimelineEventType) -> &'static [Self] {
+		match kind {
+			| TimelineEventType::RoomMember | TimelineEventType::RoomEncryption =>
+				&[Self::Timeline, Self::DeviceLists],
+			| _ => &[Self::Timeline],
+		}
+	}
+}
+
+type Generations = [u64; WakeKind::ALL.len()];
+
 #[derive(Default)]
-struct Wakers(Mutex<HashMap<OwnedUserId, watch::Sender<u64>>>);
+struct Wakers(Mutex<HashMap<OwnedUserId, watch::Sender<Generations>>>);
 
 impl Wakers {
-	async fn subscribe(&self, user: &UserId) -> watch::Receiver<u64> {
-		self.0
+	async fn subscribe(&self, user: &UserId, interest: &[WakeKind]) -> WakeSubscription {
+		let mut receiver = self
+			.0
 			.lock()
 			.await
 			.entry(user.to_owned())
-			.or_insert_with(|| watch::channel(0).0)
-			.subscribe()
+			.or_insert_with(|| watch::channel(Generations::default()).0)
+			.subscribe();
+
+		let seen = *receiver.borrow_and_update();
+
+		WakeSubscription {
+			receiver,
+			interest: interest.to_vec(),
+			seen,
+		}
 	}
 
-	async fn wake(&self, user: &UserId) {
+	async fn wake(&self, user: &UserId, kinds: &[WakeKind]) {
 		let mut wakers = self.0.lock().await;
-		wake_waker(&mut wakers, user);
+		wake_waker(&mut wakers, user, kinds);
 	}
 
-	async fn wake_all<I>(&self, users: I)
+	async fn wake_all<I>(&self, users: I, kinds: &[WakeKind])
 	where
 		I: IntoIterator<Item = OwnedUserId> + Send,
 	{
 		let mut wakers = self.0.lock().await;
 		for user in users {
-			wake_waker(&mut wakers, &user);
+			wake_waker(&mut wakers, &user, kinds);
 		}
 	}
 }
 
-/// Bumps the generation observed by anyone long-polling for this user, reaping
-/// the entry once its last subscriber is gone.
-fn wake_waker(wakers: &mut HashMap<OwnedUserId, watch::Sender<u64>>, user: &UserId) {
+/// Bumps the generation of each kind observed by anyone long-polling for this
+/// user, reaping the entry once its last subscriber is gone.
+fn wake_waker(
+	wakers: &mut HashMap<OwnedUserId, watch::Sender<Generations>>,
+	user: &UserId,
+	kinds: &[WakeKind],
+) {
 	let Some(waker) = wakers.get(user) else {
 		return;
 	};
@@ -87,7 +149,44 @@ fn wake_waker(wakers: &mut HashMap<OwnedUserId, watch::Sender<u64>>, user: &User
 		return;
 	}
 
-	waker.send_modify(|generation| *generation = generation.wrapping_add(1));
+	waker.send_modify(|generations| {
+		for kind in kinds {
+			let generation = &mut generations[kind.index()];
+			*generation = generation.wrapping_add(1);
+		}
+	});
+}
+
+/// A long-poll's view of its user's wakes. A wake that lands between building
+/// a response and waiting is still seen, since kinds are compared against the
+/// generations last seen rather than against a notification.
+pub struct WakeSubscription {
+	receiver: watch::Receiver<Generations>,
+	interest: Vec<WakeKind>,
+	seen: Generations,
+}
+
+impl WakeSubscription {
+	/// Waits for a wake of a kind this subscription is interested in and
+	/// returns the kinds it saw, or `None` once the user's waker is gone.
+	pub async fn woken(&mut self) -> Option<Vec<WakeKind>> {
+		loop {
+			let current = *self.receiver.borrow_and_update();
+			let woken: Vec<_> = self
+				.interest
+				.iter()
+				.copied()
+				.filter(|kind| current[kind.index()] != self.seen[kind.index()])
+				.collect();
+
+			self.seen = current;
+			if !woken.is_empty() {
+				return Some(woken);
+			}
+
+			self.receiver.changed().await.ok()?;
+		}
+	}
 }
 
 impl crate::Service for Service {
@@ -107,8 +206,12 @@ impl crate::Service for Service {
 }
 
 impl Service {
-	pub async fn subscribe_to_wake(&self, user: &UserId) -> watch::Receiver<u64> {
-		self.wakers.subscribe(user).await
+	pub async fn subscribe_to_wake(
+		&self,
+		user: &UserId,
+		interest: &[WakeKind],
+	) -> WakeSubscription {
+		self.wakers.subscribe(user, interest).await
 	}
 
 	/// Wake the target user's sync loop. Call this when something
@@ -118,15 +221,15 @@ impl Service {
 	/// it in any function that's called by `append_pdu`. `append_pdu` will call
 	/// it _after_ it's done appending a PDU, and calling it earlier can cause
 	/// hard-to-diagnose race conditions.
-	pub async fn wake(&self, user: &UserId) {
-		trace!(?user, "Waking user's sync loops");
+	pub async fn wake(&self, user: &UserId, kinds: &[WakeKind]) {
+		trace!(?user, ?kinds, "Waking user's sync loops");
 
-		self.wakers.wake(user).await;
+		self.wakers.wake(user, kinds).await;
 	}
 
 	/// Wake all of our users who are joined to the specified room.
-	pub async fn wake_all_joined(&self, room: &RoomId) {
-		trace!(?room, "Waking all joined users' sync loops");
+	pub async fn wake_all_joined(&self, room: &RoomId, kinds: &[WakeKind]) {
+		trace!(?room, ?kinds, "Waking all joined users' sync loops");
 		let users: Vec<_> = self
 			.services
 			.state_cache
@@ -134,7 +237,7 @@ impl Service {
 			.collect()
 			.await;
 
-		self.wakers.wake_all(users).await;
+		self.wakers.wake_all(users, kinds).await;
 	}
 
 	/// Starts handling a request, committing the response `pos` acknowledges
@@ -365,58 +468,129 @@ fn evict_least_recently_used(device: &mut HashMap<Option<String>, Entry>) -> Vec
 mod tests {
 	use super::*;
 
+	const SHORT: Duration = Duration::from_millis(50);
+
+	fn alice() -> OwnedUserId { UserId::parse("@alice:example.com").unwrap() }
+
 	#[tokio::test]
-	async fn wake_after_subscription_is_observable() {
+	async fn a_wake_after_subscribing_is_seen() {
 		let wakers = Wakers::default();
-		let user = UserId::parse("@alice:example.com").unwrap();
-		let mut receiver = wakers.subscribe(&user).await;
-		let generation = *receiver.borrow_and_update();
+		let user = alice();
+		let mut subscription = wakers.subscribe(&user, &WakeKind::ALL).await;
 
-		wakers.wake(&user).await;
-		wakers.wake(&user).await;
+		wakers.wake(&user, &[WakeKind::Typing]).await;
 
-		receiver.changed().await.unwrap();
-		assert_eq!(*receiver.borrow_and_update(), generation.wrapping_add(2));
+		assert_eq!(subscription.woken().await, Some(vec![WakeKind::Typing]));
+	}
+
+	#[tokio::test]
+	async fn a_wake_while_the_response_is_built_is_not_lost() {
+		let wakers = Wakers::default();
+		let user = alice();
+		let mut subscription = wakers.subscribe(&user, &[WakeKind::ToDevice]).await;
+
+		wakers.wake(&user, &[WakeKind::ToDevice]).await;
+		wakers.wake(&user, &[WakeKind::ToDevice]).await;
+
+		assert_eq!(subscription.woken().await, Some(vec![WakeKind::ToDevice]));
+		tokio::time::timeout(SHORT, subscription.woken())
+			.await
+			.unwrap_err();
+	}
+
+	#[tokio::test]
+	async fn kinds_outside_the_interest_do_not_wake() {
+		let wakers = Wakers::default();
+		let user = alice();
+		let mut subscription = wakers
+			.subscribe(&user, &[WakeKind::ToDevice, WakeKind::Keys])
+			.await;
+
+		wakers
+			.wake(&user, &[WakeKind::Typing, WakeKind::Timeline])
+			.await;
+		tokio::time::timeout(SHORT, subscription.woken())
+			.await
+			.unwrap_err();
+
+		wakers.wake(&user, &[WakeKind::Keys]).await;
+		assert_eq!(subscription.woken().await, Some(vec![WakeKind::Keys]));
+	}
+
+	#[tokio::test]
+	async fn a_wake_reports_every_kind_it_bumped() {
+		let wakers = Wakers::default();
+		let user = alice();
+		let mut subscription = wakers.subscribe(&user, &WakeKind::ALL).await;
+
+		wakers
+			.wake(&user, &[WakeKind::Timeline, WakeKind::DeviceLists])
+			.await;
+
+		assert_eq!(
+			subscription.woken().await,
+			Some(vec![WakeKind::Timeline, WakeKind::DeviceLists])
+		);
 	}
 
 	#[tokio::test]
 	async fn wake_notifies_all_subscribers() {
 		let wakers = Wakers::default();
-		let user = UserId::parse("@alice:example.com").unwrap();
-		let mut first = wakers.subscribe(&user).await;
-		let mut second = wakers.subscribe(&user).await;
+		let user = alice();
+		let mut first = wakers.subscribe(&user, &WakeKind::ALL).await;
+		let mut second = wakers.subscribe(&user, &WakeKind::ALL).await;
 
-		wakers.wake(&user).await;
+		wakers.wake(&user, &[WakeKind::Receipts]).await;
 
-		first.changed().await.unwrap();
-		second.changed().await.unwrap();
+		assert!(first.woken().await.is_some());
+		assert!(second.woken().await.is_some());
 	}
 
 	#[tokio::test]
 	async fn waker_is_not_retained_without_subscribers() {
 		let wakers = Wakers::default();
-		let user = UserId::parse("@alice:example.com").unwrap();
+		let user = alice();
 
-		wakers.wake(&user).await;
+		wakers.wake(&user, &[WakeKind::Timeline]).await;
 		assert!(wakers.0.lock().await.is_empty());
 
-		drop(wakers.subscribe(&user).await);
+		drop(wakers.subscribe(&user, &WakeKind::ALL).await);
 		assert_eq!(wakers.0.lock().await.len(), 1);
 
-		wakers.wake(&user).await;
+		wakers.wake(&user, &[WakeKind::Timeline]).await;
 		assert!(wakers.0.lock().await.is_empty());
 	}
 
 	#[tokio::test]
 	async fn subscriber_still_woken_after_a_sibling_disconnects() {
 		let wakers = Wakers::default();
-		let user = UserId::parse("@alice:example.com").unwrap();
-		let mut receiver = wakers.subscribe(&user).await;
-		drop(wakers.subscribe(&user).await);
+		let user = alice();
+		let mut subscription = wakers.subscribe(&user, &WakeKind::ALL).await;
+		drop(wakers.subscribe(&user, &WakeKind::ALL).await);
 
-		wakers.wake(&user).await;
+		wakers.wake(&user, &[WakeKind::Timeline]).await;
 
-		receiver.changed().await.unwrap();
+		assert!(subscription.woken().await.is_some());
+	}
+
+	#[test]
+	fn every_kind_has_its_own_generation() {
+		for (index, kind) in WakeKind::ALL.into_iter().enumerate() {
+			assert_eq!(kind.index(), index);
+		}
+	}
+
+	#[test]
+	fn membership_and_encryption_events_also_change_device_lists() {
+		assert_eq!(WakeKind::of_event(&TimelineEventType::RoomMember), [
+			WakeKind::Timeline,
+			WakeKind::DeviceLists
+		]);
+		assert_eq!(WakeKind::of_event(&TimelineEventType::RoomEncryption), [
+			WakeKind::Timeline,
+			WakeKind::DeviceLists
+		]);
+		assert_eq!(WakeKind::of_event(&TimelineEventType::RoomMessage), [WakeKind::Timeline]);
 	}
 
 	fn entry(age: Duration) -> Entry {

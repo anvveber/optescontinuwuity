@@ -31,6 +31,7 @@ use crate::{
 		state_compressor::{CompressedState, parse_compressed_state_event},
 	},
 	sending, sync,
+	sync::WakeKind,
 };
 
 pub struct Service {
@@ -141,7 +142,10 @@ impl Service {
 
 		self.set_room_state(room_id, shortstatehash, state_lock);
 
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Timeline, WakeKind::DeviceLists])
+			.await;
 
 		Ok(())
 	}

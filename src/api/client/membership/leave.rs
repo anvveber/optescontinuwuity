@@ -19,7 +19,7 @@ use ruma::{
 		room::member::{MembershipState, RoomMemberEventContent},
 	},
 };
-use service::{Services, rooms::membership::validate_remote_member_event_stub};
+use service::{Services, rooms::membership::validate_remote_member_event_stub, sync::WakeKind};
 
 use crate::Ruma;
 
@@ -209,7 +209,10 @@ pub async fn leave_room(
 		.update_joined_count(room_id)
 		.await;
 
-	services.sync.wake(user_id).await;
+	services
+		.sync
+		.wake(user_id, &[WakeKind::Timeline, WakeKind::DeviceLists])
+		.await;
 
 	Ok(())
 }

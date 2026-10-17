@@ -37,7 +37,9 @@ use crate::{
 		state_compressor::{self, CompressedState, HashSetCompressStateEvent},
 		timeline::{self, pdu_fits},
 	},
-	sending, server_keys, sync, users,
+	sending, server_keys, sync,
+	sync::WakeKind,
+	users,
 };
 
 #[derive(PartialEq, Eq)]
@@ -716,7 +718,10 @@ impl Service {
 		}
 		drop(cork);
 
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Timeline, WakeKind::DeviceLists])
+			.await;
 		self.services
 			.event_handler
 			.process_pending_join_pdus(room_id)

@@ -8,7 +8,7 @@ use axum::extract::State;
 use conduwuit::{Err, Result, debug, trace};
 use conduwuit_service::{
 	Services,
-	sync::{ConnectionKey, ConnectionState, ConnectionUpdate},
+	sync::{ConnectionKey, ConnectionState, ConnectionUpdate, WakeKind},
 };
 use ruma::{
 	DeviceId, UserId, api::client::sync::sync_events::v5, assign, presence::PresenceState, uint,
@@ -107,12 +107,13 @@ pub(crate) async fn sync_events_v5_route(
 		.checked_add(timeout)
 		.expect("timeout is bounded by MAX_TIMEOUT");
 
-	// clients send pending encryption requests, such as key backups, between
-	// syncs, so a connection without rooms returns on any activity
-	let extensions_only = request.lists.is_empty() && request.room_subscriptions.is_empty();
+	let has_rooms = !request.lists.is_empty() || !request.room_subscriptions.is_empty();
 
 	// subscribe first so no update is missed
-	let mut wake = services.sync.subscribe_to_wake(syncing_user).await;
+	let mut wake = services
+		.sync
+		.subscribe_to_wake(syncing_user, &wake_interest(&request))
+		.await;
 
 	loop {
 		let context = SyncContext {
@@ -126,10 +127,23 @@ pub(crate) async fn sync_events_v5_route(
 		let (mut response, update) = build_response(services, context).await?;
 
 		// a changed list count must be sent, even without any room data
-		let respond = !is_empty(&response)
-			|| update.list_counts.is_some()
-			|| !matches!(timeout_at(deadline, wake.changed()).await, Ok(Ok(())))
-			|| extensions_only;
+		let mut respond = !is_empty(&response) || update.list_counts.is_some();
+
+		if !respond {
+			respond = match timeout_at(deadline, wake.woken()).await {
+				// the deadline passed, or the waker is gone
+				| Ok(None) | Err(_) => true,
+				| Ok(Some(woken)) => {
+					debug!(conn_id = ?request.conn_id, ?woken, "sliding sync woken");
+
+					// clients replenish their one-time keys as soon as the
+					// counts move, and send encryption requests between syncs
+					// of a connection without rooms. Otherwise the response is
+					// built again, and only sent if the wake changed it.
+					!has_rooms || woken.contains(&WakeKind::Keys)
+				},
+			};
+		}
 
 		if respond {
 			response.pos = services
@@ -146,6 +160,27 @@ pub(crate) async fn sync_events_v5_route(
 			return Ok(response);
 		}
 	}
+}
+
+/// The changes that can alter a response to this request, so that a connection
+/// asking only for encryption data sleeps through room activity.
+fn wake_interest(request: &v5::Request) -> Vec<WakeKind> {
+	let extensions = &request.extensions;
+	let enabled = |enabled: Option<bool>| enabled == Some(true);
+	let rooms = !request.lists.is_empty() || !request.room_subscriptions.is_empty();
+
+	[
+		(rooms, WakeKind::Timeline),
+		(rooms || enabled(extensions.account_data.enabled), WakeKind::AccountData),
+		(rooms && enabled(extensions.typing.enabled), WakeKind::Typing),
+		(rooms && enabled(extensions.receipts.enabled), WakeKind::Receipts),
+		(enabled(extensions.to_device.enabled), WakeKind::ToDevice),
+		(enabled(extensions.e2ee.enabled), WakeKind::Keys),
+		(enabled(extensions.e2ee.enabled), WakeKind::DeviceLists),
+	]
+	.into_iter()
+	.filter_map(|(interested, kind)| interested.then_some(kind))
+	.collect()
 }
 
 fn validate(request: &v5::Request, current_count: u64) -> Result {
@@ -311,6 +346,38 @@ mod tests {
 
 		request.extensions.to_device.limit = Some(uint!(1));
 		validate(&request, 10).unwrap();
+	}
+
+	#[test]
+	fn an_encryption_only_connection_ignores_room_activity() {
+		assert_eq!(wake_interest(&encryption_request()), [
+			WakeKind::ToDevice,
+			WakeKind::Keys,
+			WakeKind::DeviceLists,
+		]);
+	}
+
+	#[test]
+	fn rooms_add_what_a_room_response_reports() {
+		let mut request = encryption_request();
+		request.extensions.typing.enabled = Some(true);
+		request
+			.room_subscriptions
+			.insert(owned_room_id!("!a:example.com"), v5::request::RoomSubscription::default());
+
+		let interest = wake_interest(&request);
+
+		for kind in [
+			WakeKind::Timeline,
+			WakeKind::AccountData,
+			WakeKind::Typing,
+			WakeKind::ToDevice,
+			WakeKind::Keys,
+			WakeKind::DeviceLists,
+		] {
+			assert!(interest.contains(&kind), "{kind:?}");
+		}
+		assert!(!interest.contains(&WakeKind::Receipts));
 	}
 
 	#[test]

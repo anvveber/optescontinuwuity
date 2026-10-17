@@ -19,6 +19,7 @@ use ruma::{
 };
 
 use super::{ExtractBody, RoomMutexGuard};
+use crate::sync::WakeKind;
 
 impl super::Service {
 	/// Creates a new persisted data unit and adds it to a room. This function
@@ -168,7 +169,10 @@ impl super::Service {
 			.state
 			.set_room_state(&room_id, statehashid, state_lock);
 
-		self.services.sync.wake_all_joined(&room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(&room_id, WakeKind::of_event(pdu.kind()))
+			.await;
 
 		if *pdu.kind() == TimelineEventType::RoomMember {
 			if let Some(target_user) = pdu
@@ -177,7 +181,10 @@ impl super::Service {
 				.and_then(|state_key| UserId::parse(state_key.as_str()).ok())
 			{
 				if self.services.globals.user_is_local(&target_user) {
-					self.services.sync.wake(&target_user).await;
+					self.services
+						.sync
+						.wake(&target_user, WakeKind::of_event(pdu.kind()))
+						.await;
 				}
 			}
 		}

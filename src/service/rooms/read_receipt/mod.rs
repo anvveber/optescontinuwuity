@@ -26,7 +26,7 @@ use self::data::{Data, ReceiptItem};
 use crate::{
 	Dep, rooms,
 	sending::{self, EduBuf},
-	sync,
+	sync::{self, WakeKind},
 };
 
 pub struct Service {
@@ -66,7 +66,10 @@ impl Service {
 		event: ReceiptEvent,
 	) {
 		self.db.readreceipt_update(user_id, room_id, &event).await;
-		self.services.sync.wake_all_joined(room_id).await;
+		self.services
+			.sync
+			.wake_all_joined(room_id, &[WakeKind::Receipts])
+			.await;
 		// update appservices
 		let edu = EphemeralData::Receipt(event);
 		let mut buf = EduBuf::new();

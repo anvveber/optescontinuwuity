@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 
 use axum::extract::State;
 use conduwuit::{Err, PduCount, Result, err};
+use conduwuit_service::sync::WakeKind;
 use ruma::{
 	MilliSecondsSinceUnixEpoch,
 	api::client::{read_marker::set_read_marker, receipt::create_receipt},
@@ -107,7 +108,7 @@ pub(crate) async fn set_read_marker_route(
 			.await;
 	}
 
-	services.sync.wake(sender_user).await;
+	services.sync.wake(sender_user, &[WakeKind::Receipts]).await;
 
 	Ok(set_read_marker::v3::Response::new())
 }
@@ -212,7 +213,7 @@ pub(crate) async fn create_receipt_route(
 		},
 	}
 
-	services.sync.wake(sender_user).await;
+	services.sync.wake(sender_user, &[WakeKind::Receipts]).await;
 
 	Ok(create_receipt::v3::Response::new())
 }
