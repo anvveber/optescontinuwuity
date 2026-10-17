@@ -21,7 +21,7 @@ use futures::{
 	future::{OptionFuture, join, join3, join4, try_join, try_join3},
 };
 use ruma::{
-	MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, RoomId, UserId,
+	MilliSecondsSinceUnixEpoch, OwnedRoomId, OwnedUserId, RoomId,
 	api::client::sync::sync_events::{
 		UnreadNotificationsCount,
 		v3::{
@@ -44,9 +44,13 @@ use tokio::pin;
 use super::{load_timeline, share_encrypted_room};
 use crate::client::{
 	TimelinePdus, ignored_filter, is_ignored_pdu,
-	sync::v3::{
-		DEFAULT_TIMELINE_LIMIT, DeviceListUpdates, SyncContext, prepare_lazily_loaded_members,
-		state::{build_state_incremental, build_state_initial},
+	sync::{
+		build_heroes, shortstatehash_after_count,
+		v3::{
+			DEFAULT_TIMELINE_LIMIT, DeviceListUpdates, SyncContext,
+			prepare_lazily_loaded_members,
+			state::{build_state_incremental, build_state_initial},
+		},
 	},
 };
 
@@ -462,45 +466,12 @@ async fn fetch_shortstatehashes(
 	// The room state as of the end of the last sync.
 	// This will be None if we are doing an initial sync.
 	let last_sync_end_shortstatehash =
-		OptionFuture::from(last_sync_end_count.map(async |last_sync_end_count| {
-			pin! {
-				let pdus = services
-					.rooms
-					.timeline
-					.pdus(room_id, Some(PduCount::Normal(last_sync_end_count)))
-					.ignore_err();
-			}
-
-			match pdus.next().await {
-				| Some((_, pdu_after_last_sync_end)) => {
-					trace!(?pdu_after_last_sync_end.event_id, "pdu at last sync end");
-
-					if pdu_after_last_sync_end.kind == RoomCreate {
-						// Room create events have no previous state
-						None
-					} else {
-						Some(
-							services
-								.rooms
-								.state_accessor
-								.pdu_shortstatehash(&pdu_after_last_sync_end.event_id)
-								.await
-								.map_err(|err| {
-									err!("Last sync end PDU has no shortstatehash: {err}")
-								}),
-						)
-					}
-				},
-				| None => {
-					// No events have been sent since the last sync, or we just
-					// joined this room
-					None
-				},
-			}
+		OptionFuture::from(last_sync_end_count.map(|last_sync_end_count| {
+			shortstatehash_after_count(services, room_id, last_sync_end_count)
 		}))
 		.await
-		.flatten()
-		.transpose()?;
+		.transpose()?
+		.flatten();
 
 	Ok(ShortStateHashes {
 		current_shortstatehash,
@@ -804,53 +775,6 @@ async fn build_room_summary(
 		joined_member_count: Some(ruma_from_u64(joined_member_count)),
 		invited_member_count: Some(ruma_from_u64(invited_member_count)),
 	})))
-}
-
-/// Fetch the user IDs to include in the `m.heroes` property of the room
-/// summary.
-async fn build_heroes(
-	services: &Services,
-	room_id: &RoomId,
-	syncing_user: &UserId,
-	current_shortstatehash: ShortStateHash,
-) -> HashSet<OwnedUserId> {
-	const MAX_HERO_COUNT: usize = 5;
-
-	// fetch joined members from the state cache first
-	let joined_members_stream = services.rooms.state_cache.room_members(room_id);
-
-	// then fetch invited members
-	let invited_members_stream = services.rooms.state_cache.room_members_invited(room_id);
-
-	// then as a last resort fetch every membership event
-	let all_members_stream = services
-		.rooms
-		.short
-		.multi_get_statekey_from_short(
-			services
-				.rooms
-				.state_accessor
-				.state_full_shortids(current_shortstatehash)
-				.ignore_err()
-				.ready_filter_map(|(key, _)| Some(key)),
-		)
-		.ignore_err()
-		.ready_filter_map(|(event_type, state_key)| {
-			if event_type == StateEventType::RoomMember {
-				state_key.to_string().try_into().ok()
-			} else {
-				None
-			}
-		});
-
-	joined_members_stream
-		.chain(invited_members_stream)
-		.chain(all_members_stream)
-		// the hero list should never include the syncing user
-		.ready_filter(|user_id| user_id != syncing_user)
-		.take(MAX_HERO_COUNT)
-		.collect()
-		.await
 }
 
 /// Collect updates to users' device lists for E2EE.

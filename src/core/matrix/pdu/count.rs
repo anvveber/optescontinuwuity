@@ -162,7 +162,17 @@ impl From<u64> for Count {
 impl FromStr for Count {
 	type Err = Error;
 
-	fn from_str(token: &str) -> Result<Self, Self::Err> { Ok(Self::from_signed(token.parse()?)) }
+	/// Parses a pagination token into a count.
+	///
+	/// A sliding sync `pos` (`{count}_{seq}`) is also accepted, as [MSC4186]
+	/// lets clients paginate from it, by parsing the count before the `_`.
+	///
+	/// [MSC4186]: https://github.com/matrix-org/matrix-spec-proposals/pull/4186
+	fn from_str(token: &str) -> Result<Self, Self::Err> {
+		let count = token.split_once('_').map_or(token, |(count, _)| count);
+
+		Ok(Self::from_signed(count.parse()?))
+	}
 }
 
 impl PartialOrd for Count {
@@ -175,4 +185,17 @@ impl Ord for Count {
 
 impl Default for Count {
 	fn default() -> Self { Self::Normal(0) }
+}
+
+#[cfg(test)]
+mod tests {
+	use super::Count;
+
+	#[test]
+	fn sliding_sync_positions_parse_as_their_count() {
+		assert_eq!("42".parse::<Count>().unwrap(), Count::Normal(42));
+		assert_eq!("42_7".parse::<Count>().unwrap(), Count::Normal(42));
+		assert_eq!("-3".parse::<Count>().unwrap(), Count::Backfilled(-3));
+		"x_7".parse::<Count>().unwrap_err();
+	}
 }

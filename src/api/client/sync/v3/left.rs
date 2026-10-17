@@ -1,26 +1,22 @@
 use conduwuit::{
-	Event, PduEvent, Result, at, debug_warn,
-	pdu::EventHash,
-	trace,
-	utils::{self, IterStream, future::ReadyEqExt, stream::WidebandExt as _},
+	Event, PduEvent, Result, at, debug_warn, trace,
+	utils::{IterStream, future::ReadyEqExt, stream::WidebandExt as _},
 };
 use futures::StreamExt;
 use ruma::{
-	EventId, OwnedRoomId, RoomId,
+	OwnedRoomId, RoomId,
 	api::client::sync::sync_events::v3::{
 		LeftRoom, RoomAccountData, State, StateEvents, Timeline,
 	},
 	assign,
 	events::{StateEventType, TimelineEventType},
-	uint,
 };
-use serde_json::value::RawValue;
 use service::{Services, rooms::short::ShortStateHash};
 
 use crate::client::{
 	TimelinePdus, ignored_filter,
 	sync::{
-		load_timeline,
+		create_dummy_leave_event, load_timeline,
 		v3::{
 			DEFAULT_TIMELINE_LIMIT, SyncContext, prepare_lazily_loaded_members,
 			state::build_state_initial,
@@ -165,7 +161,7 @@ pub(super) async fn load_left_room(
 			trace!("syncing dummy leave event");
 			(TimelinePdus::default(), vec![create_dummy_leave_event(
 				services,
-				sync_context,
+				syncing_user,
 				room_id,
 			)])
 		},
@@ -317,35 +313,4 @@ async fn build_left_state_and_timeline(
 	);
 
 	Ok((timeline, state))
-}
-
-fn create_dummy_leave_event(
-	services: &Services,
-	SyncContext { syncing_user, .. }: SyncContext<'_>,
-	room_id: &RoomId,
-) -> PduEvent {
-	// TODO: because this event ID is random, it could cause caching issues with
-	// clients. perhaps a database table could be created to hold these dummy
-	// events, or they could be stored as outliers?
-	PduEvent {
-		event_id: EventId::new_v1(services.globals.server_name()),
-		sender: syncing_user.to_owned(),
-		origin: None,
-		origin_server_ts: utils::millis_since_unix_epoch()
-			.try_into()
-			.expect("Timestamp is valid js_int value"),
-		kind: TimelineEventType::RoomMember,
-		content: RawValue::from_string(r#"{"membership": "leave"}"#.to_owned()).unwrap(),
-		sticky: None,
-		state_key: Some(syncing_user.as_str().into()),
-		unsigned: None,
-		// The following keys are dropped on conversion
-		room_id: Some(room_id.to_owned()),
-		prev_events: vec![],
-		depth: uint!(1),
-		auth_events: vec![],
-		redacts: None,
-		hashes: EventHash { sha256: String::new() },
-		signatures: None,
-	}
 }

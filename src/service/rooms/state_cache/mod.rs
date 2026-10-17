@@ -336,11 +336,14 @@ impl Service {
 		&'a self,
 		user_id: &'a UserId,
 	) -> impl Stream<Item = OwnedRoomId> + Send + 'a {
+		// the raw prefix also matches user IDs which merely start with this one
 		self.db
 			.userroomid_joined
 			.keys_raw_prefix(user_id)
 			.ignore_err()
-			.map(|(_, room_id): (Ignore, OwnedRoomId)| room_id)
+			.ready_filter_map(move |(user, room_id): (&str, OwnedRoomId)| {
+				(user == user_id.as_str()).then_some(room_id)
+			})
 	}
 
 	/// Returns an iterator over all rooms a user was invited to.
@@ -417,6 +420,19 @@ impl Service {
 	pub async fn left_state(&self, user_id: &UserId, room_id: &RoomId) -> Result<Option<Pdu>> {
 		let key = (user_id, room_id);
 		self.db.userroomid_leftstate.qry(&key).await.deserialized()
+	}
+
+	/// Returns an iterator over the IDs of all rooms a user left.
+	pub fn rooms_left_ids<'a>(
+		&'a self,
+		user_id: &'a UserId,
+	) -> impl Stream<Item = OwnedRoomId> + Send + 'a {
+		let prefix = (user_id, Interfix);
+		self.db
+			.userroomid_leftstate
+			.keys_prefix(&prefix)
+			.ignore_err()
+			.map(|(_, room_id): (Ignore, OwnedRoomId)| room_id)
 	}
 
 	/// Returns an iterator over all rooms a user left.

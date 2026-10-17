@@ -1,29 +1,29 @@
 mod v3;
 mod v5;
 
-use std::collections::VecDeque;
+use std::collections::{HashSet, VecDeque};
 
 use conduwuit::{
 	Event, PduCount, Result, debug_warn, err,
-	matrix::pdu::PduEvent,
+	matrix::pdu::{EventHash, PduEvent},
 	ref_at,
 	result::LogErr,
 	trace,
-	utils::stream::{BroadbandExt, ReadyExt, TryIgnore, WidebandExt},
-};
-use conduwuit_service::Services;
-use futures::StreamExt;
-use ruma::{
-	OwnedUserId, RoomId, UserId,
-	events::TimelineEventType::{
-		self, Beacon, CallInvite, PollStart, RoomEncrypted, RoomMessage, Sticker,
+	utils::{
+		self,
+		stream::{BroadbandExt, ReadyExt, TryIgnore, WidebandExt},
 	},
 };
+use conduwuit_service::{Services, rooms::short::ShortStateHash};
+use futures::{StreamExt, pin_mut};
+use ruma::{
+	EventId, OwnedUserId, RoomId, UserId,
+	events::{StateEventType, TimelineEventType},
+	uint,
+};
+use serde_json::value::RawValue;
 
 pub(crate) use self::{v3::sync_events_route, v5::sync_events_v5_route};
-
-pub(crate) const DEFAULT_BUMP_TYPES: &[TimelineEventType; 6] =
-	&[CallInvite, PollStart, Beacon, RoomEncrypted, RoomMessage, Sticker];
 
 #[derive(Default)]
 pub(crate) struct TimelinePdus {
@@ -182,4 +182,116 @@ async fn share_encrypted_room(
 				.await
 		})
 		.await
+}
+
+/// Returns the room's state as of `count`, taken from the state before the
+/// first event after it. Returns `None` if no event has been sent since
+/// `count`, or if the first one is the room's create event.
+async fn shortstatehash_after_count(
+	services: &Services,
+	room_id: &RoomId,
+	count: u64,
+) -> Result<Option<ShortStateHash>> {
+	let pdus = services
+		.rooms
+		.timeline
+		.pdus(room_id, Some(PduCount::Normal(count)))
+		.ignore_err();
+	pin_mut!(pdus);
+
+	let Some((_, pdu_after_count)) = pdus.next().await else {
+		return Ok(None);
+	};
+
+	trace!(?pdu_after_count.event_id, "pdu after count");
+
+	if pdu_after_count.kind == TimelineEventType::RoomCreate {
+		return Ok(None);
+	}
+
+	services
+		.rooms
+		.state_accessor
+		.pdu_shortstatehash(&pdu_after_count.event_id)
+		.await
+		.map(Some)
+		.map_err(|err| err!("PDU after count has no shortstatehash: {err}"))
+}
+
+/// Fetch the user IDs to include in the `m.heroes` property of the room
+/// summary.
+async fn build_heroes(
+	services: &Services,
+	room_id: &RoomId,
+	syncing_user: &UserId,
+	current_shortstatehash: ShortStateHash,
+) -> HashSet<OwnedUserId> {
+	const MAX_HERO_COUNT: usize = 5;
+
+	// fetch joined members from the state cache first
+	let joined_members_stream = services.rooms.state_cache.room_members(room_id);
+
+	// then fetch invited members
+	let invited_members_stream = services.rooms.state_cache.room_members_invited(room_id);
+
+	// then as a last resort fetch every membership event
+	let all_members_stream = services
+		.rooms
+		.short
+		.multi_get_statekey_from_short(
+			services
+				.rooms
+				.state_accessor
+				.state_full_shortids(current_shortstatehash)
+				.ignore_err()
+				.ready_filter_map(|(key, _)| Some(key)),
+		)
+		.ignore_err()
+		.ready_filter_map(|(event_type, state_key)| {
+			if event_type == StateEventType::RoomMember {
+				state_key.to_string().try_into().ok()
+			} else {
+				None
+			}
+		});
+
+	joined_members_stream
+		.chain(invited_members_stream)
+		.chain(all_members_stream)
+		// the hero list should never include the syncing user
+		.ready_filter(|user_id| user_id != syncing_user)
+		.take(MAX_HERO_COUNT)
+		.collect()
+		.await
+}
+
+fn create_dummy_leave_event(
+	services: &Services,
+	syncing_user: &UserId,
+	room_id: &RoomId,
+) -> PduEvent {
+	// TODO: because this event ID is random, it could cause caching issues with
+	// clients. perhaps a database table could be created to hold these dummy
+	// events, or they could be stored as outliers?
+	PduEvent {
+		event_id: EventId::new_v1(services.globals.server_name()),
+		sender: syncing_user.to_owned(),
+		origin: None,
+		origin_server_ts: utils::millis_since_unix_epoch()
+			.try_into()
+			.expect("Timestamp is valid js_int value"),
+		kind: TimelineEventType::RoomMember,
+		content: RawValue::from_string(r#"{"membership": "leave"}"#.to_owned()).unwrap(),
+		sticky: None,
+		state_key: Some(syncing_user.as_str().into()),
+		unsigned: None,
+		// The following keys are dropped on conversion
+		room_id: Some(room_id.to_owned()),
+		prev_events: vec![],
+		depth: uint!(1),
+		auth_events: vec![],
+		redacts: None,
+		hashes: EventHash { sha256: String::new() },
+		signatures: None,
+	}
 }

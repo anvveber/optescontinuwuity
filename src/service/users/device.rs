@@ -133,6 +133,8 @@ impl super::Service {
 		// Remove OAuth session information
 		self.services.oauth.remove_session(user_id, device_id).await;
 
+		self.services.sync.forget_device(user_id, device_id);
+
 		increment(&self.db.userid_devicelistversion, user_id.as_bytes());
 
 		self.db.userdeviceid_metadata.del(userdeviceid);

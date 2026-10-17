@@ -1,74 +1,47 @@
+mod connection;
+mod room_config;
+
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
-	sync::Arc,
+	collections::HashMap,
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	time::{Duration, Instant},
 };
 
-use conduwuit::{Result, SyncMutex, trace};
+use conduwuit::{Err, Result, SyncMutex, trace, utils::with_lock::WithLock};
 use futures::StreamExt;
-use ruma::{
-	OwnedDeviceId, OwnedRoomId, OwnedUserId, RoomId, UserId, api::client::sync::sync_events::v5,
-};
+use ruma::{DeviceId, OwnedDeviceId, OwnedUserId, RoomId, UserId};
 use tokio::sync::{Mutex, watch};
 
+use self::connection::Connection;
+pub use self::{
+	connection::{ConnectionKey, ConnectionState, ConnectionUpdate, LeftRoom, Pos, RoomState},
+	room_config::{RequiredState, RoomConfig},
+};
 use crate::{Dep, rooms};
+
+const CONNECTION_TTL: Duration = Duration::from_hours(7 * 24);
+
+const MAX_CONNECTIONS_PER_DEVICE: usize = 8;
+
+const SWEEP_INTERVAL: Duration = Duration::from_hours(1);
+
+type DeviceConnections = HashMap<Option<String>, Entry>;
 
 pub struct Service {
 	services: Services,
 	wakers: Wakers,
-	snake_connections: DbConnections<SnakeConnectionsKey, SnakeConnectionsVal>,
+	connections: SyncMutex<HashMap<(OwnedUserId, OwnedDeviceId), DeviceConnections>>,
+	last_sweep: SyncMutex<Instant>,
+	/// Connection IDs and response sequence numbers.
+	next_seq: AtomicU64,
 }
 
 struct Services {
 	state_cache: Dep<rooms::state_cache::Service>,
 }
-
-#[allow(unused, reason = "TODO refactor")]
-struct SlidingSyncCache {
-	lists: BTreeMap<String, v5::request::List>,
-	subscriptions: BTreeMap<OwnedRoomId, v5::request::RoomSubscription>,
-	// For every room, the roomsince number
-	known_rooms: BTreeMap<String, BTreeMap<OwnedRoomId, u64>>,
-	extensions: v5::request::Extensions,
-}
-
-#[derive(Default)]
-struct SnakeSyncCache {
-	lists: BTreeMap<String, v5::request::List>,
-	subscriptions: BTreeMap<OwnedRoomId, v5::request::RoomSubscription>,
-	known_rooms: BTreeMap<String, BTreeMap<OwnedRoomId, u64>>,
-	acknowledged_pos: u64,
-	pending: BTreeMap<u64, BTreeMap<String, BTreeMap<OwnedRoomId, u64>>>,
-	extensions: v5::request::Extensions,
-}
-
-impl SnakeSyncCache {
-	fn accepts_pos(&self, pos: u64) -> bool {
-		self.acknowledged_pos == pos || self.pending.contains_key(&pos)
-	}
-
-	fn acknowledge(&mut self, pos: u64) {
-		if let Some(known_rooms) = self.pending.remove(&pos) {
-			self.known_rooms = known_rooms;
-			self.acknowledged_pos = pos;
-		}
-	}
-
-	fn stage_pending(&mut self, pos: u64, known_rooms: BTreeMap<String, BTreeSet<OwnedRoomId>>) {
-		let mut pending_rooms = self.known_rooms.clone();
-		for (list_id, rooms) in known_rooms {
-			let list = pending_rooms.entry(list_id).or_default();
-			for room_id in rooms {
-				list.insert(room_id, pos);
-			}
-		}
-		self.pending.insert(pos, pending_rooms);
-	}
-}
-
-type DbConnections<K, V> = SyncMutex<BTreeMap<K, V>>;
-type DbConnectionsKey = (OwnedUserId, OwnedDeviceId, String);
-pub type SnakeConnectionsKey = (OwnedUserId, OwnedDeviceId, Option<String>);
-type SnakeConnectionsVal = Arc<SyncMutex<SnakeSyncCache>>;
 
 #[derive(Default)]
 struct Wakers(Mutex<HashMap<OwnedUserId, watch::Sender<u64>>>);
@@ -121,7 +94,9 @@ impl crate::Service for Service {
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 			},
 			wakers: Wakers::default(),
-			snake_connections: SyncMutex::new(BTreeMap::new()),
+			connections: SyncMutex::new(HashMap::new()),
+			last_sweep: SyncMutex::new(Instant::now()),
+			next_seq: AtomicU64::new(0),
 		}))
 	}
 
@@ -159,196 +134,228 @@ impl Service {
 		self.wakers.wake_all(users).await;
 	}
 
-	pub fn snake_connection_cached(&self, key: &SnakeConnectionsKey) -> bool {
-		self.snake_connections.lock().contains_key(key)
-	}
-
-	pub fn snake_connection_accepts_pos(&self, key: &SnakeConnectionsKey, pos: u64) -> bool {
-		self.snake_connections
-			.lock()
-			.get(key)
-			.is_some_and(|cache| cache.lock().accepts_pos(pos))
-	}
-
-	pub fn forget_snake_sync_connection(&self, key: &SnakeConnectionsKey) {
-		self.snake_connections.lock().remove(key);
-	}
-
-	pub fn update_snake_sync_request_with_cache(
+	/// Starts handling a request, committing the response `pos` acknowledges
+	/// and returning the connection's state. Without a `pos` the connection
+	/// starts over.
+	pub fn begin_request(
 		&self,
-		snake_key: &SnakeConnectionsKey,
-		pos: u64,
-		request: &mut v5::Request,
-	) -> BTreeMap<String, BTreeMap<OwnedRoomId, u64>> {
-		let mut cache = self.snake_connections.lock();
-		let cached = Arc::clone(
-			cache
-				.entry(snake_key.clone())
-				.or_insert_with(|| Arc::new(SyncMutex::new(SnakeSyncCache::default()))),
-		);
-		let cached = &mut cached.lock();
-		drop(cache);
+		key: &ConnectionKey,
+		pos: Option<&str>,
+	) -> Result<Arc<ConnectionState>> {
+		let Ok(pos) = pos.map(str::parse::<Pos>).transpose() else {
+			let removed = self.connections.with_lock(|connections| {
+				connections
+					.get_mut(&device_key(key))
+					.and_then(|device| device.remove(&key.conn_id))
+			});
 
-		cached.acknowledge(pos);
+			drop(removed);
+			return Err!(Request(UnknownPos("Unrecognised sync position.")));
+		};
 
-		//v5::Request::try_from_http_request(req, path_args);
-		for (list_id, list) in &mut request.lists {
-			if let Some(cached_list) = cached.lists.get(list_id) {
-				list_or_sticky(
-					&mut list.room_details.required_state,
-					&cached_list.room_details.required_state,
-				);
+		let connection = match pos {
+			| None => self.start(key),
+			| Some(pos) => {
+				let resumed = self.resume(key);
+				let acknowledged = resumed.as_ref().is_some_and(|connection| {
+					connection.with_lock(|connection| connection.acknowledge(pos))
+				});
 
-				match (&mut list.filters, cached_list.filters.clone()) {
-					| (Some(filters), Some(cached_filters)) => {
-						some_or_sticky(&mut filters.is_invite, cached_filters.is_invite);
-						// TODO (morguldir): Find out how a client can unset
-						// this, probably need to change into an option
-						// inside ruma
-						list_or_sticky(
-							&mut filters.not_room_types,
-							&cached_filters.not_room_types,
-						);
-					},
-					| (_, Some(cached_filters)) => list.filters = Some(cached_filters),
-					| (Some(list_filters), _) => list.filters = Some(list_filters.clone()),
-					| (..) => {},
+				let (Some(connection), true) = (&resumed, acknowledged) else {
+					// leave a connection another request just started alone
+					if let Some(resumed) = &resumed {
+						drop(self.remove(key, resumed));
+					}
+
+					return Err!(Request(UnknownPos(
+						"Connection data unknown to server; restarting sync stream."
+					)));
+				};
+
+				Arc::clone(connection)
+			},
+		};
+
+		Ok(connection.with_lock(|connection| connection.state()))
+	}
+
+	/// Stages the update for a response built from `connection`, to be
+	/// committed once the client acknowledges the returned `pos`.
+	pub fn finish_request(
+		&self,
+		key: &ConnectionKey,
+		connection: &ConnectionState,
+		count: u64,
+		update: ConnectionUpdate,
+	) -> Pos {
+		let pos = Pos {
+			count,
+			seq: self.next_seq.fetch_add(1, Ordering::Relaxed),
+		};
+
+		let current = self.connections.with_lock(|connections| {
+			connections
+				.get(&device_key(key))
+				.and_then(|device| device.get(&key.conn_id))
+				.map(|entry| Arc::clone(&entry.connection))
+		});
+
+		// `with_lock` takes an `FnMut`, so the update is moved out of an option
+		let mut update = Some(update);
+		if let Some(current) = current {
+			current.with_lock(|current| {
+				// a connection restarted meanwhile never accepts this position
+				if current.id() == connection.id
+					&& let Some(update) = update.take()
+				{
+					current.stage(pos, update);
 				}
-			}
-			cached.lists.insert(list_id.clone(), list.clone());
+			});
 		}
 
-		cached
-			.subscriptions
-			.extend(request.room_subscriptions.clone());
-		request
-			.room_subscriptions
-			.extend(cached.subscriptions.clone());
-
-		request.extensions.e2ee.enabled = request
-			.extensions
-			.e2ee
-			.enabled
-			.or(cached.extensions.e2ee.enabled);
-
-		request.extensions.to_device.enabled = request
-			.extensions
-			.to_device
-			.enabled
-			.or(cached.extensions.to_device.enabled);
-
-		request.extensions.account_data.enabled = request
-			.extensions
-			.account_data
-			.enabled
-			.or(cached.extensions.account_data.enabled);
-		request.extensions.account_data.lists = request
-			.extensions
-			.account_data
-			.lists
-			.clone()
-			.or_else(|| cached.extensions.account_data.lists.clone());
-		request.extensions.account_data.rooms = request
-			.extensions
-			.account_data
-			.rooms
-			.clone()
-			.or_else(|| cached.extensions.account_data.rooms.clone());
-
-		some_or_sticky(&mut request.extensions.typing.enabled, cached.extensions.typing.enabled);
-		some_or_sticky(
-			&mut request.extensions.typing.rooms,
-			cached.extensions.typing.rooms.clone(),
-		);
-		some_or_sticky(
-			&mut request.extensions.typing.lists,
-			cached.extensions.typing.lists.clone(),
-		);
-		some_or_sticky(
-			&mut request.extensions.receipts.enabled,
-			cached.extensions.receipts.enabled,
-		);
-		some_or_sticky(
-			&mut request.extensions.receipts.rooms,
-			cached.extensions.receipts.rooms.clone(),
-		);
-		some_or_sticky(
-			&mut request.extensions.receipts.lists,
-			cached.extensions.receipts.lists.clone(),
-		);
-
-		cached.extensions = request.extensions.clone();
-		cached.known_rooms.clone()
+		pos
 	}
 
-	pub fn store_snake_sync_pending(
+	pub fn forget_device(&self, user_id: &UserId, device_id: &DeviceId) {
+		let key = (user_id.to_owned(), device_id.to_owned());
+		let removed = self
+			.connections
+			.with_lock(|connections| connections.remove(&key));
+
+		drop(removed);
+	}
+
+	fn start(&self, key: &ConnectionKey) -> Arc<SyncMutex<Connection>> {
+		let expired = self.sweep_expired();
+		let id = self.next_seq.fetch_add(1, Ordering::Relaxed);
+		let connection = Arc::new(SyncMutex::new(Connection::new(id)));
+
+		let replaced = self.connections.with_lock(|connections| {
+			let device = connections.entry(device_key(key)).or_default();
+			let mut replaced: Vec<_> = device.remove(&key.conn_id).into_iter().collect();
+			replaced.extend(evict_least_recently_used(device));
+
+			device.insert(key.conn_id.clone(), Entry {
+				connection: Arc::clone(&connection),
+				last_used: Instant::now(),
+			});
+
+			replaced
+		});
+
+		// connection state can be large, so it is freed outside the lock
+		drop((expired, replaced));
+		connection
+	}
+
+	fn resume(&self, key: &ConnectionKey) -> Option<Arc<SyncMutex<Connection>>> {
+		let (resumed, expired) = self.connections.with_lock(|connections| {
+			let Some(device) = connections.get_mut(&device_key(key)) else {
+				return (None, None);
+			};
+
+			match device.get_mut(&key.conn_id) {
+				| Some(entry) if entry.last_used.elapsed() <= CONNECTION_TTL => {
+					entry.last_used = Instant::now();
+					(Some(Arc::clone(&entry.connection)), None)
+				},
+				| Some(_) => (None, device.remove(&key.conn_id)),
+				| None => (None, None),
+			}
+		});
+
+		drop(expired);
+		resumed
+	}
+
+	/// Removes the connection under `key` if it is still `connection`.
+	fn remove(
 		&self,
-		key: &SnakeConnectionsKey,
-		pos: u64,
-		known_rooms: BTreeMap<String, BTreeSet<OwnedRoomId>>,
-	) {
-		let mut cache = self.snake_connections.lock();
-		let cached = Arc::clone(
-			cache
-				.entry(key.clone())
-				.or_insert_with(|| Arc::new(SyncMutex::new(SnakeSyncCache::default()))),
-		);
-		let cached = &mut cached.lock();
-		drop(cache);
+		key: &ConnectionKey,
+		connection: &Arc<SyncMutex<Connection>>,
+	) -> Option<Entry> {
+		self.connections.with_lock(|connections| {
+			let device = connections.get_mut(&device_key(key))?;
+			if device
+				.get(&key.conn_id)
+				.is_none_or(|entry| !Arc::ptr_eq(&entry.connection, connection))
+			{
+				return None;
+			}
 
-		cached.stage_pending(pos, known_rooms);
+			let removed = device.remove(&key.conn_id);
+			if device.is_empty() {
+				connections.remove(&device_key(key));
+			}
+
+			removed
+		})
 	}
 
-	pub fn update_snake_sync_subscriptions(
-		&self,
-		key: &SnakeConnectionsKey,
-		subscriptions: BTreeMap<OwnedRoomId, v5::request::RoomSubscription>,
-	) {
-		let mut cache = self.snake_connections.lock();
-		let cached = Arc::clone(
-			cache
-				.entry(key.clone())
-				.or_insert_with(|| Arc::new(SyncMutex::new(SnakeSyncCache::default()))),
-		);
-		let cached = &mut cached.lock();
-		drop(cache);
+	/// Drops idle connections at most once per [`SWEEP_INTERVAL`].
+	fn sweep_expired(&self) -> Vec<Entry> {
+		let due = self.last_sweep.with_lock(|last_sweep| {
+			let due = last_sweep.elapsed() >= SWEEP_INTERVAL;
+			if due {
+				*last_sweep = Instant::now();
+			}
 
-		cached.subscriptions = subscriptions;
-	}
-}
+			due
+		});
 
-#[inline]
-pub fn into_snake_key<U, D, C>(user_id: U, device_id: D, conn_id: C) -> SnakeConnectionsKey
-where
-	U: Into<OwnedUserId>,
-	D: Into<OwnedDeviceId>,
-	C: Into<Option<String>>,
-{
-	(user_id.into(), device_id.into(), conn_id.into())
-}
+		if !due {
+			return Vec::new();
+		}
 
-#[inline]
-pub fn into_db_key<U, D, C>(user_id: U, device_id: D, conn_id: C) -> DbConnectionsKey
-where
-	U: Into<OwnedUserId>,
-	D: Into<OwnedDeviceId>,
-	C: Into<String>,
-{
-	(user_id.into(), device_id.into(), conn_id.into())
-}
+		self.connections.with_lock(|connections| {
+			let mut expired = Vec::new();
+			connections.retain(|_, device| {
+				expired.extend(
+					device
+						.extract_if(|_, entry| entry.last_used.elapsed() > CONNECTION_TTL)
+						.map(|(_, entry)| entry),
+				);
 
-/// load params from cache if body doesn't contain it, as long as it's allowed
-/// in some cases we may need to allow an empty list as an actual value
-fn list_or_sticky<T: Clone>(target: &mut Vec<T>, cached: &Vec<T>) {
-	if target.is_empty() {
-		target.clone_from(cached);
+				!device.is_empty()
+			});
+
+			expired
+		})
 	}
 }
 
-fn some_or_sticky<T>(target: &mut Option<T>, cached: Option<T>) {
-	if target.is_none() {
-		*target = cached;
+struct Entry {
+	connection: Arc<SyncMutex<Connection>>,
+	last_used: Instant,
+}
+
+fn device_key(key: &ConnectionKey) -> (OwnedUserId, OwnedDeviceId) {
+	(key.user_id.clone(), key.device_id.clone())
+}
+
+/// Makes room for one more connection on a device by removing the least
+/// recently used ones, which are returned.
+fn evict_least_recently_used(device: &mut HashMap<Option<String>, Entry>) -> Vec<Entry> {
+	let excess = device
+		.len()
+		.saturating_add(1)
+		.saturating_sub(MAX_CONNECTIONS_PER_DEVICE);
+
+	if excess == 0 {
+		return Vec::new();
 	}
+
+	let mut by_age: Vec<_> = device
+		.iter()
+		.map(|(conn_id, entry)| (entry.last_used, conn_id.clone()))
+		.collect();
+
+	by_age.sort_unstable_by_key(|(last_used, _)| *last_used);
+	by_age
+		.into_iter()
+		.take(excess)
+		.filter_map(|(_, conn_id)| device.remove(&conn_id))
+		.collect()
 }
 
 #[cfg(test)]
@@ -409,64 +416,33 @@ mod tests {
 		receiver.changed().await.unwrap();
 	}
 
-	#[test]
-	fn pending_rooms_are_committed_only_when_the_response_pos_is_acknowledged() {
-		let room_id = OwnedRoomId::try_from("!room:example.com").unwrap();
-		let mut cache = SnakeSyncCache {
-			pending: BTreeMap::from([(
-				42,
-				BTreeMap::from([("list".to_owned(), BTreeMap::from([(room_id, 42)]))]),
-			)]),
-			..Default::default()
-		};
-
-		assert!(cache.known_rooms.is_empty());
-		assert!(cache.accepts_pos(0));
-		assert!(cache.accepts_pos(42));
-		assert!(!cache.accepts_pos(41));
-
-		cache.acknowledge(0);
-		assert!(cache.known_rooms.is_empty());
-
-		cache.acknowledge(42);
-		assert_eq!(cache.acknowledged_pos, 42);
-		assert_eq!(cache.known_rooms["list"].len(), 1);
+	fn entry(age: Duration) -> Entry {
+		Entry {
+			connection: Arc::new(SyncMutex::new(Connection::new(0))),
+			last_used: Instant::now().checked_sub(age).unwrap(),
+		}
 	}
 
 	#[test]
-	fn rooms_outside_the_served_ranges_keep_their_position() {
-		let windowed = OwnedRoomId::try_from("!windowed:example.com").unwrap();
-		let dropped = OwnedRoomId::try_from("!dropped:example.com").unwrap();
-		let mut cache = SnakeSyncCache::default();
-		let stage = |cache: &mut SnakeSyncCache, pos, rooms: BTreeSet<OwnedRoomId>| {
-			cache.stage_pending(pos, BTreeMap::from([("all_rooms".to_owned(), rooms)]));
-			cache.acknowledge(pos);
-		};
+	fn a_full_device_evicts_its_least_recently_used_connection() {
+		let mut device: DeviceConnections = (0..MAX_CONNECTIONS_PER_DEVICE)
+			.map(|i| {
+				(Some(i.to_string()), entry(Duration::from_secs(u64::try_from(i).unwrap() + 1)))
+			})
+			.collect();
 
-		stage(&mut cache, 100, BTreeSet::from([windowed.clone(), dropped.clone()]));
-		stage(&mut cache, 200, BTreeSet::from([windowed.clone()]));
+		let evicted = evict_least_recently_used(&mut device);
 
-		assert_eq!(cache.known_rooms["all_rooms"][&windowed], 200);
-		assert_eq!(cache.known_rooms["all_rooms"][&dropped], 100);
-
-		stage(&mut cache, 300, BTreeSet::from([windowed.clone(), dropped.clone()]));
-
-		assert_eq!(cache.known_rooms["all_rooms"][&windowed], 300);
-		assert_eq!(cache.known_rooms["all_rooms"][&dropped], 300);
+		assert_eq!(evicted.len(), 1);
+		assert_eq!(device.len(), MAX_CONNECTIONS_PER_DEVICE - 1);
+		assert!(!device.contains_key(&Some((MAX_CONNECTIONS_PER_DEVICE - 1).to_string())));
 	}
 
 	#[test]
-	fn overlapping_responses_accept_either_response_position() {
-		let mut cache = SnakeSyncCache {
-			acknowledged_pos: 100,
-			pending: BTreeMap::from([(200, BTreeMap::new()), (201, BTreeMap::new())]),
-			..Default::default()
-		};
+	fn a_device_with_room_evicts_nothing() {
+		let mut device: DeviceConnections = HashMap::from([(None, entry(Duration::ZERO))]);
 
-		assert!(cache.accepts_pos(200));
-		assert!(cache.accepts_pos(201));
-
-		cache.acknowledge(200);
-		assert!(cache.accepts_pos(201));
+		assert!(evict_least_recently_used(&mut device).is_empty());
+		assert_eq!(device.len(), 1);
 	}
 }
