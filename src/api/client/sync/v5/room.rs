@@ -838,6 +838,57 @@ async fn latest_bump_stamp(
 	bump_stamps.next().await
 }
 
+/// Adds the membership events of the senders of the sticky events being sent
+/// to rooms that lazy load their members, as [MSC4480] counts sticky events as
+/// timeline events for lazy loading.
+///
+/// [MSC4480]: https://github.com/matrix-org/matrix-spec-proposals/pull/4480
+pub(super) async fn add_sticky_senders(
+	services: &Services,
+	selection: &RoomSelection,
+	rooms: &mut BTreeMap<OwnedRoomId, v5::response::Room>,
+	sticky: &v5::response::StickyEvents,
+) {
+	for (room_id, sticky_room) in &sticky.rooms {
+		if !selection
+			.rooms
+			.get(room_id)
+			.is_some_and(|selected| selected.config.required_state.lazy_members())
+		{
+			continue;
+		}
+
+		let senders: HashSet<OwnedUserId> = sticky_room
+			.events
+			.iter()
+			.filter_map(|event| event.get_field("sender").ok().flatten())
+			.collect();
+
+		let members: Vec<_> = senders
+			.into_iter()
+			.stream()
+			.wide_filter_map(async |sender| {
+				services
+					.rooms
+					.state_accessor
+					.room_state_get(room_id, &StateEventType::RoomMember, sender.as_str())
+					.await
+					.ok()
+					.map(Event::into_format)
+			})
+			.collect()
+			.await;
+
+		if !members.is_empty() {
+			rooms
+				.entry(room_id.clone())
+				.or_default()
+				.required_state
+				.extend(members);
+		}
+	}
+}
+
 /// Counts the events at the end of the timeline that arrived after `since`.
 /// Nothing is live on the first response of a connection.
 fn num_live_events<'a>(

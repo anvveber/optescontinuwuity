@@ -15,7 +15,11 @@ use ruma::{
 };
 use tokio::time::{Instant, timeout_at};
 
-use self::{extensions::build_extensions, lists::select_rooms, room::build_rooms};
+use self::{
+	extensions::build_extensions,
+	lists::select_rooms,
+	room::{add_sticky_senders, build_rooms},
+};
 use crate::{Ruma, client_ip::ClientIp};
 
 /// The longest a request waits for changes. [MSC4186] leaves this to the
@@ -163,7 +167,9 @@ fn validate(request: &v5::Request, current_count: u64) -> Result {
 	}
 
 	let extensions = &request.extensions;
-	if extensions.to_device.limit == Some(uint!(0)) {
+	if extensions.to_device.limit == Some(uint!(0))
+		|| extensions.sticky_events.limit == Some(uint!(0))
+	{
 		return Err!(Request(BadJson("Extension limits must be positive.")));
 	}
 
@@ -175,7 +181,9 @@ fn validate(request: &v5::Request, current_count: u64) -> Result {
 				.is_ok_and(|since| since <= current_count)
 		})
 	};
-	if invalid(extensions.to_device.since.as_deref()) {
+	if invalid(extensions.to_device.since.as_deref())
+		|| invalid(extensions.sticky_events.since.as_deref())
+	{
 		return Err!(Request(InvalidParam("Invalid extension `since`.")));
 	}
 
@@ -199,10 +207,13 @@ async fn build_response(
 		log_build(context, selection.rooms.len(), [selected, built_rooms, started.elapsed()]);
 	}
 
+	let mut room_results = rooms.rooms;
+	add_sticky_senders(services, &selection, &mut room_results, &extensions.sticky_events).await;
+
 	let response = assign!(v5::Response::new(String::new()), {
 		txn_id: context.request.txn_id.clone(),
 		lists: selection.lists(),
-		rooms: rooms.rooms,
+		rooms: room_results,
 		extensions,
 	});
 
@@ -247,6 +258,7 @@ fn is_empty(response: &v5::Response) -> bool {
 		&& extensions.account_data.is_empty()
 		&& extensions.receipts.is_empty()
 		&& extensions.typing.is_empty()
+		&& extensions.sticky_events.rooms.is_empty()
 		&& extensions.e2ee.device_lists.is_empty()
 		&& extensions
 			.to_device
@@ -283,6 +295,10 @@ mod tests {
 		validate(&request, 10).unwrap_err();
 
 		request.extensions.to_device.since = Some("not-a-position".to_owned());
+		validate(&request, 10).unwrap_err();
+
+		request.extensions.to_device.since = None;
+		request.extensions.sticky_events.since = Some("11".to_owned());
 		validate(&request, 10).unwrap_err();
 	}
 

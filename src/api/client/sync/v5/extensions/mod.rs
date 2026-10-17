@@ -1,6 +1,7 @@
 mod account_data;
 mod e2ee;
 mod receipts;
+mod sticky;
 mod to_device;
 mod typing;
 
@@ -8,7 +9,7 @@ use std::collections::HashSet;
 
 use conduwuit::Result;
 use conduwuit_service::{Services, sync::ExtensionScope};
-use futures::future::{join3, try_join};
+use futures::future::{join3, try_join3};
 use ruma::{
 	OwnedRoomId,
 	api::client::sync::sync_events::v5::{self, request::ExtensionRoomConfig},
@@ -40,8 +41,12 @@ pub(super) async fn build_extensions(
 		)
 		.await;
 
-	let (e2ee, to_device) =
-		try_join(e2ee::collect(services, context), to_device::collect(services, context)).await?;
+	let (e2ee, to_device, sticky_events) = try_join3(
+		e2ee::collect(services, context),
+		to_device::collect(services, context),
+		sticky::collect(services, context, selection, rooms),
+	)
+	.await?;
 
 	let extensions = assign!(v5::response::Extensions::default(), {
 		account_data,
@@ -49,6 +54,7 @@ pub(super) async fn build_extensions(
 		typing,
 		e2ee,
 		to_device,
+		sticky_events,
 	});
 
 	let scopes = ScopeUpdates {

@@ -41,6 +41,8 @@ pub(super) struct RoomSelection {
 	counts: BTreeMap<String, usize>,
 	pub(super) in_range: BTreeMap<String, Vec<OwnedRoomId>>,
 	pub(super) subscriptions: BTreeSet<OwnedRoomId>,
+	/// Every room a list matches, in range or not.
+	pub(super) matched: BTreeMap<OwnedRoomId, MembershipState>,
 	pub(super) rooms: BTreeMap<OwnedRoomId, SelectedRoom>,
 	pub(super) left_rooms: Option<HashMap<OwnedRoomId, LeftRoom>>,
 }
@@ -184,6 +186,11 @@ pub(super) async fn select_rooms(
 			}
 		}
 
+		selection.matched.extend(
+			matching
+				.iter()
+				.map(|candidate| (candidate.room_id.clone(), candidate.membership.clone())),
+		);
 		selection.counts.insert(list_id.clone(), matching.len());
 		selection.in_range.insert(list_id.clone(), in_range);
 	}
