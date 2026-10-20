@@ -569,9 +569,11 @@ async fn build_state_events(
 		last_sync_end_shortstatehash,
 	} = shortstatehashes;
 
-	if timeline.pdus.is_empty() {
+	if timeline.pdus.is_empty() && !full_state {
 		// If the timeline is empty there can't possibly be any changes to the
-		// state
+		// state. A `full_state` sync is the exception: it must return the whole
+		// room state even when there is nothing new, otherwise the room would
+		// be dropped from the response entirely.
 		return Ok(vec![]);
 	}
 
