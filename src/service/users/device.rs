@@ -63,8 +63,10 @@ impl super::Service {
 
 		let mut device = Device::new(device_id.clone());
 		device.display_name = initial_device_display_name;
-		device.last_seen_ip = client_ip;
-		device.last_seen_ts = Some(MilliSecondsSinceUnixEpoch::now());
+		if self.services.config.record_device_activity {
+			device.last_seen_ip = client_ip;
+			device.last_seen_ts = Some(MilliSecondsSinceUnixEpoch::now());
+		}
 
 		let key = (user_id, &device_id);
 		increment(&self.db.userid_devicelistversion, user_id.as_bytes());
@@ -310,7 +312,15 @@ impl super::Service {
 		device: &Device,
 	) -> Result<()> {
 		let key = (user_id, device_id);
-		self.db.userdeviceid_metadata.put(key, Json(device));
+		if self.services.config.record_device_activity {
+			self.db.userdeviceid_metadata.put(key, Json(device));
+		} else {
+			// Never persist when or from where a device was last active.
+			let mut device = device.clone();
+			device.last_seen_ip = None;
+			device.last_seen_ts = None;
+			self.db.userdeviceid_metadata.put(key, Json(device));
+		}
 
 		Ok(())
 	}
@@ -324,6 +334,10 @@ impl super::Service {
 		device_id: Option<&DeviceId>,
 		ip: IpAddr,
 	) {
+		if !self.services.config.record_device_activity {
+			return;
+		}
+
 		let now = MilliSecondsSinceUnixEpoch::now();
 		if let Some(device_id) = device_id {
 			if let Ok(mut device) = self.get_device_metadata(user_id, device_id).await {

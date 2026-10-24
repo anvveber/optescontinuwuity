@@ -260,6 +260,10 @@ lockdown_public_room_directory = true
 # continuwuity ignores the key.
 release_interval_secs = 15
 
+# Never store when or from where a device was last active
+# (optescontinuwuity patch).
+record_device_activity = false
+
 # Logging and telemetry.
 log = "warn"
 log_colors = false

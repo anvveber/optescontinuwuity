@@ -1776,6 +1776,16 @@ pub struct Config {
 	#[serde(default)]
 	pub release_interval_secs: u64,
 
+	/// Record when and from which IP each device was last active
+	/// (`last_seen_ts` / `last_seen_ip`, shown in clients' session lists).
+	///
+	/// Set to false to never store this. Session lists then show no
+	/// last-active time.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub record_device_activity: bool,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP

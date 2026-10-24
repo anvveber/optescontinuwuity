@@ -1507,6 +1507,14 @@
 #
 #release_interval_secs = 0
 
+# Record when and from which IP each device was last active
+# (`last_seen_ts` / `last_seen_ip`, shown in clients' session lists).
+#
+# Set to false to never store this. Session lists then show no
+# last-active time.
+#
+#record_device_activity = true
+
 # Set this to true for continuwuity to compress HTTP response bodies using
 # zstd. This option does nothing if continuwuity was not built with
 # `zstd_compression` feature. Please be aware that enabling HTTP

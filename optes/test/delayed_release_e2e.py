@@ -141,6 +141,17 @@ def main():
         check("timestamp not rounded", abs(ts - sent_at) < 3000, f"ts-sent={ts - sent_at}ms")
 
 
+def check_no_device_activity():
+    """record_device_activity = false: no last-seen data stored."""
+    token = register("carol" + uuid.uuid4().hex[:6])
+    call("GET", "/_matrix/client/v3/sync?timeout=0", token=token)
+    _, devs = call("GET", "/_matrix/client/v3/devices", token=token)
+    devices = devs.get("devices", [])
+    leaked = [d for d in devices if d.get("last_seen_ts") or d.get("last_seen_ip")]
+    check("no device last-seen stored", devices and not leaked, json.dumps(devices))
+
+
 main()
+check_no_device_activity()
 print("\n" + ("ALL PASSED" if not FAILURES else f"{len(FAILURES)} FAILED: {FAILURES}"))
 sys.exit(1 if FAILURES else 0)
