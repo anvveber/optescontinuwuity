@@ -17,6 +17,8 @@ Start with `handbook.md` (design, threat model, section 14 = current status).
 | `setup-front.sh` | Front VPS, Tor or I2P (Debian 13) |
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
 | `test/` | End-to-end tests (no Tor needed) |
+| `update-upstream.sh` | Move the fork onto a new continuwuity release and run every test |
+| `UPSTREAM` | The upstream tag the fork is based on |
 
 Deployment order: core → front → `setup-core.sh add-front` → relay →
 `setup-core.sh add-device` → point a Matrix client at `http://127.0.0.1:8008`.
