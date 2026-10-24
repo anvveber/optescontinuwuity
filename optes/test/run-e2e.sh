@@ -23,6 +23,7 @@ trusted_servers = []
 allow_announcements_check = false
 log = "warn"
 release_interval_secs = $interval
+record_device_activity = false
 EOF
 
 CONTINUWUITY_CONFIG="$work/config.toml" "$bin" > "$work/server.log" 2>&1 &
