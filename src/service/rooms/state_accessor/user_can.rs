@@ -77,6 +77,15 @@ impl super::Service {
 		room_id: &RoomId,
 		event_id: &EventId,
 	) -> bool {
+		// Delayed release: events not yet released are invisible to every
+		// client, including the sender's.
+		if self.services.release.enabled()
+			&& let Ok(count) = self.services.timeline.get_pdu_count(event_id).await
+			&& !self.services.release.is_released(count)
+		{
+			return false;
+		}
+
 		let Ok(shortstatehash) = self.pdu_shortstatehash(event_id).await else {
 			return true;
 		};

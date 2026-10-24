@@ -123,3 +123,27 @@ Does not hide:
 ## 9. Open for the owner
 
 - Interval. 60 s is the handbook's lower bound; longer hides more, feels worse.
+
+## 10. Implementation (first version, uncompiled)
+
+- `src/service/release/mod.rs`: watermark, ticker, `released_count()`,
+  `is_released()`, `event_timestamp()`, `wait_for_updates()`. Unit tests for the
+  tick math.
+- Config key `release_interval_secs` (`src/core/config/mod.rs`, example config).
+- Timestamps: `src/service/rooms/timeline/create.rs`.
+- Sync v3 and v5: bounded by `released_count()`; long-poll via
+  `wait_for_updates()`.
+- Per-event reads: gated inside `state_accessor::user_can_see_event`. Every
+  caller is client-facing (`/messages`, `/context`, `/event`, `/relations`,
+  threads, search, bundled aggregations, unsigned context), so one check covers
+  them. Federation uses `server_can_see_event`, which is untouched.
+- Room `/initialSync`: filtered by `is_released()`.
+
+Not gated in this version (known gaps):
+- `/state`, `/members`, `/joined_members`: return current state, including
+  unreleased state changes (renames, joins). Clients rarely poll these; a
+  client that does could see a state change up to one interval early.
+- Notification and highlight counts in sync: computed at append time, so a
+  room included in a sync for another reason may show a count that already
+  includes an unreleased message.
+- `/report`: needs an event ID, which clients can't learn before release.

@@ -29,7 +29,7 @@ use ruma::{
 	room::RoomType,
 };
 
-use crate::{Dep, rooms};
+use crate::{Dep, release, rooms};
 
 pub struct Service {
 	services: Services,
@@ -37,6 +37,7 @@ pub struct Service {
 }
 
 struct Services {
+	release: Dep<release::Service>,
 	short: Dep<rooms::short::Service>,
 	state: Dep<rooms::state::Service>,
 	state_compressor: Dep<rooms::state_compressor::Service>,
@@ -55,6 +56,7 @@ impl crate::Service for Service {
 			services: Services {
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 				timeline: args.depend::<rooms::timeline::Service>("rooms::timeline"),
+				release: args.depend::<release::Service>("release"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
 				state: args.depend::<rooms::state::Service>("rooms::state"),
 				state_compressor: args

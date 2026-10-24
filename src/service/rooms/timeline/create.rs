@@ -203,7 +203,11 @@ impl super::Service {
 			origin: None,
 			origin_server_ts: timestamp.map_or_else(
 				|| {
-					utils::millis_since_unix_epoch()
+					// Rounded up to the next release tick when delayed release
+					// is on; unchanged otherwise.
+					self.services
+						.release
+						.event_timestamp(utils::millis_since_unix_epoch())
 						.try_into()
 						.expect("u64 fits into UInt")
 				},

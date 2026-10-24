@@ -161,9 +161,11 @@ pub(crate) async fn sync_events_v5_route(
 	if response_is_empty(&collection.response) {
 		let default = Duration::from_secs(30);
 		let duration = cmp::min(body.timeout.unwrap_or(default), default);
-		let woke = tokio::time::timeout(duration, wake_receiver.changed())
-			.await
-			.is_ok();
+		// With delayed release on, this wakes at most once per tick.
+		let woke = services
+			.release
+			.wait_for_updates(&mut wake_receiver, duration)
+			.await;
 
 		if woke {
 			collection = collect_sync_response(
@@ -208,7 +210,7 @@ async fn collect_sync_response(
 ) -> Result<SyncCollection> {
 	// Bounds every read below and becomes the `pos` returned to the client.
 	// Zero would be echoed back as a request for an initial sync.
-	let next_batch = services.globals.current_count()?.max(1);
+	let next_batch = services.release.released_count()?.max(1);
 
 	let all_joined_rooms = services
 		.rooms
