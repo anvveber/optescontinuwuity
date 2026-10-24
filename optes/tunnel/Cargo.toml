@@ -1,0 +1,40 @@
+[package]
+name = "optes-tunnel"
+version = "0.1.0"
+edition = "2021"
+description = "Relay and gateway for the optes private Matrix server (phase 2 tunnel)"
+license = "Apache-2.0"
+publish = false
+
+# Own workspace: not part of the continuwuity workspace at the repo root.
+[workspace]
+
+[[bin]]
+name = "optes-relay"
+path = "src/bin/relay.rs"
+
+[[bin]]
+name = "optes-gateway"
+path = "src/bin/gateway.rs"
+
+[[bin]]
+name = "optes-keys"
+path = "src/bin/keys.rs"
+
+[dependencies]
+anyhow = "1"
+base64 = "0.22"
+clap = { version = "4", features = ["derive"] }
+ed25519-dalek = { version = "2", features = ["rand_core"] }
+rand = "0.8"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+snow = "0.9"
+tokio = { version = "1", features = ["full"] }
+tokio-socks = "0.5"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[profile.release]
+lto = true
+codegen-units = 1
