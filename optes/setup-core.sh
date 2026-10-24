@@ -18,7 +18,8 @@
 # Phase 2 (tunnel; needs --tunnel-bin-dir at install):
 #   setup-core.sh add-device <name> <device-public-key>    (relay allowed in)
 #   setup-core.sh remove-device <name>
-#   setup-core.sh add-front tor:<front>.onion:443           (re-signs front list)
+#   setup-core.sh add-front tor:<front>.onion:443           (re-signs front list;
+#                                       or i2p:<front>.b32.i2p:443)
 #   setup-core.sh remove-front tor:<front>.onion:443
 #   setup-core.sh direct-ingress on|off                     (plain HTTP on port 80)
 #
@@ -618,7 +619,7 @@ sign_front_list() {
 cmd_add_front() {
   local front=${1:-}
   need_gateway
-  [[ $front =~ ^(tor|tcp):[A-Za-z0-9.-]+:[0-9]{1,5}$ ]] || die "front must look like tor:<address>.onion:443"
+  [[ $front =~ ^(tor|i2p):[a-z0-9.-]+:[0-9]{1,5}$ ]] || die "front must look like tor:<address>.onion:443 or i2p:<address>.b32.i2p:443"
   grep -qxF "$front" "$FRONTS" && die "front already listed"
   echo "$front" >> "$FRONTS"
   sign_front_list

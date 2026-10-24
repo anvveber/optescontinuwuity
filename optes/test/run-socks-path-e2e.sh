@@ -5,11 +5,13 @@
 #     --> front socat (exact setup-front.sh command) --SOCKS4a--> proxy
 #     --> gateway --> continuwuity
 #
-# Usage: run-socks-path-e2e.sh <continuwuity-binary> <tunnel-target-dir>
+# Usage: run-socks-path-e2e.sh <continuwuity-binary> <tunnel-target-dir> [tor|i2p]
+# (i2p: the relay reaches the front through --socks-i2p, as with i2pd)
 set -euo pipefail
 
 server_bin=$(realpath "$1")
 tdir=$(realpath "$2")
+transport=${3:-tor}
 here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 base=$((26000 + RANDOM % 5000))
@@ -27,7 +29,7 @@ mkdir -p "$work/devices" "$work/relay-state"
 cp "$work/device.pub" "$work/devices/test.pub"
 # "localhost" goes to the proxy as a hostname, like a .onion would.
 "$keys" sign-list --key "$work/list.key" --version 1 --gateway-key "$work/gateway.pub" \
-  --front "tor:localhost:$fport" --out "$work/list.signed" >/dev/null
+  --front "$transport:localhost:$fport" --out "$work/list.signed" >/dev/null
 
 cat > "$work/config.toml" <<EOF
 [global]
@@ -55,7 +57,8 @@ socat "UNIX-LISTEN:$work/front.sock,fork,unlink-early" \
 # Shim: Tor delivering onion connections to the front's unix socket.
 socat "TCP-LISTEN:$fport,bind=127.0.0.1,fork,reuseaddr" "UNIX-CONNECT:$work/front.sock" & pids+=($!)
 sleep 1
-"$tdir/optes-relay" --listen "127.0.0.1:$rport" --socks "127.0.0.1:$pport" \
+if [[ $transport == i2p ]]; then proxy_flag=--socks-i2p; else proxy_flag=--socks; fi
+"$tdir/optes-relay" --listen "127.0.0.1:$rport" "$proxy_flag" "127.0.0.1:$pport" \
   --front-list "$work/list.signed" --list-key "$work/list.pub" --device-key "$work/device.key" \
   --level 1 --state-dir "$work/relay-state" > "$work/relay.log" 2>&1 & pids+=($!)
 

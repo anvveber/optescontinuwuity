@@ -14,7 +14,8 @@ const SEPARATOR: &str = "\n-----SIG-----\n";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Front {
-	/// "tor" (reached through the SOCKS proxy) or "tcp" (direct; tests only).
+	/// "tor" or "i2p" (each through its own SOCKS proxy), or "tcp" (direct;
+	/// tests only).
 	pub transport: String,
 	/// host:port
 	pub address: String,

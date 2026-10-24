@@ -36,9 +36,12 @@ struct Args {
 	/// Address the Matrix client connects to
 	#[arg(long, default_value = "127.0.0.1:8008")]
 	listen: String,
-	/// SOCKS5 proxy for "tor" fronts (e.g. 127.0.0.1:9050)
+	/// SOCKS5 proxy for "tor" fronts (Tor's SocksPort, e.g. 127.0.0.1:9050)
 	#[arg(long)]
 	socks: Option<String>,
+	/// SOCKS5 proxy for "i2p" fronts (i2pd's SOCKS proxy, e.g. 127.0.0.1:4447)
+	#[arg(long)]
+	socks_i2p: Option<String>,
 	/// Initial signed front list (from setup-core.sh)
 	#[arg(long)]
 	front_list: PathBuf,
@@ -172,11 +175,11 @@ impl Relay {
 	async fn connect_once(self: Arc<Self>) -> Result<()> {
 		let list = self.load_list()?;
 		let gateway_key = list.gateway_key()?;
-		let front = list
-			.fronts
+		let usable: Vec<&Front> = list.fronts.iter().filter(|f| self.can_dial(f)).collect();
+		let front = (*usable
 			.choose(&mut rand::thread_rng())
-			.context("front list is empty")?
-			.clone();
+			.context("no front in the list uses a transport this relay has a proxy for")?)
+		.clone();
 
 		info!(address = %front.address, "connecting");
 		let mut io = tokio::time::timeout(Duration::from_secs(120), self.dial(&front))
@@ -252,14 +255,24 @@ impl Relay {
 		result
 	}
 
+	fn proxy_for(&self, transport: &str) -> Option<&str> {
+		match transport {
+			| "tor" => self.args.socks.as_deref(),
+			| "i2p" => self.args.socks_i2p.as_deref(),
+			| _ => None,
+		}
+	}
+
+	fn can_dial(&self, front: &Front) -> bool {
+		front.transport == "tcp" || self.proxy_for(&front.transport).is_some()
+	}
+
 	async fn dial(&self, front: &Front) -> Result<Box<dyn Io>> {
 		match front.transport.as_str() {
-			| "tor" => {
+			| "tor" | "i2p" => {
 				let proxy = self
-					.args
-					.socks
-					.as_deref()
-					.context("front needs --socks (Tor's SOCKS port)")?;
+					.proxy_for(&front.transport)
+					.context("no SOCKS proxy configured for this transport")?;
 				let stream = tokio_socks::tcp::Socks5Stream::connect(proxy, front.address.as_str()).await?;
 				Ok(Box::new(stream))
 			},
