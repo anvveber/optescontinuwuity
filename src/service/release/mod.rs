@@ -187,7 +187,10 @@ pub fn round_up_to_tick(now: u64, interval: u64) -> u64 {
 #[must_use]
 fn next_tick_after(now: u64, interval: u64) -> u64 {
 	debug_assert!(interval > 0, "interval must not be 0");
-	(now / interval).saturating_add(1).saturating_mul(interval)
+	now.checked_div(interval)
+		.unwrap_or(0)
+		.saturating_add(1)
+		.saturating_mul(interval)
 }
 
 #[cfg(test)]
