@@ -1,5 +1,6 @@
 use std::{
-	collections::{BTreeMap, BTreeSet, HashMap},
+	collections::{BTreeMap, BTreeSet, HashMap, HashSet},
+	mem,
 	sync::Arc,
 };
 
@@ -10,15 +11,18 @@ use ruma::{
 };
 use tokio::sync::{Mutex, watch};
 
-use crate::{Dep, rooms};
+use crate::{Dep, release, rooms};
 
 pub struct Service {
 	services: Services,
 	wakers: Wakers,
+	/// Delayed release: users whose wake is held until the next tick.
+	deferred_wakes: SyncMutex<HashSet<OwnedUserId>>,
 	snake_connections: DbConnections<SnakeConnectionsKey, SnakeConnectionsVal>,
 }
 
 struct Services {
+	release: Dep<release::Service>,
 	state_cache: Dep<rooms::state_cache::Service>,
 }
 
@@ -118,9 +122,11 @@ impl crate::Service for Service {
 	fn build(args: crate::Args<'_>) -> Result<Arc<Self>> {
 		Ok(Arc::new(Self {
 			services: Services {
+				release: args.depend::<release::Service>("release"),
 				state_cache: args.depend::<rooms::state_cache::Service>("rooms::state_cache"),
 			},
 			wakers: Wakers::default(),
+			deferred_wakes: SyncMutex::new(HashSet::new()),
 			snake_connections: SyncMutex::new(BTreeMap::new()),
 		}))
 	}
@@ -143,6 +149,11 @@ impl Service {
 	pub async fn wake(&self, user: &UserId) {
 		trace!(?user, "Waking user's sync loops");
 
+		if self.services.release.enabled() {
+			self.deferred_wakes.lock().insert(user.to_owned());
+			return;
+		}
+
 		self.wakers.wake(user).await;
 	}
 
@@ -156,6 +167,31 @@ impl Service {
 			.collect()
 			.await;
 
+		if self.services.release.enabled() {
+			self.deferred_wakes.lock().extend(users);
+			return;
+		}
+
+		self.wakers.wake_all(users).await;
+	}
+
+	/// Delayed release: takes the users whose wake was held since the last
+	/// tick. Call before moving the release watermark, so every event behind
+	/// a taken wake is already appended and gets released by that move.
+	#[must_use]
+	pub fn take_deferred_wakes(&self) -> Vec<OwnedUserId> {
+		mem::take(&mut *self.deferred_wakes.lock())
+			.into_iter()
+			.collect()
+	}
+
+	/// Delayed release: wakes the given users' sync loops now.
+	pub async fn wake_users(&self, users: Vec<OwnedUserId>) {
+		if users.is_empty() {
+			return;
+		}
+
+		trace!(count = users.len(), "Waking users at release tick");
 		self.wakers.wake_all(users).await;
 	}
 

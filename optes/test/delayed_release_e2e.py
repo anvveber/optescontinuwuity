@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """End-to-end check of delayed release against a running server.
 
-Usage: delayed_release_e2e.py <base_url> <registration_token> <interval_secs>
+Usage: delayed_release_e2e.py <base_url> <registration_token> <interval_secs> [first_run_token]
 
 interval_secs = 0 checks that the disabled path behaves like upstream.
 Uses only the standard library.
@@ -15,6 +15,7 @@ import urllib.request
 import uuid
 
 BASE, TOKEN, INTERVAL = sys.argv[1], sys.argv[2], int(sys.argv[3])
+FIRST_RUN_TOKEN = sys.argv[4] if len(sys.argv) > 4 else ""
 INTERVAL_MS = INTERVAL * 1000
 FAILURES = []
 
@@ -38,13 +39,14 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
-def register(username):
+def register(username, token=None):
+    token = token or TOKEN
     body = {"username": username, "password": "pw-" + uuid.uuid4().hex}
     status, resp = call("POST", "/_matrix/client/v3/register", body)
     if status == 401:
         body["auth"] = {
             "type": "m.login.registration_token",
-            "token": TOKEN,
+            "token": token,
             "session": resp.get("session"),
         }
         status, resp = call("POST", "/_matrix/client/v3/register", body)
@@ -68,6 +70,8 @@ def wait_until_just_after_tick():
 
 def main():
     suffix = uuid.uuid4().hex[:6]
+    if FIRST_RUN_TOKEN:
+        register("admin" + suffix, FIRST_RUN_TOKEN)
     alice = register("alice" + suffix)
     bob = register("bob" + suffix)
 
