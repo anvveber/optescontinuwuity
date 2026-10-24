@@ -490,9 +490,9 @@ thin.
 | `record_device_activity` (replaces the bouncer) | built, e2e tested | `bouncer-decision.md` |
 | Bouncer | **dropped** (covered by the above + relay) | `bouncer-decision.md` |
 | Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor) | `tunnel/`, `phase2-protocol-spec.md` |
-| Tor front setup | written; its socat path tested via a SOCKS stand-in | `setup-front.sh` |
+| Tor front setup | written; its socat path tested via a SOCKS stand-in | `setup-front.sh --type tor` |
 | Relay setup (user machine) | written, not run | `setup-relay.sh` |
-| I2P front | not started | — |
+| I2P front | written; i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |
 
@@ -512,4 +512,4 @@ Tests (run from the repo root after `cargo build -p conduwuit` and
 `cargo build` in `optes/tunnel`):
 - `optes/test/run-e2e.sh target/debug/conduwuit 15` — delayed release
 - `optes/test/run-tunnel-e2e.sh target/debug/conduwuit optes/tunnel/target/debug <1|2|3>`
-- `optes/test/run-socks-path-e2e.sh target/debug/conduwuit optes/tunnel/target/debug`
+- `optes/test/run-socks-path-e2e.sh target/debug/conduwuit optes/tunnel/target/debug <tor|i2p>`

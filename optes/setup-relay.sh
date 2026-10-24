@@ -4,7 +4,8 @@
 #
 # Usage (as your normal user; uses sudo only to install tor):
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \
-#       --front-list <frontlist.signed> --list-key <base64> [--level 1|2|3]
+#       --front-list <frontlist.signed> --list-key <base64> [--level 1|2|3] [--i2p]
+#   (--i2p also installs i2pd so the relay can use I2P fronts)
 #   setup-relay.sh front-auth <front>.onion <52-char private key>   (if the front requires it)
 #   setup-relay.sh status
 #
@@ -34,13 +35,14 @@ tor_user() {
 }
 
 cmd_install() {
-  local bin="" list="" key="" level=2
+  local bin="" list="" key="" level=2 i2p=no
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --relay-bin)  bin=${2:-}; shift 2 ;;
       --front-list) list=${2:-}; shift 2 ;;
       --list-key)   key=${2:-}; shift 2 ;;
       --level)      level=${2:-}; shift 2 ;;
+      --i2p)        i2p=yes; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -61,6 +63,16 @@ cmd_install() {
   sudo systemctl enable --now tor
   sudo systemctl restart tor
 
+  local i2p_arg=""
+  if [[ $i2p == yes ]]; then
+    info "i2pd (its SOCKS proxy on 127.0.0.1:4447 reaches .i2p fronts)"
+    if ! command -v i2pd >/dev/null; then
+      if command -v dnf >/dev/null; then sudo dnf install -y i2pd; else sudo apt-get install -y i2pd; fi
+    fi
+    sudo systemctl enable --now i2pd
+    i2p_arg=" --socks-i2p 127.0.0.1:4447"
+  fi
+
   mkdir -p "$CONF_DIR" "$STATE_DIR" "$BIN_DIR" "$UNIT_DIR"
   install -m 0755 "$bin" "$BIN_DIR/optes-relay"
   cp "$list" "$CONF_DIR/frontlist.signed"
@@ -79,7 +91,7 @@ Description=optes relay (Matrix client endpoint on 127.0.0.1:8008)
 After=network-online.target
 
 [Service]
-ExecStart=$BIN_DIR/optes-relay --listen 127.0.0.1:8008 --socks 127.0.0.1:9050 \\
+ExecStart=$BIN_DIR/optes-relay --listen 127.0.0.1:8008 --socks 127.0.0.1:9050$i2p_arg \\
   --front-list $CONF_DIR/frontlist.signed --list-key $CONF_DIR/list.pub \\
   --device-key $CONF_DIR/device.key --level $level --state-dir $STATE_DIR
 Restart=always

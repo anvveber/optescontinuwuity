@@ -37,7 +37,7 @@ enum Cmd {
 		/// Gateway X25519 public key: base64 or file
 		#[arg(long)]
 		gateway_key: String,
-		/// transport:host:port, e.g. tor:abc.onion:443 (repeatable)
+		/// transport:host:port, e.g. tor:abc.onion:443 or i2p:abc.b32.i2p:443 (repeatable)
 		#[arg(long = "front", required = true)]
 		fronts: Vec<String>,
 		#[arg(long)]
@@ -56,8 +56,8 @@ fn parse_front(value: &str) -> Result<Front> {
 	let Some((transport, address)) = value.split_once(':') else {
 		bail!("front must be transport:host:port, got {value}");
 	};
-	if !matches!(transport, "tor" | "tcp") {
-		bail!("transport must be tor or tcp, got {transport}");
+	if !matches!(transport, "tor" | "i2p" | "tcp") {
+		bail!("transport must be tor, i2p or tcp, got {transport}");
 	}
 	if !address.contains(':') {
 		bail!("front address needs a port: {address}");

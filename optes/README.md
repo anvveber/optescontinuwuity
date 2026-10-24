@@ -14,7 +14,7 @@ Start with `handbook.md` (design, threat model, section 14 = current status).
 | `phase2-protocol-spec.md` | Relay ↔ gateway tunnel protocol |
 | `tunnel/` | Rust: `optes-relay`, `optes-gateway`, `optes-keys` |
 | `setup-core.sh` | Core VPS (Debian 13) |
-| `setup-front.sh` | Tor front VPS (Debian 13) |
+| `setup-front.sh` | Front VPS, Tor or I2P (Debian 13) |
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
 | `test/` | End-to-end tests (no Tor needed) |
 

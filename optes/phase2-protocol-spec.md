@@ -171,7 +171,9 @@ connected and when they connect. Level 4 removes the "when".
 ## 7. Not covered
 
 - The core host still sees everything after the gateway (limitation 3).
-- I2P fronts: same protocol, relay uses an I2P SOCKS proxy. Front setup is
-  separate (phase 2b).
+- I2P fronts: same protocol. The relay reaches them through i2pd's SOCKS proxy
+  (`--socks-i2p`); front list transport `i2p`, address `<b32>.b32.i2p:443`.
+  The front runs i2pd in hidden mode with a server tunnel to a local socat,
+  which forwards over Tor to the core (`setup-front.sh --type i2p`).
 - Embedded Arti in the relay: later; v1 uses an external SOCKS proxy so it
   works with C tor's onion client auth today.
