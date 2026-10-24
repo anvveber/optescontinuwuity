@@ -217,7 +217,11 @@ pub(crate) async fn sync_events_route(
 	// Stop hanging if new info arrives
 	let default = Duration::from_secs(30);
 	let duration = cmp::min(body.body.timeout.unwrap_or(default), default);
-	_ = tokio::time::timeout(duration, wake_receiver.changed()).await;
+	// With delayed release on, this wakes at most once per tick.
+	_ = services
+		.release
+		.wait_for_updates(&mut wake_receiver, duration)
+		.await;
 
 	// Retry returning data
 	build_sync_events(&services, &body).await
@@ -230,7 +234,9 @@ pub(crate) async fn build_sync_events(
 	let syncing_user = body.identity.sender_user().expect("should have a user");
 	let syncing_device = body.identity.sender_device().expect("should have a device");
 
-	let current_count = services.globals.current_count()?;
+	// Bounded by the release watermark (equals current_count when delayed
+	// release is off).
+	let current_count = services.release.released_count()?;
 
 	// the `since` token is the last sync end count stringified
 	let last_sync_end_count = body

@@ -29,8 +29,8 @@ use serde::Deserialize;
 use self::data::Data;
 pub use self::{create::pdu_fits, data::PdusIterItem};
 use crate::{
-	Dep, account_data, admin, appservice, config, globals, pusher, rooms, sending, server_keys,
-	sync, users,
+	Dep, account_data, admin, appservice, config, globals, pusher, release, rooms, sending,
+	server_keys, sync, users,
 };
 
 // Update Relationships
@@ -73,6 +73,7 @@ struct Services {
 	pdu_metadata: Dep<rooms::pdu_metadata::Service>,
 	pusher: Dep<pusher::Service>,
 	read_receipt: Dep<rooms::read_receipt::Service>,
+	release: Dep<release::Service>,
 	search: Dep<rooms::search::Service>,
 	sending: Dep<sending::Service>,
 	server_keys: Dep<server_keys::Service>,
@@ -107,6 +108,7 @@ impl crate::Service for Service {
 				pdu_metadata: args.depend::<rooms::pdu_metadata::Service>("rooms::pdu_metadata"),
 				pusher: args.depend::<pusher::Service>("pusher"),
 				read_receipt: args.depend::<rooms::read_receipt::Service>("rooms::read_receipt"),
+				release: args.depend::<release::Service>("release"),
 				search: args.depend::<rooms::search::Service>("rooms::search"),
 				sending: args.depend::<sending::Service>("sending"),
 				server_keys: args.depend::<server_keys::Service>("server_keys"),

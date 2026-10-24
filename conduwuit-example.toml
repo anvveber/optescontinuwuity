@@ -1495,6 +1495,18 @@
 #
 #typing_client_timeout_max_s = 45
 
+# Delayed release: hold new events back from clients and release them
+# in batches, once every this many seconds. Ticks fall on wall-clock
+# multiples of the interval. Local events get their timestamp rounded
+# up to the tick, so it doesn't reveal when they were sent.
+#
+# Messages appear up to this many seconds late for everyone, including
+# the sender's other devices.
+#
+# 0 disables this.
+#
+#release_interval_secs = 0
+
 # Set this to true for continuwuity to compress HTTP response bodies using
 # zstd. This option does nothing if continuwuity was not built with
 # `zstd_compression` feature. Please be aware that enabling HTTP

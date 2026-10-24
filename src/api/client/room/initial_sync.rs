@@ -4,7 +4,10 @@ use conduwuit::{
 	result::LogErr,
 	utils::{BoolExt, stream::TryTools},
 };
-use futures::{FutureExt, TryStreamExt, future::try_join4};
+use futures::{
+	FutureExt, TryStreamExt,
+	future::{ready, try_join4},
+};
 use ruma::{
 	api::client::peeking::get_current_state::v3::{PaginationChunk, Request, Response},
 	assign,
@@ -52,6 +55,7 @@ pub(crate) async fn room_initial_sync_route(
 		.rooms
 		.timeline
 		.pdus_rev(room_id, None)
+		.try_filter(|(count, _)| ready(services.release.is_released(*count)))
 		.try_take(limit)
 		.and_then(async |mut pdu| {
 			let ctx = services
