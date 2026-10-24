@@ -50,8 +50,8 @@ Rule: **a client never sees anything with count > W.** Server-internal reads
 | Path | Site (v26.9.1) | Change |
 |---|---|---|
 | `/sync` v3 | `src/api/client/sync/v3/mod.rs:233` | `current_count = min(globals.current_count(), W)` |
-| `/sync` v3 long-poll wait | same file, ~204–220 | Wait on `W` changing, not on the per-user waker. At most one wake per tick. |
-| sliding sync v5 | `src/api/client/sync/v5.rs:211` | `next_batch = min(…, W).max(1)`; same wait change |
+| `/sync` long-poll wake (v3 + v5) | `src/service/sync/mod.rs` | Per-user wake-ups are held while enabled and fired right after each tick. Handlers unchanged. |
+| sliding sync v5 | `src/api/client/sync/v5.rs:211` | `next_batch = min(…, W).max(1)` |
 | `/messages` | `src/api/client/message.rs` | skip PDUs with count > W |
 | `/context` | `src/api/client/context.rs` | 404 if target count > W; skip later PDUs |
 | `/event/{id}` | `src/api/client/room/event.rs` | 404 if count > W |
@@ -124,15 +124,20 @@ Does not hide:
 
 - Interval. 60 s is the handbook's lower bound; longer hides more, feels worse.
 
-## 10. Implementation (first version, uncompiled)
+## 10. Implementation
 
 - `src/service/release/mod.rs`: watermark, ticker, `released_count()`,
-  `is_released()`, `event_timestamp()`, `wait_for_updates()`. Unit tests for the
-  tick math.
+  `is_released()`, `event_timestamp()`. Unit tests for the tick math.
+- `src/service/sync/mod.rs`: while enabled, `wake()` / `wake_all_joined()`
+  queue users instead of waking them. Each tick takes the queue, *then* moves
+  the watermark, then wakes the queued users. Taking first guarantees every
+  event behind a queued wake is at or below the new watermark.
+  (A first version waited on the watermark inside the sync handlers instead;
+  the end-to-end test showed it missed messages sent between two sync
+  requests, which then arrived only at the 30 s long-poll timeout.)
 - Config key `release_interval_secs` (`src/core/config/mod.rs`, example config).
 - Timestamps: `src/service/rooms/timeline/create.rs`.
-- Sync v3 and v5: bounded by `released_count()`; long-poll via
-  `wait_for_updates()`.
+- Sync v3 and v5: bounded by `released_count()`.
 - Per-event reads: gated inside `state_accessor::user_can_see_event`. Every
   caller is client-facing (`/messages`, `/context`, `/event`, `/relations`,
   threads, search, bundled aggregations, unsigned context), so one check covers
@@ -147,3 +152,15 @@ Not gated in this version (known gaps):
   room included in a sync for another reason may show a count that already
   includes an unreleased message.
 - `/report`: needs an event ID, which clients can't learn before release.
+
+## 11. Test results (2026-10-24, local debug build)
+
+`optes/test/run-e2e.sh <binary> <interval>` starts a throwaway server and runs
+`delayed_release_e2e.py` (two users, one message).
+
+Interval 15 s: all pass. Hidden from `/event`, `/messages` and `/sync` before
+the tick; delivered to a waiting `/sync` 7 ms after the tick; timestamp equal
+to the tick.
+
+Interval 0: all pass. Delivered in 19 ms; timestamp not rounded (upstream
+behaviour).

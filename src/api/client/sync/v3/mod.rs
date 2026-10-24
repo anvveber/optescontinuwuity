@@ -217,11 +217,7 @@ pub(crate) async fn sync_events_route(
 	// Stop hanging if new info arrives
 	let default = Duration::from_secs(30);
 	let duration = cmp::min(body.body.timeout.unwrap_or(default), default);
-	// With delayed release on, this wakes at most once per tick.
-	_ = services
-		.release
-		.wait_for_updates(&mut wake_receiver, duration)
-		.await;
+	_ = tokio::time::timeout(duration, wake_receiver.changed()).await;
 
 	// Retry returning data
 	build_sync_events(&services, &body).await

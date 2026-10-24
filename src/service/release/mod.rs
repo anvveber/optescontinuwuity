@@ -11,6 +11,11 @@
 //! everything created between two ticks becomes visible to clients at the
 //! same moment.
 //!
+//! `/sync` long-polls are woken per user. While delayed release is on, the
+//! sync service holds those wake-ups and this service fires them right after
+//! each tick, so a waiting client wakes exactly when its new data becomes
+//! visible.
+//!
 //! Local events also get their `origin_server_ts` rounded up to the next
 //! tick, so the visible timestamp doesn't reveal when the sender uploaded.
 //!
@@ -20,25 +25,32 @@
 //!
 //! See `optes/delayed-release-spec.md`.
 
-use std::{sync::Arc, time::Duration};
+use std::{
+	sync::{
+		Arc,
+		atomic::{AtomicU64, Ordering},
+	},
+	time::Duration,
+};
 
 use async_trait::async_trait;
 use conduwuit::{Result, debug, matrix::PduCount, utils};
-use tokio::sync::{Notify, watch};
+use tokio::sync::Notify;
 
-use crate::{Dep, globals};
+use crate::{Dep, globals, sync};
 
 pub struct Service {
 	/// Tick length in milliseconds. 0 = disabled.
 	interval_ms: u64,
 	/// Counter value at the last tick.
-	watermark: watch::Sender<u64>,
+	watermark: AtomicU64,
 	interrupt: Notify,
 	services: Services,
 }
 
 struct Services {
 	globals: Dep<globals::Service>,
+	sync: Dep<sync::Service>,
 }
 
 #[async_trait]
@@ -52,10 +64,11 @@ impl crate::Service for Service {
 
 		Ok(Arc::new(Self {
 			interval_ms,
-			watermark: watch::Sender::new(0),
+			watermark: AtomicU64::new(0),
 			interrupt: Notify::new(),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
+				sync: args.depend::<sync::Service>("sync"),
 			},
 		}))
 	}
@@ -69,7 +82,7 @@ impl crate::Service for Service {
 		debug!(interval_ms = self.interval_ms, "Delayed release enabled");
 
 		// Release anything created before startup.
-		self.advance()?;
+		self.advance().await?;
 
 		loop {
 			let now = utils::millis_since_unix_epoch();
@@ -77,7 +90,7 @@ impl crate::Service for Service {
 
 			tokio::select! {
 				() = self.interrupt.notified() => break,
-				() = tokio::time::sleep(Duration::from_millis(wait)) => self.advance()?,
+				() = tokio::time::sleep(Duration::from_millis(wait)) => self.advance().await?,
 			}
 		}
 
@@ -103,7 +116,7 @@ impl Service {
 			return Ok(current);
 		}
 
-		Ok((*self.watermark.borrow()).min(current))
+		Ok(self.watermark.load(Ordering::Acquire).min(current))
 	}
 
 	/// Whether an item with this count has been released to clients.
@@ -114,7 +127,7 @@ impl Service {
 		}
 
 		match count {
-			| PduCount::Normal(count) => count <= *self.watermark.borrow(),
+			| PduCount::Normal(count) => count <= self.watermark.load(Ordering::Acquire),
 			| PduCount::Backfilled(_) => true,
 		}
 	}
@@ -126,46 +139,18 @@ impl Service {
 		round_up_to_tick(now_ms, self.interval_ms)
 	}
 
-	/// Long-poll wait used by `/sync`.
+	/// One tick: moves the watermark to the current counter value, then wakes
+	/// the users whose wake-ups were held since the last tick.
 	///
-	/// Disabled: waits for the user's wake signal, exactly as upstream.
-	/// Enabled: waits for the user's wake signal (new data exists), then for
-	/// the next tick (the data becomes visible). So a waiting client wakes at
-	/// most once per tick, and only when it has something new.
-	///
-	/// Returns true if woken before `timeout`.
-	pub async fn wait_for_updates(
-		&self,
-		wake: &mut watch::Receiver<u64>,
-		timeout: Duration,
-	) -> bool {
-		if !self.enabled() {
-			return tokio::time::timeout(timeout, wake.changed())
-				.await
-				.is_ok();
-		}
-
-		let mut release = self.watermark.subscribe();
-		tokio::time::timeout(timeout, async {
-			wake.changed().await.ok()?;
-			release.changed().await.ok()
-		})
-		.await
-		.is_ok_and(|woke| woke.is_some())
-	}
-
-	/// Moves the watermark to the current counter value. Notifies waiters only
-	/// if it actually moved.
-	fn advance(&self) -> Result<()> {
+	/// The held wake-ups are taken *before* reading the counter. A wake-up is
+	/// only queued after its event is appended, so every event behind a taken
+	/// wake-up has a count at or below the new watermark. Wake-ups queued after
+	/// the take wait for the next tick.
+	async fn advance(&self) -> Result<()> {
+		let users = self.services.sync.take_deferred_wakes();
 		let current = self.services.globals.current_count()?;
-		self.watermark.send_if_modified(|watermark| {
-			if *watermark == current {
-				false
-			} else {
-				*watermark = current;
-				true
-			}
-		});
+		self.watermark.fetch_max(current, Ordering::AcqRel);
+		self.services.sync.wake_users(users).await;
 
 		Ok(())
 	}

@@ -34,6 +34,10 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 
-python3 "$here/delayed_release_e2e.py" "http://127.0.0.1:$port" "$token" "$interval" || {
+# On first start the server ignores the configured token and prints a
+# one-time token for the first account.
+first=$(sed 's/\x1b\[[0-9;]*m//g' "$work/server.log" | grep -o 'using the registration token [^ ]*' | awk '{print $NF}' | head -1)
+
+python3 "$here/delayed_release_e2e.py" "http://127.0.0.1:$port" "$token" "$interval" "$first" || {
   echo "--- server log ---"; tail -30 "$work/server.log"; exit 1;
 }

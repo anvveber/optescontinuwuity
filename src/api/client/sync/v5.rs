@@ -161,11 +161,9 @@ pub(crate) async fn sync_events_v5_route(
 	if response_is_empty(&collection.response) {
 		let default = Duration::from_secs(30);
 		let duration = cmp::min(body.timeout.unwrap_or(default), default);
-		// With delayed release on, this wakes at most once per tick.
-		let woke = services
-			.release
-			.wait_for_updates(&mut wake_receiver, duration)
-			.await;
+		let woke = tokio::time::timeout(duration, wake_receiver.changed())
+			.await
+			.is_ok();
 
 		if woke {
 			collection = collect_sync_response(

@@ -427,8 +427,10 @@ Server name (identity):   $server_name
 Ingress onion (clients):  $ingress
 Admin SSH onion:          $admin
 
-Registration token: $(cat "$REG_TOKEN")
-  (also in $REG_TOKEN)
+First account: continuwuity ignores the configured token until the first
+account exists. Get its one-time token with:
+  journalctl -u continuwuity | grep -o 'using the registration token [^ ]*'
+Later accounts use: $(cat "$REG_TOKEN")   (also in $REG_TOKEN)
 
 $admin_out
 
@@ -437,8 +439,8 @@ $ingress_out
 Next:
  1. Test SSH through the admin onion from your machine.
  2. Then close clearnet SSH:  $0 lockdown --i-tested-onion-ssh
- 3. Register the first account through the ingress onion. The first
-    account becomes server admin.
+ 3. Register the first account through the ingress onion with the
+    one-time token above. The first account becomes server admin.
  4. Back up /var/lib/continuwuity (contains the Matrix signing key),
     $HS_INGRESS and $HS_ADMIN — encrypted, offline.
 =====================================================================
