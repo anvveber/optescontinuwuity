@@ -23,7 +23,7 @@ pattern, and does a bouncer stop them?
 | Observer | Sees sync activity? | Bouncer helps? | What does help |
 |---|---|---|---|
 | Other users | No. Presence, typing, receipts are off; last-seen is shown only to the account's owner. | — | already handled |
-| Network observer near the core | Phase 2: one constant-rate stream per front. Before that: Tor traffic. | No | front→core constant rate |
+| Network observer near the core | Only Tor traffic to its guard; circuits can't be separated (phase2-protocol-spec.md §6). | No | Tor |
 | Core process / VPS host, live | Yes: the real client's requests still arrive when the user is online. A bouncer adds fake requests *next to* them; it can't remove the real ones. | No | relay constant rate (L3/L4) makes the real requests uniform |
 | Core disk (seizure, backup leak) | Yes: `last_seen_ts` / `last_seen_ip` per device, updated every 10 s while active. | No: the record is written by real requests. | `record_device_activity = false` |
 
