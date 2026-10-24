@@ -91,6 +91,12 @@ async fn main() -> Result<()> {
 		.init();
 
 	let args = Args::parse();
+	if args.tick_ms < 10 {
+		bail!("--tick-ms must be at least 10");
+	}
+	if args.window_secs == 0 {
+		bail!("--window-secs must be at least 1");
+	}
 	let gateway = Arc::new(Gateway {
 		key: keys::read32(&args.key)?,
 		devices: args.devices,

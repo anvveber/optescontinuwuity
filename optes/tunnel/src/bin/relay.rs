@@ -192,6 +192,12 @@ impl Relay {
 		.context("handshake timed out")??;
 
 		let level = Level::from_u8(welcome.level)?;
+		if level < self.level {
+			bail!("gateway offered level {} below the requested {}", welcome.level, self.level as u8);
+		}
+		if welcome.tick_ms < 10 || welcome.window_secs == 0 {
+			bail!("gateway sent unusable timing (tick {} ms, window {} s)", welcome.tick_ms, welcome.window_secs);
+		}
 		let policy = Policy {
 			level,
 			tick: Duration::from_millis(welcome.tick_ms.into()),
