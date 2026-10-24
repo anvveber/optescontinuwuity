@@ -4,8 +4,10 @@ A build spec for a hardened, metadata-minimizing Matrix homeserver reachable ove
 Tor, I2P, and Nym, with no public entry point and a modified client. Written to be
 handed to another Claude instance (or any engineer) to build from.
 
-Status: design, not yet built. Nothing here is verified against a running system.
-Section 10 lists everything that must be checked before writing code — do that first.
+Status (2026-10-24): phases 1 and 2 built and tested locally; nothing yet run on
+real VPSes or real Tor. Section 14 summarizes what changed from the original
+design and where each piece lives. Sections 1–2 (threat model, limitations) are
+unchanged and still govern.
 
 ---
 
@@ -17,11 +19,8 @@ Section 10 lists everything that must be checked before writing code — do that
   Do not build everything before running anything.
 - Treat every version number, port, config key, and API name as **unverified**.
   Section 10 says what to confirm. Confirm it, then build.
-- Working style: the project owner usually writes their own code to learn, and has
-  the assistant walk through the solution and review patches rather than edit files
-  directly. That was set for a different repo (TypeScript). This project is mostly
-  Rust and is new. Confirm at the start of the build session who writes the code —
-  don't assume.
+- Working style (decided): the assistant writes the code for now; the owner aims
+  to reach Rust fluency later and maintain it.
 
 ---
 
@@ -86,8 +85,9 @@ design is wrong for the use case and that should be settled before building.
 
 **Continuwuity.** Rationale:
 
-- Actively maintained; releasing in a 26.x version line as of mid-2026. The official
-  community continuation of conduwuit (which continued conduit).
+- Actively maintained; calendar versioning (26.x). Fork pinned to **v26.9.1**
+  (fork: `github.com/anvveber/optescontinuwuity`). The official community
+  continuation of conduwuit (which continued conduit).
 - Single Rust binary with an embedded database (RocksDB). No Postgres. Good for a
   one-script install.
 - Synapse is heavy (Python + Postgres); Dendrite is effectively maintenance-only.
@@ -129,17 +129,18 @@ entry point; clients encrypt all the way to the core.**
   authorization. Only the fronts hold the authorization keys. Without a key an
   attacker cannot connect at all, so connection-dependent attacks (guard discovery,
   probing) have no target.
-- **Two VMs / network namespaces:**
-  - *gateway*: runs only Tor.
-  - *service*: no network access except through the gateway. Runs the Continuwuity
-    fork, the bouncer, and the release scheduler. A bug here still can't make a
-    direct connection out.
+- **Isolation (built):** continuwuity and optes-gateway each run in their own
+  network namespace containing only loopback (systemd `PrivateNetwork=yes`).
+  They talk to Tor and to each other over unix sockets only, so neither can
+  open any network connection. Tor runs on the host; nftables lets only the
+  Tor user reach the internet. Upgrade path: two VPSes at one provider with a
+  private-only network for the service machine (no public IP) — same configs.
 - **Keys live only here:** the Matrix signing key; the key that signs the front list
   (section 4.4). Back them up encrypted and offline.
 - **All outbound over Tor, fail closed:** federation, media fetch, time sync, package
   updates. If Tor is down, nothing leaves. No clearnet DNS, ever.
-- **Minimize stored metadata.** Short media retention. No per-device IP history
-  (patched out, section 6). Logs at warn level, no IPs.
+- **Minimize stored metadata.** Media deleted after 30 days. No per-device
+  last-seen time or IP (`record_device_activity = false`). Logs at warn level.
 
 Whonix-style gateway/workstation split is the reference model. NixOS or a single
 reproducible script so the core rebuilds from encrypted backup + offline keys.
@@ -153,10 +154,18 @@ reproducible script so the core rebuilds from encrypted backup + offline keys.
   no access tokens, no API calls, no message sizes. Padding is inside the tunnel, so
   the front can't distinguish padding from payload.
 - **No user data, no state.** Rebuilt from the setup script; burn and replace freely.
-- **Front→core link:** all users on a front are multiplexed into one Tor connection
-  at a constant rate. An observer near the core sees one steady stream per front.
+- **Front→core link (decided):** one Tor circuit per relay connection, no
+  multiplexing at the front. A network observer at the core can't separate
+  circuits inside the Tor connection anyway, and the host terminates the tunnels;
+  so the front stays a plain socat pipe with no custom code
+  (`phase2-protocol-spec.md` §6).
 
 ### 4.3 Client-to-core tunnel
+
+**Built** — see `phase2-protocol-spec.md` for the exact protocol. Summary: Noise
+IK, fixed 2048-byte frames for every byte including the handshake, levels 1–3 on
+the wire, signed front list. The core end is a separate process,
+`optes-gateway`, not a patch to continuwuity.
 
 - Carried *inside* whatever transport the front speaks. The front terminates the
   transport (onion / I2P / Nym) and forwards the inner tunnel bytes to the core.
@@ -287,7 +296,15 @@ Patches (only if not achievable by config):
 
 ---
 
-## 7. Client fork — changes
+## 7. Client — superseded by the local relay
+
+**Decision (2026-10-24):** no client fork. All transport and wire-level privacy
+lives in `optes-relay`, a local program; any Matrix client (Cinny, FluffyChat,
+Element) points at `http://127.0.0.1:8008`. Level 4 = the same relay on an
+always-on machine at home, phone over WireGuard. The original plan follows for
+reference.
+
+### 7.0 Original plan (not pursued)
 
 Base: **matrix-rust-sdk** (the library under Element X). Two options:
 
@@ -425,7 +442,18 @@ machines/VPSes.
 
 ---
 
-## 12. Open decisions for the owner
+## 12. Decisions (originally open)
+
+Resolved 2026-10-24:
+- **A. Identity:** onion address as server name (made with mkp224o, key offline;
+  not served while federation is off).
+- **B. Federation:** off.
+- **C. Code:** assistant writes it for now.
+- **D. Nym:** deferred; Tor first, I2P next.
+- **E. Hosting:** still open — provider and payment method for the core VPS
+  (and fronts) not chosen yet.
+
+Original wording:
 
 - **A. Identity.** Onion-only server name (no domain, essentially a private island /
   Tor-only federation) **or** domain name with onion+I2P+Nym as access paths
@@ -449,3 +477,39 @@ hard to locate, at real cost in latency, bandwidth, battery, and maintenance. It
 **not** hide metadata from the core itself or from the core's VPS host, and it does
 not make a 10-user server anonymous at 3 a.m. Build it in phases and keep the forks
 thin.
+
+---
+
+## 14. Status and map (2026-10-24)
+
+| Piece | State | Where |
+|---|---|---|
+| Verification of section 10 | done for phases 1–2 | `verification-notes.md` |
+| Core setup (Tor, sandboxing, firewall, config) | written, not run on a VPS | `setup-core.sh` |
+| Delayed release patch | built, e2e tested | `delayed-release-spec.md`, `src/service/release/` |
+| `record_device_activity` (replaces the bouncer) | built, e2e tested | `bouncer-decision.md` |
+| Bouncer | **dropped** (covered by the above + relay) | `bouncer-decision.md` |
+| Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor) | `tunnel/`, `phase2-protocol-spec.md` |
+| Tor front setup | written; its socat path tested via a SOCKS stand-in | `setup-front.sh` |
+| Relay setup (user machine) | written, not run | `setup-relay.sh` |
+| I2P front | not started | — |
+| Nym | deferred | — |
+| Client fork | not needed (relay) | section 7 |
+
+Changes from the original design worth knowing:
+- Continuwuity's default port is 8008, not 6167; the core uses unix sockets.
+- Continuwuity phones home to continuwuity.org by default
+  (`allow_announcements_check`); turned off.
+- On first start, continuwuity ignores the configured registration token; the
+  first account uses a one-time token printed in the log.
+- The server has no network, so push notifications can't reach phones; clients
+  must keep syncing in the background.
+- Patches dropped as unnecessary: device-IP stripping (now a config key), URL
+  preview removal (off by default), onion-peer TLS (no federation), fail-closed
+  proxy in code (network isolation does it).
+
+Tests (run from the repo root after `cargo build -p conduwuit` and
+`cargo build` in `optes/tunnel`):
+- `optes/test/run-e2e.sh target/debug/conduwuit 15` — delayed release
+- `optes/test/run-tunnel-e2e.sh target/debug/conduwuit optes/tunnel/target/debug <1|2|3>`
+- `optes/test/run-socks-path-e2e.sh target/debug/conduwuit optes/tunnel/target/debug`
