@@ -143,11 +143,13 @@ Does not hide:
   threads, search, bundled aggregations, unsigned context), so one check covers
   them. Federation uses `server_can_see_event`, which is untouched.
 - Room `/initialSync`: filtered by `is_released()`.
+- Room state (`/state`, members, joined members, aliases, room initial sync,
+  state in search results): all pass through
+  `state_accessor::user_can_see_state_events`. If the room's newest event is
+  unreleased, it waits for the tick (at most one interval) before answering.
+  Tested: a topic change answers 4 ms after the tick with the new topic.
 
 Not gated in this version (known gaps):
-- `/state`, `/members`, `/joined_members`: return current state, including
-  unreleased state changes (renames, joins). Clients rarely poll these; a
-  client that does could see a state change up to one interval early.
 - Notification and highlight counts in sync: computed at append time, so a
   room included in a sync for another reason may show a count that already
   includes an unreleased message.
