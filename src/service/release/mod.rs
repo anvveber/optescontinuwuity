@@ -44,6 +44,8 @@ pub struct Service {
 	interval_ms: u64,
 	/// Counter value at the last tick.
 	watermark: AtomicU64,
+	/// Notified after every tick.
+	ticked: Notify,
 	interrupt: Notify,
 	services: Services,
 }
@@ -65,6 +67,7 @@ impl crate::Service for Service {
 		Ok(Arc::new(Self {
 			interval_ms,
 			watermark: AtomicU64::new(0),
+			ticked: Notify::new(),
 			interrupt: Notify::new(),
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
@@ -132,6 +135,26 @@ impl Service {
 		}
 	}
 
+	/// Waits until items up to `count` are released, or at most one interval
+	/// plus a second. Returns at once when disabled.
+	pub async fn wait_released(&self, count: u64) {
+		if !self.enabled() {
+			return;
+		}
+
+		let limit = Duration::from_millis(self.interval_ms.saturating_add(1000));
+		_ = tokio::time::timeout(limit, async {
+			loop {
+				let ticked = self.ticked.notified();
+				if self.watermark.load(Ordering::Acquire) >= count {
+					return;
+				}
+				ticked.await;
+			}
+		})
+		.await;
+	}
+
 	/// `origin_server_ts` for a new local event: the next tick boundary, or
 	/// `now_ms` unchanged when disabled.
 	#[must_use]
@@ -150,6 +173,7 @@ impl Service {
 		let users = self.services.sync.take_deferred_wakes();
 		let current = self.services.globals.current_count()?;
 		self.watermark.fetch_max(current, Ordering::AcqRel);
+		self.ticked.notify_waiters();
 		self.services.sync.wake_users(users).await;
 
 		Ok(())

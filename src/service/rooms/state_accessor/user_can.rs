@@ -1,4 +1,9 @@
-use conduwuit::{Err, Result, matrix::Event, pdu::PartialPdu, trace};
+use conduwuit::{
+	Err, Result,
+	matrix::{Event, PduCount},
+	pdu::PartialPdu,
+	trace,
+};
 use ruma::{
 	EventId, RoomId, UserId,
 	events::{
@@ -117,6 +122,16 @@ impl super::Service {
 	/// Whether a user is allowed to see an event, based on
 	/// the room's history_visibility at that event's state.
 	pub async fn user_can_see_state_events(&self, user_id: &UserId, room_id: &RoomId) -> bool {
+		// Delayed release: every caller is a client endpoint about to return
+		// the room's current state. If the room has an event clients can't see
+		// yet (e.g. a rename), wait for the tick so the state doesn't reveal it
+		// early. Waits at most one interval.
+		if self.services.release.enabled()
+			&& let Ok(PduCount::Normal(last)) = self.services.timeline.last_timeline_count(room_id).await
+		{
+			self.services.release.wait_released(last).await;
+		}
+
 		if self.services.state_cache.is_joined(user_id, room_id).await {
 			return true;
 		}

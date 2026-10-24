@@ -136,6 +136,17 @@ def main():
               f"{got_at - next_tick}ms after tick")
         status, _ = call("GET", f"/_matrix/client/v3/rooms/{room_id}/event/{event_id}", token=bob)
         check("/event visible after tick", status == 200, str(status))
+
+        # State endpoints: a topic change must not show before its tick.
+        wait_until_just_after_tick()
+        topic = "topic " + uuid.uuid4().hex[:6]
+        t_set = now_ms()
+        call("PUT", f"/_matrix/client/v3/rooms/{room_id}/state/m.room.topic/", {"topic": topic}, alice)
+        status, got = call("GET", f"/_matrix/client/v3/rooms/{room_id}/state/m.room.topic/", token=bob)
+        t_got = now_ms()
+        tick = -(-t_set // INTERVAL_MS) * INTERVAL_MS
+        check("/state waits for the tick", t_got >= tick - 200, f"answered {t_got - tick} ms relative to tick")
+        check("/state then shows the new topic", got.get("topic") == topic, json.dumps(got))
     else:
         check("delivered immediately", delay < 3000, f"delay={delay}ms")
         check("timestamp not rounded", abs(ts - sent_at) < 3000, f"ts-sent={ts - sent_at}ms")
