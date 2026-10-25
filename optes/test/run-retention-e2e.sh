@@ -35,6 +35,22 @@ for _ in $(seq 1 60); do
 done
 first=$(sed 's/\x1b\[[0-9;]*m//g' "$work/server.log" | grep -o 'using the registration token [^ ]*' | awk '{print $NF}' | head -1)
 
-python3 "$here/retention_e2e.py" "http://127.0.0.1:$port" "$token" "$first" "$work/server.log" || {
+RELEASE=${RELEASE:-0} python3 "$here/retention_e2e.py" "http://127.0.0.1:$port" "$token" "$first" "$work/server.log" || {
   echo "--- server log ---"; grep -iE "warn|error|retention" "$work/server.log" | tail -20; exit 1;
 }
+
+# Restart on the purged database: startup checks must not trip over it.
+kill "$pid"; wait "$pid" 2>/dev/null || true
+CONTINUWUITY_CONFIG="$work/config.toml" "$bin" > "$work/server2.log" 2>&1 &
+pid=$!
+ok=no
+for _ in $(seq 1 60); do
+  curl -sf "http://127.0.0.1:$port/_matrix/client/versions" >/dev/null && { ok=yes; break; }
+  sleep 1
+done
+sleep 2
+if [[ $ok == yes ]] && ! sed 's/\x1b\[[0-9;]*m//g' "$work/server2.log" | grep -v "config::check" | grep -qE " (ERROR|WARN) |panicked"; then
+  echo "PASS server restarts cleanly on the purged database"
+else
+  echo "FAIL restart after purge (ok=$ok)"; sed 's/\x1b\[[0-9;]*m//g' "$work/server2.log" | grep -v "config::check" | grep -E " (ERROR|WARN) |panicked" | head -10; exit 1
+fi

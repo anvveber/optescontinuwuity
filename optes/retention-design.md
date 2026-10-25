@@ -1,7 +1,8 @@
 # Per-channel retention — design note
 
-Status: design, 2026-10-25. Not implemented. Decisions marked **D1–D3** are
-the owner's.
+Status: implemented 2026-10-25 (`src/service/retention/`). Decisions:
+**D1 = purge whole events, D2 = keep the server-wide 30-day media rule,
+D3 = keep forever by default.**
 
 ## Goal
 

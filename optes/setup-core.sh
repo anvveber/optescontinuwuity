@@ -313,6 +313,11 @@ require_encryption = true
 # Don't advertise the server software (optescontinuwuity patch).
 hide_server_identity = true
 
+# Per-channel retention (optescontinuwuity patch): channels with an
+# m.room.retention policy forget old messages; others keep everything.
+# Set per channel with make-space.py (retention = "30d").
+allow_room_retention = true
+
 # Logging and telemetry.
 log = "warn"
 log_colors = false

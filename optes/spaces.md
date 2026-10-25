@@ -27,6 +27,12 @@ logs out again. Then invite people to the space; they get all channels.
 Template format: see the comment at the top of `tools/make-space.py` and
 `tools/example-server.toml`.
 
+Retention: `retention = "30d"` on a channel, a category (its channels
+inherit) or the top level; `"forever"` overrides an inherited value. Expired
+messages are hidden at once and deleted within 15 minutes. Note: media
+(images/files) follow the separate server-wide 30-day rule, also in permanent
+channels.
+
 ## Making someone a moderator
 
 In the space's settings (Cinny: space → settings → permissions), set their

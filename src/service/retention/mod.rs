@@ -191,9 +191,9 @@ impl Service {
 	/// Purges expired events in every room with a retention policy.
 	pub async fn purge_all(&self) -> usize {
 		let rooms: Vec<_> = self.services.metadata.iter_ids().collect().await;
-		let mut total = 0;
+		let mut total: usize = 0;
 		for room_id in rooms {
-			total += self.purge_room(&room_id).await;
+			total = total.saturating_add(self.purge_room(&room_id).await);
 		}
 		total
 	}
@@ -268,7 +268,7 @@ impl Service {
 			.tofrom_relation
 			.raw_keys_prefix(&prefix)
 			.ignore_err()
-			.map(|key| key.to_vec())
+			.map(<[u8]>::to_vec)
 			.collect()
 			.await;
 		for key in keys {
