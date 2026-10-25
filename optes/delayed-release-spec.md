@@ -136,7 +136,11 @@ Does not hide:
   the end-to-end test showed it missed messages sent between two sync
   requests, which then arrived only at the 30 s long-poll timeout.)
 - Config key `release_interval_secs` (`src/core/config/mod.rs`, example config).
-- Timestamps: `src/service/rooms/timeline/create.rs`.
+- Timestamps: `src/service/rooms/timeline/create.rs`. **Not** for
+  `m.room.create`: from room version 12 the room ID is the hash of the create
+  event, so rounding made two rooms created by one user within a tick get the
+  same ID and silently merge (found by the spaces test, 2026-10-25). The
+  creation time of a room is therefore exact.
 - Sync v3 and v5: bounded by `released_count()`.
 - Per-event reads: gated inside `state_accessor::user_can_see_event`. Every
   caller is client-facing (`/messages`, `/context`, `/event`, `/relations`,

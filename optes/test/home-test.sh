@@ -109,6 +109,9 @@ log = "warn"
 log_colors = false
 release_interval_secs = $RELEASE_SECS
 record_device_activity = false
+auto_join_space_children = true
+allow_space_creation = false
+restrict_room_creation_to_spaces = true
 EOF
 
     cat > "$DIR/torrc" <<EOF

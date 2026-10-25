@@ -196,6 +196,12 @@ impl super::Service {
 			}
 		}
 
+		// Delayed release rounds timestamps up to the next tick. Not for
+		// m.room.create: from room version 12 the room ID is the hash of the
+		// create event, so two rooms created by one user within one tick would
+		// get the same ID and merge.
+		let is_create = event_type == TimelineEventType::RoomCreate;
+
 		let pdu = PduEvent {
 			event_id: ruma::event_id!("$thiswillbefilledinlater").into(),
 			room_id: room_id.map(ToOwned::to_owned),
@@ -205,9 +211,8 @@ impl super::Service {
 				|| {
 					// Rounded up to the next release tick when delayed release
 					// is on; unchanged otherwise.
-					self.services
-						.release
-						.event_timestamp(utils::millis_since_unix_epoch())
+					let now = utils::millis_since_unix_epoch();
+					if is_create { now } else { self.services.release.event_timestamp(now) }
 						.try_into()
 						.expect("u64 fits into UInt")
 				},
