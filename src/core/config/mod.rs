@@ -1786,6 +1786,32 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub record_device_activity: bool,
 
+	/// Make spaces behave like Discord servers: a local user who joins a
+	/// space is joined to all of its rooms they are allowed to join; rooms
+	/// added to a space are joined by its local members; leaving a space
+	/// leaves its rooms. Sub-spaces work the same way.
+	///
+	/// default: false
+	#[serde(default)]
+	pub auto_join_space_children: bool,
+
+	/// Who may create spaces. If false, only server admins can create
+	/// top-level spaces; users with permission to add rooms to an existing
+	/// space can still create sub-spaces in it.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub allow_space_creation: bool,
+
+	/// If true, non-admin users may only create direct messages and rooms
+	/// inside a space where they are allowed to add rooms (the space's
+	/// `m.space.child` power level). Standalone group rooms need a server
+	/// admin.
+	///
+	/// default: false
+	#[serde(default)]
+	pub restrict_room_creation_to_spaces: bool,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP

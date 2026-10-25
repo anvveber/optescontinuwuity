@@ -77,6 +77,8 @@ pub(crate) async fn create_room_route(
 		return Err!(Request(UserSuspended("You cannot perform this action while suspended.")));
 	}
 
+	check_creation_policy(&services, sender_user, &body).await?;
+
 	let room_version = match body.room_version.clone() {
 		| Some(room_version) =>
 			if services.server.supported_room_version(&room_version) {
@@ -754,4 +756,107 @@ async fn room_alias_check(
 	debug_info!("Full room alias: {full_room_alias}");
 
 	Ok(full_room_alias)
+}
+
+/// Applies `allow_space_creation` and `restrict_room_creation_to_spaces`.
+///
+/// Server admins and appservices are exempt. Otherwise a restricted room or
+/// space may still be created inside a space where the user may add rooms
+/// (the space's `m.space.child` power level). The space is taken from the
+/// request's initial state: an `m.space.parent` event, or a restricted join
+/// rule that allows members of the space.
+async fn check_creation_policy(
+	services: &Services,
+	sender_user: &UserId,
+	body: &Ruma<create_room::v3::Request>,
+) -> Result {
+	let config = &services.server.config;
+	if config.allow_space_creation && !config.restrict_room_creation_to_spaces {
+		return Ok(());
+	}
+	if body.identity.is_appservice() || services.users.is_admin(sender_user).await {
+		return Ok(());
+	}
+
+	let is_space = body
+		.creation_content
+		.as_ref()
+		.and_then(|c| c.get_field::<String>("type").ok().flatten())
+		.is_some_and(|t| t == "m.space");
+
+	let restricted = if is_space {
+		!config.allow_space_creation
+	} else {
+		config.restrict_room_creation_to_spaces && !body.is_direct
+	};
+	if !restricted {
+		return Ok(());
+	}
+
+	for space in parent_spaces(body) {
+		let Ok(space) = RoomId::parse(&space) else {
+			continue;
+		};
+		if !services.rooms.state_cache.is_joined(sender_user, &space).await {
+			continue;
+		}
+		if !matches!(
+			services.rooms.state_accessor.get_room_type(&space).await,
+			Ok(ruma::room::RoomType::Space)
+		) {
+			continue;
+		}
+		if services
+			.rooms
+			.state_accessor
+			.get_room_power_levels(&space)
+			.await
+			.user_can_send_state(sender_user, StateEventType::SpaceChild)
+		{
+			return Ok(());
+		}
+	}
+
+	if is_space {
+		Err!(Request(Forbidden(
+			"Only server admins can create spaces. You can create one inside a space where you \
+			 may add rooms."
+		)))
+	} else {
+		Err!(Request(Forbidden(
+			"Rooms can only be created inside a space where you may add rooms (or as a direct \
+			 message)."
+		)))
+	}
+}
+
+/// Spaces named in a createRoom request's initial state.
+fn parent_spaces(body: &Ruma<create_room::v3::Request>) -> Vec<String> {
+	let mut spaces = Vec::new();
+	for event in &body.initial_state {
+		let Ok(Some(kind)) = event.get_field::<String>("type") else {
+			continue;
+		};
+		match kind.as_str() {
+			| "m.space.parent" =>
+				if let Ok(Some(key)) = event.get_field::<String>("state_key") {
+					spaces.push(key);
+				},
+			| "m.room.join_rules" => {
+				let Ok(Some(content)) = event.get_field::<serde_json::Value>("content") else {
+					continue;
+				};
+				let allow = content.get("allow").and_then(|a| a.as_array());
+				for rule in allow.into_iter().flatten() {
+					if rule.get("type").and_then(|t| t.as_str()) == Some("m.room_membership") {
+						if let Some(room) = rule.get("room_id").and_then(|r| r.as_str()) {
+							spaces.push(room.to_owned());
+						}
+					}
+				}
+			},
+			| _ => {},
+		}
+	}
+	spaces
 }

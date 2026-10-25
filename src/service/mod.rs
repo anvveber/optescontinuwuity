@@ -35,6 +35,7 @@ pub mod registration_tokens;
 pub mod release;
 pub mod rooms;
 pub mod sending;
+pub mod space_autojoin;
 pub mod server_keys;
 pub mod sync;
 pub mod threepid;
