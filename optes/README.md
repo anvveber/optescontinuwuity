@@ -18,6 +18,7 @@ Start with `handbook.md` (design, threat model, section 14 = current status).
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
 | `test/` | End-to-end tests (no Tor needed) |
 | `test/home-test.sh` | Try everything over real Tor on a machine you already use, as your normal user, no system changes |
+| `hardening.md` | `require_encryption`, `hide_server_identity`: what they do and don't cover |
 | `spaces.md` | Discord-style servers: auto-join, who can create what, the template tool |
 | `tools/make-space.py` | Create a server (space, categories, channels) from a TOML file |
 | `update-upstream.sh` | Move the fork onto a new continuwuity release and run every test |

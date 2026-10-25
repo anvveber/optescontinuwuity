@@ -113,6 +113,8 @@ record_device_activity = false
 auto_join_space_children = true
 allow_space_creation = false
 restrict_room_creation_to_spaces = true
+require_encryption = true
+hide_server_identity = true
 EOF
 
     cat > "$DIR/torrc" <<EOF

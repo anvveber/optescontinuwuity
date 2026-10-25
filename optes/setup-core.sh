@@ -305,6 +305,14 @@ auto_join_space_children = true
 allow_space_creation = false
 restrict_room_creation_to_spaces = true
 
+# Only end-to-end encrypted messages; every new room starts encrypted
+# (optescontinuwuity patch). Reactions/redactions stay plaintext (clients send
+# them that way).
+require_encryption = true
+
+# Don't advertise the server software (optescontinuwuity patch).
+hide_server_identity = true
+
 # Logging and telemetry.
 log = "warn"
 log_colors = false
