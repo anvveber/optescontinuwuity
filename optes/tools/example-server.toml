@@ -7,6 +7,7 @@ channels = ["lobby"]
 [[category]]
 name = "General"
 channels = ["chat", "links", "media"]
+retention = "30d"               # General's channels forget after 30 days
 
 [[category]]
 name = "Projects"
@@ -22,3 +23,8 @@ name = "announcements"
 category = "General"
 read_only = true
 topic = "News from the admins"
+retention = "forever"           # overrides the category
+
+[[channel]]
+name = "rules"                  # no retention anywhere above: kept forever
+read_only = true

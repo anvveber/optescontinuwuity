@@ -91,6 +91,14 @@ impl super::Service {
 			return false;
 		}
 
+		// Retention: expired messages are hidden until the purge job removes
+		// them.
+		if self.services.retention.enabled()
+			&& self.services.retention.event_expired(room_id, event_id).await
+		{
+			return false;
+		}
+
 		let Ok(shortstatehash) = self.pdu_shortstatehash(event_id).await else {
 			return true;
 		};

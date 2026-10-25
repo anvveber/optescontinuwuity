@@ -31,6 +31,13 @@ Template format (see example-server.toml):
   category = "General"
   read_only = true                     # only moderators (power 50) can post
   topic = "News"
+  retention = "30d"                    # messages deleted after 30 days
+                                       # (s, m, h, d, w, y; "forever" or omit =
+                                       # keep forever)
+
+  retention can also be set on a [[category]] (applies to its channels) or at
+  the top level (applies to every channel without its own setting). Needs
+  allow_room_retention = true on the server.
 
 What it builds:
   - the server: an invite-only space; members join by invitation;
@@ -50,6 +57,19 @@ import urllib.error
 import urllib.parse
 import urllib.request
 import uuid
+
+
+UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400, "y": 365 * 86400}
+
+
+def parse_duration_ms(value):
+    """'30d' -> milliseconds. None or 'forever' -> None (keep forever)."""
+    if value is None or str(value).strip() == "forever":
+        return None
+    value = str(value).strip()
+    if not value or value[-1] not in UNITS or not value[:-1].isdigit():
+        sys.exit(f"bad retention value {value!r}: use e.g. 12h, 30d, 1y")
+    return int(value[:-1]) * UNITS[value[-1]] * 1000
 
 
 class Matrix:
@@ -87,8 +107,11 @@ class Matrix:
             self.token = None
 
     def create(self, name, topic=None, space=False, parent=None, private=False,
-               read_only=False):
+               read_only=False, retention_ms=None):
         state = []
+        if retention_ms is not None and not space:
+            state.append({"type": "m.room.retention", "state_key": "",
+                          "content": {"max_lifetime": retention_ms}})
         if not space:
             state.append({"type": "m.room.encryption", "state_key": "",
                           "content": {"algorithm": "m.megolm.v1.aes-sha2"}})
@@ -126,7 +149,9 @@ def load(path):
         t = tomllib.load(f)
     if "name" not in t:
         sys.exit("template needs a top-level name")
+    default = t.get("retention")
     categories = {c["name"]: {"private": c.get("private", False), "topic": c.get("topic"),
+                              "retention": c.get("retention", default),
                               "channels": [{"name": n} for n in c.get("channels", [])]}
                   for c in t.get("category", [])}
     top = [{"name": n} for n in t.get("channels", [])]
@@ -157,18 +182,21 @@ def main():
         made[t["name"]] = server
         print(f"server   {t['name']}: {server}")
 
-        def channel(ch, parent):
+        def channel(ch, parent, inherited):
             nonlocal order
+            retention = ch.get("retention", inherited)
             room = mx.create(ch["name"], ch.get("topic"), parent=parent,
                              private=ch.get("private", False),
-                             read_only=ch.get("read_only", False))
+                             read_only=ch.get("read_only", False),
+                             retention_ms=parse_duration_ms(retention))
             order += 1
             mx.add_child(parent, room, order)
             made[ch["name"]] = room
-            print(f"  channel  #{ch['name']}: {room}")
+            shown = retention if retention not in (None, "forever") else None
+            print(f"  channel  #{ch['name']}: {room}" + (f"  (retention {shown})" if shown else ""))
 
         for ch in top:
-            channel(ch, server)
+            channel(ch, server, t.get("retention"))
         for name, cat in categories.items():
             sub = mx.create(name, cat["topic"], space=True, parent=server, private=cat["private"])
             order += 1
@@ -176,7 +204,7 @@ def main():
             made[name] = sub
             print(f"category {name}{' (private)' if cat['private'] else ''}: {sub}")
             for ch in cat["channels"]:
-                channel(ch, sub)
+                channel(ch, sub, cat["retention"])
         print("\nDone. Invite people to the server space; they join its channels automatically"
               " if the server has auto_join_space_children on.")
         if args.json:

@@ -11,7 +11,7 @@ use conduwuit::{
 	trace,
 	utils::stream::{BroadbandExt, ReadyExt, TryIgnore, WidebandExt},
 };
-use conduwuit_service::Services;
+use conduwuit_service::{Services, retention::Service as Retention};
 use futures::StreamExt;
 use ruma::{
 	OwnedUserId, RoomId, UserId,
@@ -57,6 +57,9 @@ async fn load_timeline(
 		);
 	}
 
+	// Retention: leave out expired messages (purged later by a job).
+	let cutoff = services.retention.cutoff(room_id).await;
+
 	let mut pdu_stream = match starting_count {
 		| Some(starting_count) => {
 			let last_timeline_count = services
@@ -84,6 +87,7 @@ async fn load_timeline(
 				.timeline
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
+				.ready_filter(move |(_, pdu)| !Retention::is_expired(pdu, cutoff))
 				.ready_take_while(move |&(pducount, _)| pducount > starting_count)
 				.wide_filter_map(async |mut pdu| {
 					let ctx = services
@@ -115,6 +119,7 @@ async fn load_timeline(
 				.timeline
 				.pdus_rev(room_id, ending_count.map(|count| count.saturating_add(1)))
 				.ignore_err()
+				.ready_filter(move |(_, pdu)| !Retention::is_expired(pdu, cutoff))
 				.wide_filter_map(async |mut pdu| {
 					let ctx = services
 						.rooms
