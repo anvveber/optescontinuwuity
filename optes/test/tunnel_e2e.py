@@ -61,7 +61,8 @@ def wait_for_tunnel():
 
 def matrix_flow():
     sfx = uuid.uuid4().hex[:6]
-    register("admin" + sfx, FIRST)
+    if FIRST:  # empty when the first account already exists
+        register("admin" + sfx, FIRST)
     alice, _ = register("alice" + sfx, TOKEN)
     bob, bob_id = register("bob" + sfx, TOKEN)
     _, room = call("POST", "/_matrix/client/v3/createRoom", {"preset": "private_chat"}, alice)

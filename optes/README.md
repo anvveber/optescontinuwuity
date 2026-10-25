@@ -17,6 +17,7 @@ Start with `handbook.md` (design, threat model, section 14 = current status).
 | `setup-front.sh` | Front VPS, Tor or I2P (Debian 13) |
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
 | `test/` | End-to-end tests (no Tor needed) |
+| `test/home-test.sh` | Try everything over real Tor on a machine you already use, as your normal user, no system changes |
 | `update-upstream.sh` | Move the fork onto a new continuwuity release and run every test |
 | `UPSTREAM` | The upstream tag the fork is based on |
 
