@@ -1550,6 +1550,18 @@
 #
 #hide_server_identity = false
 
+# Honour per-room retention policies (MSC1763 `m.room.retention` with
+# `max_lifetime` in ms): messages older than that are hidden and then
+# deleted from the database. State events and the newest event of a room
+# are kept. Rooms without a policy keep everything.
+#
+#allow_room_retention = false
+
+# How often the retention job deletes expired messages, in seconds.
+# Expired messages are hidden from clients immediately either way.
+#
+#retention_purge_interval_secs = 900
+
 # Set this to true for continuwuity to compress HTTP response bodies using
 # zstd. This option does nothing if continuwuity was not built with
 # `zstd_compression` feature. Please be aware that enabling HTTP

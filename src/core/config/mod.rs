@@ -1831,6 +1831,22 @@ pub struct Config {
 	#[serde(default)]
 	pub hide_server_identity: bool,
 
+	/// Honour per-room retention policies (MSC1763 `m.room.retention` with
+	/// `max_lifetime` in ms): messages older than that are hidden and then
+	/// deleted from the database. State events and the newest event of a room
+	/// are kept. Rooms without a policy keep everything.
+	///
+	/// default: false
+	#[serde(default)]
+	pub allow_room_retention: bool,
+
+	/// How often the retention job deletes expired messages, in seconds.
+	/// Expired messages are hidden from clients immediately either way.
+	///
+	/// default: 900
+	#[serde(default = "default_retention_purge_interval_secs")]
+	pub retention_purge_interval_secs: u64,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP
@@ -3278,6 +3294,8 @@ fn default_login_token_ttl() -> u64 { 2 * 60 * 1000 }
 fn default_turn_ttl() -> u64 { 60 * 60 * 24 }
 
 fn default_presence_idle_timeout_s() -> u64 { 5 * 60 }
+
+fn default_retention_purge_interval_secs() -> u64 { 15 * 60 }
 
 fn default_presence_offline_timeout_s() -> u64 { 30 * 60 }
 
