@@ -432,6 +432,8 @@ impl super::Service {
 		self.send_to_interested_appservices(pdu, &pdu_id, room_id)
 			.await;
 
+		self.services.space_autojoin.on_appended(pdu, room_id);
+
 		Ok(pdu_id)
 	}
 

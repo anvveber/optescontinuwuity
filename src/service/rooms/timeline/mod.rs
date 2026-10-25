@@ -30,7 +30,7 @@ use self::data::Data;
 pub use self::{create::pdu_fits, data::PdusIterItem};
 use crate::{
 	Dep, account_data, admin, appservice, config, globals, pusher, release, rooms, sending,
-	server_keys, sync, users,
+	server_keys, space_autojoin, sync, users,
 };
 
 // Update Relationships
@@ -76,6 +76,7 @@ struct Services {
 	release: Dep<release::Service>,
 	search: Dep<rooms::search::Service>,
 	sending: Dep<sending::Service>,
+	space_autojoin: Dep<space_autojoin::Service>,
 	server_keys: Dep<server_keys::Service>,
 	short: Dep<rooms::short::Service>,
 	state: Dep<rooms::state::Service>,
@@ -111,6 +112,7 @@ impl crate::Service for Service {
 				release: args.depend::<release::Service>("release"),
 				search: args.depend::<rooms::search::Service>("rooms::search"),
 				sending: args.depend::<sending::Service>("sending"),
+				space_autojoin: args.depend::<space_autojoin::Service>("space_autojoin"),
 				server_keys: args.depend::<server_keys::Service>("server_keys"),
 				short: args.depend::<rooms::short::Service>("rooms::short"),
 				state: args.depend::<rooms::state::Service>("rooms::state"),

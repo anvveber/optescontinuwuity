@@ -1,0 +1,24 @@
+# Example template for make-space.py
+
+name = "Home"
+topic = "Our server"
+channels = ["lobby"]
+
+[[category]]
+name = "General"
+channels = ["chat", "links", "media"]
+
+[[category]]
+name = "Projects"
+channels = ["matrix-server", "drones"]
+
+[[category]]
+name = "Staff"
+private = true
+channels = ["mods"]
+
+[[channel]]
+name = "announcements"
+category = "General"
+read_only = true
+topic = "News from the admins"
