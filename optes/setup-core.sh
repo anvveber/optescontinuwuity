@@ -21,7 +21,8 @@
 #   setup-core.sh add-front tor:<front>.onion:443           (re-signs front list;
 #                                       or i2p:<front>.b32.i2p:443)
 #   setup-core.sh remove-front tor:<front>.onion:443
-#   setup-core.sh direct-ingress on|off                     (plain HTTP on port 80)
+#   setup-core.sh direct-ingress on|off                     (plain HTTP on port 80;
+#                                       off by default with the tunnel)
 #   setup-core.sh renew-front-list                          (re-sign; a weekly timer does this)
 #
 # Layout:
@@ -31,8 +32,10 @@
 #     else can, and continuwuity cannot open any outbound connection.
 #   - Tor runs on the host. Two onion services, both requiring client auth:
 #       ingress port 443 -> optes-gateway socket (tunnel from relays, phase 2)
-#       ingress port 80  -> continuwuity socket directly (plain HTTP; phase 1
-#                           testing; turn off with: direct-ingress off)
+#       ingress port 80  -> continuwuity socket directly (plain HTTP, no tunnel,
+#                           no padding). Off by default when the gateway is
+#                           installed; on only for phase-1 installs without
+#                           it, since it is then the only way in.
 #       admin   port 22  -> sshd on 127.0.0.1:22
 #   - optes-gateway, like continuwuity, runs with no network and talks only
 #     over unix sockets.
@@ -415,7 +418,9 @@ EOF
 
   info "Tor"
   [[ -f $TORRC.orig ]] || cp -a "$TORRC" "$TORRC.orig" 2>/dev/null || true
-  [[ -f $STATE_DIR/direct_ingress ]] || echo on > "$STATE_DIR/direct_ingress"
+  if [[ ! -f $STATE_DIR/direct_ingress ]]; then
+    if [[ -f $GW_UNIT ]]; then echo off; else echo on; fi > "$STATE_DIR/direct_ingress"
+  fi
   write_torrc
   for d in "$HS_INGRESS" "$HS_ADMIN"; do
     install -d -o "$TOR_USER" -g "$TOR_USER" -m 0700 "$d" "$d/authorized_clients"
@@ -466,8 +471,7 @@ NOT stored on this server and won't be shown again.
 
 Server name (identity):   $server_name
 Ingress onion:            $ingress
-  port 443 = tunnel (relays, through fronts)
-  port 80  = plain HTTP (phase 1 testing; '$0 direct-ingress off' later)
+$(ingress_ports_summary)
 Admin SSH onion:          $admin
 $(gateway_summary)
 
@@ -483,17 +487,27 @@ $ingress_out
 Next:
  1. Test SSH through the admin onion from your machine.
  2. Then close clearnet SSH:  $0 lockdown --i-tested-onion-ssh
- 3. Register the first account through the ingress onion with the
-    one-time token above. The first account becomes server admin.
+ 3. Register the first account with the one-time token above, through
+    a relay (or port 80 if open). The first account becomes server admin.
  4. Back up /var/lib/continuwuity (contains the Matrix signing key),
     $HS_INGRESS, $HS_ADMIN and $OPTES_DIR — encrypted, offline.
 =====================================================================
 EOF
 }
 
+ingress_ports_summary() {
+  [[ -f $GW_UNIT ]] && echo "  port 443 = tunnel (relays, through fronts)"
+  if [[ $(cat "$STATE_DIR/direct_ingress" 2>/dev/null) == on ]]; then
+    echo "  port 80  = plain HTTP, OPEN: no tunnel, no padding. Testing only;"
+    echo "             close with '$0 direct-ingress off'"
+  else
+    echo "  port 80  = closed (open for testing: '$0 direct-ingress on')"
+  fi
+}
+
 write_torrc() {
   local direct
-  direct=$(cat "$STATE_DIR/direct_ingress" 2>/dev/null || echo on)
+  direct=$(cat "$STATE_DIR/direct_ingress" 2>/dev/null || echo off)
   {
     echo "# Written by setup-core.sh. Original saved as torrc.orig."
     echo "SocksPort 127.0.0.1:9050"
@@ -718,10 +732,14 @@ cmd_remove_device() {
 cmd_direct_ingress() {
   local mode=${1:-}
   [[ $mode == on || $mode == off ]] || die "usage: direct-ingress on|off"
+  if [[ $mode == off && ! -f $GW_UNIT ]]; then
+    die "no tunnel gateway installed: port 80 is the only way in. Reinstall with --tunnel-bin-dir first."
+  fi
   echo "$mode" > "$STATE_DIR/direct_ingress"
   write_torrc
   systemctl reload tor@default.service
   info "direct (plain HTTP) ingress: $mode"
+  [[ $mode == on ]] && warn "port 80 is open: clients holding an ingress key can skip the tunnel and fronts. Turn it off after testing."
 }
 
 apt_via_tor() {
@@ -806,7 +824,9 @@ cmd_status() {
   printf '%-32s %s\n' "clearnet ssh open" "$(cat "$STATE_DIR/keep_clearnet_ssh" 2>/dev/null || echo -)"
   printf '%-32s %s\n' "ingress clients" "$(find "$HS_INGRESS/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)"
   printf '%-32s %s\n' "admin clients" "$(find "$HS_ADMIN/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)"
-  printf '%-32s %s\n' "direct ingress" "$(cat "$STATE_DIR/direct_ingress" 2>/dev/null || echo -)"
+  printf '%-32s %s\n' "direct ingress (port 80)" "$(cat "$STATE_DIR/direct_ingress" 2>/dev/null || echo -)"
+  [[ $(cat "$STATE_DIR/direct_ingress" 2>/dev/null) == on && -f $GW_UNIT ]] \
+    && warn "port 80 open: plain HTTP bypasses the tunnel ('direct-ingress off' to close)"
   if [[ -f $GW_UNIT ]]; then
     printf '%-32s %s\n' "optes-gateway" "$(systemctl is-active optes-gateway 2>/dev/null || true)"
     printf '%-32s %s\n' "devices" "$(find "$DEVICES" -name '*.pub' -printf '%f ' 2>/dev/null)"

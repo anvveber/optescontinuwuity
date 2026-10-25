@@ -504,6 +504,8 @@ thin.
 
 Changes from the original design worth knowing:
 - Continuwuity's default port is 8008, not 6167; the core uses unix sockets.
+- Plain-HTTP ingress (onion port 80, no tunnel) is closed by default when the
+  gateway is installed; `setup-core.sh direct-ingress on` opens it for testing.
 - Continuwuity phones home to continuwuity.org by default
   (`allow_announcements_check`); turned off.
 - On first start, continuwuity ignores the configured registration token; the
