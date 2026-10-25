@@ -1812,6 +1812,25 @@ pub struct Config {
 	#[serde(default)]
 	pub restrict_room_creation_to_spaces: bool,
 
+	/// Refuse unencrypted messages (m.room.message, stickers, polls, live
+	/// location) from clients, and make every new room encrypted. Reactions
+	/// and redactions are still accepted unencrypted, as clients send them
+	/// that way by design. The admin room is exempt.
+	///
+	/// default: false
+	#[serde(default)]
+	pub require_encryption: bool,
+
+	/// Don't advertise the server software: removes the server version
+	/// endpoint, the landing page and the about and debug pages, and uses a
+	/// generic session cookie name. Account and login pages stay (clients
+	/// need them), and API behaviour can still reveal the software to a
+	/// determined client.
+	///
+	/// default: false
+	#[serde(default)]
+	pub hide_server_identity: bool,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP

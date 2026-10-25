@@ -11,6 +11,21 @@ use serde_json::from_str;
 
 use crate::{Ruma, client_ip::ClientIp};
 
+/// Event types that carry message content and must be encrypted when
+/// `require_encryption` is on.
+const PLAINTEXT_CONTENT_TYPES: &[&str] = &[
+	"m.room.message",
+	"m.sticker",
+	"m.poll.start",
+	"m.poll.response",
+	"m.poll.end",
+	"org.matrix.msc3381.poll.start",
+	"org.matrix.msc3381.poll.response",
+	"org.matrix.msc3381.poll.end",
+	"org.matrix.msc3672.beacon",
+	"org.matrix.msc3672.beacon_info",
+];
+
 /// # `PUT /_matrix/client/v3/rooms/{roomId}/send/{eventType}/{txnId}`
 ///
 /// Send a message event into the room.
@@ -36,6 +51,19 @@ pub(crate) async fn send_message_event_route(
 		.users
 		.update_device_last_seen(sender_user, sender_device, client_ip)
 		.await;
+
+	// require_encryption: refuse plaintext message content. Reactions and
+	// redactions stay allowed: clients send those unencrypted by design. The
+	// admin room is exempt (admin commands are plaintext).
+	if services.config.require_encryption
+		&& PLAINTEXT_CONTENT_TYPES.contains(&body.event_type.to_string().as_str())
+		&& !services.admin.is_admin_room(&body.room_id).await
+	{
+		return Err!(Request(Forbidden(
+			"This server only accepts end-to-end encrypted messages. Enable encryption in this \
+			 room."
+		)));
+	}
 
 	// Forbid m.room.encrypted if encryption is disabled
 	if MessageLikeEventType::RoomEncrypted == body.event_type && !services.config.allow_encryption

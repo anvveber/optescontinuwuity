@@ -124,24 +124,32 @@ pub fn build(services: &Services) -> Router<state::State> {
 		);
 	});
 
-	Router::new()
-		.merge(index::build())
-		.nest(
-			"/_continuwuity/",
-			Router::new()
-				.nest("/about", about::build())
-				.nest("/account/", account::build())
-				.merge(debug::build())
-				.nest("/media/", media::build())
-				.nest("/oauth2/", oauth::build())
-				.nest("/oidc/", oidc::build())
-				.merge(resources::build())
-				.merge(threepid::build())
-				.fallback(async || WebError::NotFound),
-		)
+	// hide_server_identity: drop the pages that only advertise the server
+	// (landing page, about, debug). Account and login pages stay; clients need
+	// them.
+	let hide = services.config.hide_server_identity;
+
+	let mut pages = Router::new()
+		.nest("/account/", account::build())
+		.nest("/media/", media::build())
+		.nest("/oauth2/", oauth::build())
+		.nest("/oidc/", oidc::build())
+		.merge(resources::build())
+		.merge(threepid::build());
+	if !hide {
+		pages = pages.nest("/about", about::build()).merge(debug::build());
+	}
+
+	let mut router = Router::new();
+	if !hide {
+		router = router.merge(index::build());
+	}
+
+	router
+		.nest("/_continuwuity/", pages.fallback(async || WebError::NotFound))
 		.layer(
 			SessionManagerLayer::new(store)
-				.with_name("_c10y_session")
+				.with_name(if hide { "sid" } else { "_c10y_session" })
 				.with_same_site(SameSite::Lax),
 		)
 		.layer(CatchPanicLayer::custom(|panic: Box<dyn Any + Send + 'static>| {
