@@ -22,8 +22,9 @@ mkdir -p "$work/devices" "$work/relay-state"
 "$keys" gen-x25519 "$work/device" >/dev/null
 "$keys" gen-ed25519 "$work/list" >/dev/null
 cp "$work/device.pub" "$work/devices/test.pub"
-# Relay starts with v1; the gateway serves v2, which the relay must fetch.
-"$keys" sign-list --key "$work/list.key" --version 1 --gateway-key "$work/gateway.pub" \
+# Relay starts with v1, already expired; the gateway serves v2, which the
+# relay must still reach (with the expired list) and fetch.
+"$keys" sign-list --key "$work/list.key" --version 1 --expires-days 0 --gateway-key "$work/gateway.pub" \
   --front "tcp:127.0.0.1:$fport" --out "$work/list-v1.signed" >/dev/null
 "$keys" sign-list --key "$work/list.key" --version 2 --gateway-key "$work/gateway.pub" \
   --front "tcp:127.0.0.1:$fport" --out "$work/list-v2.signed" >/dev/null
@@ -53,14 +54,28 @@ python3 "$here/front_recorder.py" "$fport" "127.0.0.1:$gport" "$work/wire.log" &
 sleep 1
 "$tdir/optes-relay" --listen "127.0.0.1:$rport" --front-list "$work/list-v1.signed" \
   --list-key "$work/list.pub" --device-key "$work/device.key" --level "$level" \
-  --state-dir "$work/relay-state" > "$work/relay.log" 2>&1 & pids+=($!)
+  --state-dir "$work/relay-state" --list-refresh-secs 5 > "$work/relay.log" 2>&1 & pids+=($!)
 
 status=0
 python3 "$here/tunnel_e2e.py" "http://127.0.0.1:$rport" "$token" "$first" "$level" \
   "$work/wire.log" "$window" "$tick" || status=1
 
 stored=$(cat "$work/relay-state/frontlist.version" 2>/dev/null || echo none)
-if [[ $stored == 2 ]]; then echo "PASS relay fetched newer front list (v2)"; else echo "FAIL relay front list version: $stored"; status=1; fi
+if [[ $stored == 2 ]]; then echo "PASS relay reached the gateway with an expired list and fetched v2"; else echo "FAIL relay front list version: $stored"; status=1; fi
+
+# The core renews the list while the tunnel stays up; the relay must pick it up.
+"$keys" sign-list --key "$work/list.key" --version 3 --gateway-key "$work/gateway.pub" \
+  --front "tcp:127.0.0.1:$fport" --out "$work/list-v3.signed" >/dev/null
+cp "$work/list-v3.signed" "$work/list-v2.signed"
+for _ in $(seq 1 30); do
+  [[ $(cat "$work/relay-state/frontlist.version" 2>/dev/null) == 3 ]] && break
+  sleep 1
+done
+if [[ $(cat "$work/relay-state/frontlist.version" 2>/dev/null) == 3 ]]; then
+  echo "PASS relay picked up a renewed list during a running session (v3)"
+else echo "FAIL relay did not pick up v3"; status=1; fi
+if [[ $(grep -c "tunnel up" "$work/relay.log") == 1 ]]; then echo "PASS tunnel stayed up throughout"
+else echo "FAIL tunnel reconnected"; status=1; fi
 
 # A device the gateway doesn't know must not get a tunnel.
 "$keys" gen-x25519 "$work/stranger" >/dev/null

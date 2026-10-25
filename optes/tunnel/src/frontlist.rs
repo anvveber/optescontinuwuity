@@ -55,6 +55,17 @@ pub fn peek_version(signed: &str) -> Result<u64> {
 /// - `version` must be >= `min_version` (rollback protection);
 /// - `expires_at` must be after `now` (seconds since the Unix epoch).
 pub fn verify(signed: &str, key: &VerifyingKey, min_version: u64, now: u64) -> Result<FrontList> {
+	let list = verify_ignoring_expiry(signed, key, min_version)?;
+	if list.expires_at <= now {
+		bail!("front list expired at {}", list.expires_at);
+	}
+	Ok(list)
+}
+
+/// Like [`verify`] but accepts an expired list. Used only to reach the gateway
+/// and fetch a fresh one: the gateway's identity is still checked by the Noise
+/// handshake, so an expired list can't redirect a relay anywhere unsafe.
+pub fn verify_ignoring_expiry(signed: &str, key: &VerifyingKey, min_version: u64) -> Result<FrontList> {
 	let (json, sig) = signed
 		.split_once(SEPARATOR)
 		.context("missing signature separator")?;
@@ -68,9 +79,6 @@ pub fn verify(signed: &str, key: &VerifyingKey, min_version: u64, now: u64) -> R
 	let list: FrontList = serde_json::from_str(json).context("front list JSON")?;
 	if list.version < min_version {
 		bail!("front list version {} is older than accepted version {min_version}", list.version);
-	}
-	if list.expires_at <= now {
-		bail!("front list expired at {}", list.expires_at);
 	}
 	list.gateway_key().context("gateway_key")?;
 	if list.fronts.is_empty() {
@@ -130,5 +138,17 @@ mod tests {
 		let key = keys::generate_ed25519();
 		let signed = sign(&sample(5), &key).unwrap();
 		assert!(verify(&signed, &key.verifying_key(), 0, 2_000).is_err());
+	}
+
+	#[test]
+	fn expired_still_checks_signature_and_version() {
+		let key = keys::generate_ed25519();
+		let signed = sign(&sample(5), &key).unwrap();
+		assert!(verify_ignoring_expiry(&signed, &key.verifying_key(), 5).is_ok());
+		assert!(verify_ignoring_expiry(&signed, &key.verifying_key(), 6).is_err());
+		let other = keys::generate_ed25519();
+		assert!(verify_ignoring_expiry(&signed, &other.verifying_key(), 0).is_err());
+		let tampered = signed.replace("x.onion", "y.onion");
+		assert!(verify_ignoring_expiry(&tampered, &key.verifying_key(), 0).is_err());
 	}
 }

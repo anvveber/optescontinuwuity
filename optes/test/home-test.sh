@@ -13,6 +13,7 @@
 # Server side (e.g. tvhub):
 #   home-test.sh start --bin-dir <dir with continuwuity, optes-gateway, optes-keys>
 #   home-test.sh status | stop | reset
+#   home-test.sh renew          (re-sign the front list; runs daily by itself)
 #
 # Then copy the printed bundle to the client machine (e.g. your Fedora laptop)
 # and run, from inside the unpacked bundle:
@@ -143,13 +144,18 @@ EOF
 
   if [[ ! -f $DIR/bundle/frontlist.signed ]]; then
     # No front for this test: relays connect straight to the core's tunnel port.
-    "$keys" sign-list --key "$DIR/list.key" --version 1 --gateway-key "$DIR/gateway.pub" \
-      --front "tor:$onion:443" --out "$DIR/bundle/frontlist.signed" > /dev/null
+    echo "$bin_dir" > "$DIR/bin_dir"
+    echo "tor:$onion:443" > "$DIR/front"
+    sign_list
     echo "${onion%.onion}:descriptor:x25519:$(cat "$DIR/bundle/onion_auth.key")" \
       > "$DIR/bundle/auth/core.auth_private"
     rm -f "$DIR/bundle/onion_auth.key"
     write_relay_script
   fi
+
+  # Lists expire after 30 days: re-sign daily while the test runs. The
+  # gateway serves the new list; relays pick it up on their own.
+  launch renewer bash -c "while sleep 86400; do '$(realpath "$0")' renew; done"
 
   tar -C "$DIR" -czf "$DIR/optes-test-bundle.tar.gz" bundle
   chmod 600 "$DIR/optes-test-bundle.tar.gz"
@@ -213,9 +219,25 @@ EOF
   chmod 700 "$DIR/bundle/relay.sh"
 }
 
+sign_list() {
+  local version
+  version=$(( $(cat "$DIR/list.version" 2>/dev/null || echo 0) + 1 ))
+  "$(cat "$DIR/bin_dir")/optes-keys" sign-list --key "$DIR/list.key" --version "$version" \
+    --gateway-key "$DIR/gateway.pub" --front "$(cat "$DIR/front")" \
+    --out "$DIR/bundle/frontlist.signed.tmp" > /dev/null
+  mv "$DIR/bundle/frontlist.signed.tmp" "$DIR/bundle/frontlist.signed"
+  echo "$version" > "$DIR/list.version"
+}
+
+cmd_renew() {
+  [[ -f $DIR/front ]] || die "not set up yet; run start first"
+  sign_list
+  info "front list v$(cat "$DIR/list.version") signed"
+}
+
 cmd_stop() {
   local name
-  for name in tor gateway continuwuity; do
+  for name in renewer tor gateway continuwuity; do
     if running "$name"; then
       kill "$(cat "$RUN/$name.pid")" && info "stopped $name"
     fi
@@ -225,7 +247,7 @@ cmd_stop() {
 
 cmd_status() {
   local name
-  for name in continuwuity gateway tor; do
+  for name in continuwuity gateway tor renewer; do
     printf '%-14s %s\n' "$name" "$(running "$name" && echo running || echo stopped)"
   done
   printf '%-14s %s\n' "onion" "$(cat "$DIR/tor/ingress/hostname" 2>/dev/null || echo -)"
@@ -243,6 +265,7 @@ case "${1:-}" in
   start)  shift; cmd_start "$@" ;;
   stop)   cmd_stop ;;
   status) cmd_status ;;
+  renew)  cmd_renew ;;
   reset)  cmd_reset ;;
-  *) sed -n '2,22p' "$0"; exit 1 ;;
+  *) sed -n '2,23p' "$0"; exit 1 ;;
 esac
