@@ -34,6 +34,8 @@ run_tests() {
   RELEASE=15 optes/test/run-spaces-e2e.sh target/debug/conduwuit
   optes/test/run-hardening-e2e.sh target/debug/conduwuit on
   optes/test/run-hardening-e2e.sh target/debug/conduwuit off
+  optes/test/run-retention-e2e.sh target/debug/conduwuit
+  RELEASE=15 optes/test/run-retention-e2e.sh target/debug/conduwuit
   for level in 1 2 3; do
     optes/test/run-tunnel-e2e.sh target/debug/conduwuit optes/tunnel/target/debug "$level"
   done

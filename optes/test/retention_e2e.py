@@ -17,6 +17,13 @@ BASE, TOKEN, FIRST, LOG = sys.argv[1:5]
 FAILURES = []
 q = urllib.parse.quote
 LIFETIME_MS = 20_000
+RELEASE_S = int(__import__("os").environ.get("RELEASE", "0"))
+
+
+def settle():
+    """With delayed release on, wait until the next tick has released what we sent."""
+    if RELEASE_S:
+        time.sleep(RELEASE_S - time.time() % RELEASE_S + 1)
 
 
 def call(method, path, body=None, token=None):
@@ -102,11 +109,30 @@ reaction = send(bob, temp, {"m.relates_to": {"rel_type": "m.annotation", "event_
 thread = send(bob, temp, text("in thread", **{"m.relates_to": {"rel_type": "m.thread", "event_id": m1}}))
 p1 = send(alice, perm, text("keep me"))
 old = {m1, m2, reply, reaction, thread}
+settle()
 
 check("messages visible before expiry", old <= timeline_ids(alice, temp))
 
+
+def search_hits():
+    _, res = call("POST", "/_matrix/client/v3/search",
+                  {"search_categories": {"room_events": {"search_term": word}}}, alice)
+    return res.get("search_categories", {}).get("room_events", {}).get("results", [])
+
+
+def relations(event):
+    status, rel = call("GET", f"/_matrix/client/v1/rooms/{q(temp)}/relations/{q(event)}", token=alice)
+    return status, rel.get("chunk")
+
+
+check("control: search finds the message before expiry", len(search_hits()) == 1, str(len(search_hits())))
+status, chunk = relations(m2)
+check("control: relations of m2 list the reaction before expiry",
+      status == 200 and any(e["event_id"] == reaction for e in chunk or []), f"{status} {chunk}")
+
 time.sleep(LIFETIME_MS / 1000 + 2)
 newest = send(alice, temp, text("newest"))
+settle()
 
 # --- hidden right away -----------------------------------------------------
 check("expired messages gone from /messages", not (old & timeline_ids(bob, temp)))
@@ -114,9 +140,7 @@ check("expired messages gone from initial sync", not (old & sync_ids(bob, temp))
 check("expired message not readable via /event", not readable(bob, temp, m1))
 _, ctx = call("GET", f"/_matrix/client/v3/rooms/{q(temp)}/context/{q(m1)}", token=bob)
 check("expired message not served via /context", "event" not in ctx)
-_, res = call("POST", "/_matrix/client/v3/search",
-              {"search_categories": {"room_events": {"search_term": word}}}, alice)
-hits = res.get("search_categories", {}).get("room_events", {}).get("results", [])
+hits = search_hits()
 check("expired message not found by search", not hits, f"{len(hits)} hits")
 check("newest message still visible", newest in timeline_ids(bob, temp))
 check("room without retention keeps its messages", readable(alice, perm, p1))
@@ -125,12 +149,14 @@ check("room without retention keeps its messages", readable(alice, perm, p1))
 time.sleep(6)  # purge interval in the test config is 3 s
 call("PUT", f"/_matrix/client/v3/rooms/{q(temp)}/state/m.room.retention/",
      {"max_lifetime": 10 * 365 * 86400 * 1000}, alice)
+settle()
 reappeared = old & timeline_ids(alice, temp)
 check("after purge, lifting the policy brings nothing back (really deleted)", not reappeared,
       f"{len(reappeared)} back")
 check("lifting the policy shows recent messages again", newest in timeline_ids(alice, temp))
-_, rel = call("GET", f"/_matrix/client/v1/rooms/{q(temp)}/relations/{q(m2)}", token=alice)
-check("relations of a purged event are empty", not rel.get("chunk"), str(rel.get("chunk")))
+status, chunk = relations(m2)
+check("relations of a purged event are empty", status in (200, 403, 404) and not chunk, f"{status} {chunk}")
+check("search finds nothing even with the policy lifted", not search_hits())
 
 # --- room still works, state kept -----------------------------------------
 _, name = call("GET", f"/_matrix/client/v3/rooms/{q(temp)}/state/m.room.name/", token=bob)
@@ -138,9 +164,11 @@ check("state events kept (room name)", name.get("name") == "temp", str(name))
 _, members = call("GET", f"/_matrix/client/v3/rooms/{q(temp)}/joined_members", token=alice)
 check("membership kept", bob_id in members.get("joined", {}), str(list(members.get("joined", {}))))
 after = send(bob, temp, text("still works"))
+settle()
 check("room accepts new messages after purge", readable(alice, temp, after))
 carol, _ = register("carol" + sfx, TOKEN)
 status, _ = call("POST", f"/_matrix/client/v3/join/{q(temp)}", {}, carol)
+settle()
 check("new member can join after purge", status == 200, str(status))
 check("new member sees the history that remains", after in timeline_ids(carol, temp))
 
