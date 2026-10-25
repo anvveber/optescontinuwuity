@@ -294,6 +294,13 @@ release_interval_secs = $RELEASE_SECS
 # (optescontinuwuity patch).
 record_device_activity = false
 
+# Discord-style spaces (optescontinuwuity patch): joining a space joins its
+# channels. Only server admins create top-level spaces; people with
+# power 50 in a space can add channels and categories to it; anyone can DM.
+auto_join_space_children = true
+allow_space_creation = false
+restrict_room_creation_to_spaces = true
+
 # Logging and telemetry.
 log = "warn"
 log_colors = false

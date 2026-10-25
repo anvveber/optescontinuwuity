@@ -75,6 +75,12 @@ def main():
     alice = register("alice" + suffix)
     bob = register("bob" + suffix)
 
+    # Room v12 IDs are hashes of the create event: two identical rooms created
+    # within one tick must still get different IDs.
+    ids = {call("POST", "/_matrix/client/v3/createRoom", {"preset": "private_chat"}, alice)[1]["room_id"]
+           for _ in range(2)}
+    check("two rooms created in one tick get different IDs", len(ids) == 2, str(ids))
+
     _, room = call("POST", "/_matrix/client/v3/createRoom",
                    {"preset": "private_chat", "invite": []}, alice)
     room_id = room["room_id"]

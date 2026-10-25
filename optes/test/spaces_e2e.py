@@ -129,7 +129,8 @@ check("bob joins the server space", status == 200, str(status))
 ok = wait_until(lambda: open_rooms <= joined(bob))
 check("joining the server joins its channels and categories (incl. nested)", ok,
       f"missing {len(open_rooms - joined(bob))}")
-check("private category and its channel are not joined", not (private_rooms & joined(bob)))
+leaked = private_rooms & joined(bob)
+check("private category and its channel are not joined", not leaked)
 
 status, resp = create(admin, "new-channel", parent=rooms["General"])
 new = resp.get("room_id")

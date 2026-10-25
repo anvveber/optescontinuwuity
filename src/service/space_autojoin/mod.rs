@@ -138,7 +138,7 @@ impl Service {
 				let child = RoomId::parse(state_key).ok()?;
 				let content = pdu.get_content::<SpaceChildEventContent>().ok()?;
 				// An empty `via` means the child was removed.
-				(!content.via.is_empty()).then(|| Action::ChildAdded(child))
+				(!content.via.is_empty()).then_some(Action::ChildAdded(child))
 			},
 			| _ => None,
 		}
