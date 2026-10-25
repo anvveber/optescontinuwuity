@@ -1,0 +1,18 @@
+{
+  "version": 3,
+  "issued_at": 1792958744,
+  "expires_at": 1795550744,
+  "gateway_key": "9JhBfGYCPXDoPdt5IBb6hiRvbjBrO8S14YrN9qb5nz0=",
+  "fronts": [
+    {
+      "transport": "tor",
+      "address": "abc.onion:443"
+    },
+    {
+      "transport": "i2p",
+      "address": "xyz.b32.i2p:443"
+    }
+  ]
+}
+-----SIG-----
+lctPesbMT/cBWp9J4km/zjuKSTz2hRa8tLlXuRR87WM5lQ+7nkM6VAJVYurIV3Zm2x8tiSDqcNPu3Dn7WnkDCQ==
