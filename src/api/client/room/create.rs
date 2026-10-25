@@ -504,6 +504,20 @@ pub(crate) async fn create_room_route(
 		));
 	}
 
+	// require_encryption: every new room (not spaces, which carry no
+	// messages) starts encrypted, whatever the client asked for.
+	let is_space = body
+		.creation_content
+		.as_ref()
+		.and_then(|c| c.get_field::<String>("type").ok().flatten())
+		.is_some_and(|t| t == "m.space");
+	if services.server.config.require_encryption && !is_space {
+		server_initial_state.push(PartialPdu::state(
+			String::new(),
+			&ruma::events::room::encryption::RoomEncryptionEventContent::with_recommended_defaults(),
+		));
+	}
+
 	for pdu in server_initial_state {
 		services
 			.rooms
