@@ -113,7 +113,7 @@ interval (15 s now).
 | Level | Rule | Line observer sees | Cost |
 |---|---|---|---|
 | 1 | Send when there's data. After the send queue drains, add PAD frames until the burst is a **power of two, minimum 4** frames. | When the user is active; burst sizes rounded up. | ~0 |
-| 2 | Send only at window boundaries (wall-clock multiples of `WINDOW`, +1 s for gateway → relay so released data is included). **Every window**, each side sends a burst padded as in level 1, even when idle. | A fixed 8 KB+ burst every window, same for every user. Burst size rounded. | delay up to 2×`WINDOW`; idle ≈ 1.1 KB/s → ~1.4 GB/month per direction |
+| 2 | Send only at window boundaries (wall-clock multiples of `WINDOW`, +1 s for gateway → relay so released data is included). **Every window**, each side sends a burst padded as in level 1, even when idle. | A fixed 8 KB+ burst every window, same for every user. Burst size rounded. | delay up to 2×`WINDOW`; idle = 8 KB per 15 s ≈ 0.55 KB/s → ~1.4 GB/month per direction |
 | 3 | Exactly one frame every `TICK`, both directions, while connected. Data replaces PAD. Never bursts, never skips ahead to catch up. | A flat 10 KB/s stream. | 10 KB/s each way (~26 GB/month if 24/7); throughput capped at 10 KB/s |
 
 Level 2 and the server's delayed release use the same tick grid, so every
@@ -146,7 +146,11 @@ Ed25519 signature over the JSON bytes exactly as stored.
 Relay rules:
 - Verify the signature against the pinned front-list key. Reject on failure.
 - Reject if `version` < highest version it has accepted before (rollback).
-- Reject if `expires_at` has passed. (Forces regular refresh; default 30 days.)
+- Lists expire (default 30 days). An expired list is still used to *reach* the
+  gateway (its identity is checked by the Noise handshake anyway), and the
+  relay then fetches a fresh one. The core re-signs weekly (timer).
+- While connected, the relay asks for a newer list every 6 h, so tunnels that
+  stay up for weeks (level 4) don't fall behind.
 - After each connect, if the gateway's version (from `WELCOME`) is higher,
   fetch it with `LIST_GET`, verify, store.
 - Bootstrap: the relay is configured with an initial signed list file and the

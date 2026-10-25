@@ -57,6 +57,9 @@ struct Args {
 	/// Where accepted front lists and their version are kept
 	#[arg(long)]
 	state_dir: PathBuf,
+	/// How often to ask the gateway for a newer front list while connected, s
+	#[arg(long, default_value_t = 6 * 3600)]
+	list_refresh_secs: u64,
 }
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -147,14 +150,23 @@ impl Relay {
 	}
 
 	/// The newest valid list: the stored one if valid, else the initial one.
+	/// If every list has expired, the newest correctly signed one is used
+	/// anyway, only to reach the gateway and fetch a fresh list.
 	fn load_list(&self) -> Result<FrontList> {
 		let min = self.accepted_version();
 		let now = now_ms() / 1000;
+		let paths = [self.state_list(), self.args.front_list.clone()];
 		let mut errors = Vec::new();
-		for path in [self.state_list(), self.args.front_list.clone()] {
-			match read_and_verify(&path, &self.list_key, min, now) {
+		for path in &paths {
+			match read_and_verify(path, &self.list_key, min, Some(now)) {
 				| Ok(list) => return Ok(list),
 				| Err(e) => errors.push(format!("{}: {e:#}", path.display())),
+			}
+		}
+		for path in &paths {
+			if let Ok(list) = read_and_verify(path, &self.list_key, min, None) {
+				warn!(version = list.version, "front list expired; using it only to fetch a new one");
+				return Ok(list);
 			}
 		}
 		bail!("no usable front list:\n  {}", errors.join("\n  "))
@@ -218,9 +230,22 @@ impl Relay {
 		});
 		*self.current.lock().expect("lock") = Some(handle.clone());
 
-		if welcome.list_version > list.version {
+		if welcome.list_version > list.version || list.expires_at <= now_ms() / 1000 {
 			out_tx.send(Cell::control(Kind::ListGet, 0)).await?;
 		}
+		// Long sessions (level 4 runs for weeks) must still pick up renewed lists.
+		let refresher = {
+			let out = out_tx.clone();
+			let every = Duration::from_secs(self.args.list_refresh_secs.max(1));
+			tokio::spawn(async move {
+				loop {
+					tokio::time::sleep(every).await;
+					if out.send(Cell::control(Kind::ListGet, 0)).await.is_err() {
+						return;
+					}
+				}
+			})
+		};
 		drop(out_tx);
 
 		let dispatcher = {
@@ -249,6 +274,7 @@ impl Relay {
 		// The session's queue stays open while `handle` lives.
 		let result = session::run(io, crypto, policy, out_rx, in_tx).await;
 		dispatcher.abort();
+		refresher.abort();
 		*self.current.lock().expect("lock") = None;
 		handle.table.lock().expect("lock").clear();
 		info!("tunnel down");
@@ -282,7 +308,11 @@ impl Relay {
 	}
 }
 
-fn read_and_verify(path: &Path, key: &VerifyingKey, min: u64, now: u64) -> Result<FrontList> {
+/// `now = None` accepts an expired list.
+fn read_and_verify(path: &Path, key: &VerifyingKey, min: u64, now: Option<u64>) -> Result<FrontList> {
 	let signed = fs::read_to_string(path)?;
-	frontlist::verify(&signed, key, min, now)
+	match now {
+		| Some(now) => frontlist::verify(&signed, key, min, now),
+		| None => frontlist::verify_ignoring_expiry(&signed, key, min),
+	}
 }

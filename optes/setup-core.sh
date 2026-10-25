@@ -22,6 +22,7 @@
 #                                       or i2p:<front>.b32.i2p:443)
 #   setup-core.sh remove-front tor:<front>.onion:443
 #   setup-core.sh direct-ingress on|off                     (plain HTTP on port 80)
+#   setup-core.sh renew-front-list                          (re-sign; a weekly timer does this)
 #
 # Layout:
 #   - continuwuity runs as user "continuwuity" in its own network namespace
@@ -67,6 +68,9 @@ KEYS_BIN=/usr/local/bin/optes-keys
 GW_SOCK_DIR=/run/optes-gateway
 GW_SOCK=$GW_SOCK_DIR/gateway.sock
 GW_UNIT=/etc/systemd/system/optes-gateway.service
+SELF_COPY=/usr/local/sbin/optes-setup-core
+RENEW_SVC=/etc/systemd/system/optes-frontlist-renew.service
+RENEW_TIMER=/etc/systemd/system/optes-frontlist-renew.timer
 DEVICES=$OPTES_DIR/devices
 FRONTS=$OPTES_DIR/fronts.txt
 LIST_VERSION=$OPTES_DIR/list.version
@@ -409,7 +413,10 @@ EOF
   systemctl daemon-reload
   systemctl enable --now continuwuity.service
   systemctl enable --now matrix-media-retention.timer
-  [[ -f $GW_UNIT ]] && systemctl enable --now optes-gateway.service
+  if [[ -f $GW_UNIT ]]; then
+    systemctl enable --now optes-gateway.service
+    systemctl enable --now optes-frontlist-renew.timer
+  fi
   systemctl enable tor.service
   systemctl restart tor@default.service
 
@@ -511,6 +518,29 @@ EOF
 install_gateway() {
   local dir=$1
   info "optes-gateway (phase 2 tunnel)"
+  # Lists expire after 30 days; a weekly timer re-signs them using a copy of
+  # this script.
+  install -o root -g root -m 0700 "$(realpath "$0")" "$SELF_COPY"
+  cat > "$RENEW_SVC" <<EOF
+[Unit]
+Description=Re-sign the optes front list before it expires
+
+[Service]
+Type=oneshot
+ExecStart=$SELF_COPY renew-front-list
+EOF
+  cat > "$RENEW_TIMER" <<EOF
+[Unit]
+Description=Weekly front list renewal
+
+[Timer]
+OnCalendar=weekly
+RandomizedDelaySec=1d
+Persistent=true
+
+[Install]
+WantedBy=timers.target
+EOF
   install -o root -g root -m 0755 "$dir/optes-gateway" "$GW_BIN"
   install -o root -g root -m 0755 "$dir/optes-keys" "$KEYS_BIN"
   if ! id "$GW_USER" &>/dev/null; then
@@ -621,6 +651,15 @@ sign_front_list() {
   info "front list v$version signed: $LIST_SIGNED"
   echo "Relays fetch it automatically on their next connect. New relays need a copy:"
   echo "  scp the file, or: cat $LIST_SIGNED"
+}
+
+cmd_renew_front_list() {
+  need_gateway
+  if [[ ! -s $FRONTS ]]; then
+    info "no fronts configured; nothing to renew"
+    return 0
+  fi
+  sign_front_list
 }
 
 cmd_add_front() {
@@ -759,6 +798,7 @@ cmd_status() {
     printf '%-32s %s\n' "optes-gateway" "$(systemctl is-active optes-gateway 2>/dev/null || true)"
     printf '%-32s %s\n' "devices" "$(find "$DEVICES" -name '*.pub' -printf '%f ' 2>/dev/null)"
     printf '%-32s %s\n' "front list version" "$(cat "$LIST_VERSION" 2>/dev/null || echo none)"
+    printf '%-32s %s\n' "front list renewal timer" "$(systemctl is-active optes-frontlist-renew.timer 2>/dev/null || true)"
     printf '%-32s %s\n' "fronts" "$(tr '\n' ' ' < "$FRONTS")"
   fi
 }
@@ -775,9 +815,10 @@ main() {
     add-device)    need_root; cmd_add_device "$@" ;;
     remove-device) need_root; cmd_remove_device "$@" ;;
     add-front)     need_root; cmd_add_front "$@" ;;
+    renew-front-list) need_root; cmd_renew_front_list ;;
     remove-front)  need_root; cmd_remove_front "$@" ;;
     direct-ingress) need_root; cmd_direct_ingress "$@" ;;
-    *) sed -n '2,24p' "$0"; exit 1 ;;
+    *) sed -n '2,25p' "$0"; exit 1 ;;
   esac
 }
 
