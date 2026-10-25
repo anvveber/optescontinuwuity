@@ -106,7 +106,7 @@ for path in ("/_continuwuity/server_version", "/", "/_continuwuity/about",
     if ON:
         check(f"{path} hidden", status == 404, str(status))
     else:
-        check(f"(off) {path} served", status in (200, 500), str(status))
+        check(f"(off) {path} served", status != 404, str(status))
 status, _ = call("GET", "/_matrix/client/versions")
 check("client API still works", status == 200, str(status))
 

@@ -492,6 +492,10 @@ thin.
 | Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor) | `tunnel/`, `phase2-protocol-spec.md` |
 | Tor front setup | written; its socat path tested via a SOCKS stand-in | `setup-front.sh --type tor` |
 | Relay setup (user machine) | written, not run | `setup-relay.sh` |
+| Space auto-join, creation limits, template tool | built, e2e tested | `spaces.md` |
+| `require_encryption` (plaintext messages refused, rooms encrypted by default) | built, e2e tested | `hardening.md` |
+| `hide_server_identity` | built, e2e tested | `hardening.md` |
+| Front-list renewal (weekly re-sign; relay refresh) | built, e2e tested | `phase2-protocol-spec.md` §5 |
 | I2P front | written; i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |
