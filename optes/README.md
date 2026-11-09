@@ -3,10 +3,11 @@
 This folder holds everything specific to this fork. The rest of the repository
 is upstream continuwuity (v26.9.1) plus two small patches.
 
-Start with `handbook.md` (design, threat model, section 14 = current status).
+Start with `HANDOFF.md` (project state), then `handbook.md` (design, threat model, section 14 = current status).
 
 | File | What |
 |---|---|
+| `HANDOFF.md` | State of the project, decisions, next steps |
 | `handbook.md` | Design and threat model; §14 status map |
 | `verification-notes.md` | Facts checked before building (config keys, versions) |
 | `delayed-release-spec.md` | Server patch: release events to clients once per tick |
