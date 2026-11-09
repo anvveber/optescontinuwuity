@@ -3,7 +3,8 @@
 # Debian 13. Continuwuity with no network (systemd PrivateNetwork), reachable
 # only through Tor onion services with client authorization.
 #
-# UNTESTED. Written 2026-10-24. Read the whole script before running it.
+# Written 2026-10-24. 2026-11-09: install dry-run in a Debian 13 VM without a
+# working Tor network. Never run against real Tor. Read the whole script first.
 #
 # Usage:
 #   setup-core.sh install --server-name <56chars>.onion \
@@ -79,6 +80,7 @@ FRONTS=$OPTES_DIR/fronts.txt
 LIST_VERSION=$OPTES_DIR/list.version
 LIST_SIGNED=$OPTES_DIR/frontlist.signed
 RELEASE_SECS=15
+ONION_PLACEHOLDER="<onion-address-without-.onion>"
 
 # ---- helpers ---------------------------------------------------------------
 die()  { echo "ERROR: $*" >&2; exit 1; }
@@ -123,8 +125,11 @@ wait_for_file() {
 
 # ---- nftables --------------------------------------------------------------
 write_nft() {
-  local keep_ssh=$1 ssh_rule=""
+  local keep_ssh=$1 ssh_rule="" ssh_out_rule=""
   [[ $keep_ssh == yes ]] && ssh_rule="    tcp dport 22 accept comment \"clearnet ssh, remove with: setup-core.sh lockdown\""
+  # Without this, an SSH session opened before the rules load freezes: conntrack
+  # has not seen it yet, so sshd's packets are not "established" and get dropped.
+  [[ $keep_ssh == yes ]] && ssh_out_rule="    tcp sport 22 accept comment \"clearnet ssh replies, removed by lockdown\""
   cat > "$NFT_CONF" <<EOF
 #!/usr/sbin/nft -f
 # Written by setup-core.sh. Fail closed: only Tor may talk to the internet.
@@ -152,6 +157,7 @@ $ssh_rule
     ct state invalid drop
     ct state established,related accept
     meta skuid "$TOR_USER" accept
+$ssh_out_rule
     icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
     udp sport 68 udp dport 67 accept
     udp sport 546 udp dport 547 accept
@@ -207,7 +213,7 @@ cmd_install() {
   info "Installing packages (clearnet apt, first and only time)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils
+  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2
 
   info "Kernel hardening sysctls"
   {
@@ -337,6 +343,8 @@ EOF
 
   info "systemd units"
   # Group=$TOR_USER makes the socket's group debian-tor, so Tor can connect.
+  # SupplementaryGroups=$SVC_USER: Group= replaces the user's own group, and
+  # the config and token are readable only by that group.
   # /var/lib/tor and /etc/tor are made inaccessible to continuwuity.
   cat > "$UNIT" <<EOF
 [Unit]
@@ -347,6 +355,7 @@ After=local-fs.target
 Type=simple
 User=$SVC_USER
 Group=$TOR_USER
+SupplementaryGroups=$SVC_USER
 Environment=CONTINUWUITY_CONFIG=$CONF
 ExecStart=$BIN
 Restart=on-failure
@@ -427,6 +436,13 @@ EOF
   done
   write_apparmor
 
+  # Before Tor starts, so the onions never exist without client authorization.
+  # The onion addresses are not known yet; they are filled in below.
+  info "First client keys"
+  local admin_out="" ingress_out=""
+  [[ -e $HS_ADMIN/authorized_clients/admin1.auth ]] || admin_out=$(add_client_key admin admin1)
+  [[ -e $HS_INGRESS/authorized_clients/test1.auth ]] || ingress_out=$(add_client_key ingress test1)
+
   info "Starting services"
   systemctl daemon-reload
   systemctl enable --now continuwuity.service
@@ -442,12 +458,6 @@ EOF
   wait_for_file "$HS_ADMIN/hostname" 60 || die "admin onion hostname not created"
   wait_for_file "$SOCK" 30 || warn "continuwuity socket not present yet; check: journalctl -u continuwuity"
 
-  info "First client keys"
-  local admin_out="" ingress_out=""
-  [[ -e $HS_ADMIN/authorized_clients/admin1.auth ]] || admin_out=$(add_client_key admin admin1)
-  [[ -e $HS_INGRESS/authorized_clients/test1.auth ]] || ingress_out=$(add_client_key ingress test1)
-  systemctl reload tor@default.service
-
   info "Switching apt to Tor"
   apt_via_tor
 
@@ -457,11 +467,13 @@ EOF
   info "Firewall (clearnet SSH still open)"
   write_nft yes
   systemctl enable nftables.service
-  nft -f "$NFT_CONF"
+  systemctl restart nftables.service
 
   local ingress admin
   ingress=$(cat "$HS_INGRESS/hostname")
   admin=$(cat "$HS_ADMIN/hostname")
+  admin_out=${admin_out//"$ONION_PLACEHOLDER"/${admin%.onion}}
+  ingress_out=${ingress_out//"$ONION_PLACEHOLDER"/${ingress%.onion}}
 
   cat <<EOF
 
@@ -740,18 +752,26 @@ cmd_direct_ingress() {
   systemctl reload tor@default.service
   info "direct (plain HTTP) ingress: $mode"
   [[ $mode == on ]] && warn "port 80 is open: clients holding an ingress key can skip the tunnel and fronts. Turn it off after testing."
+  return 0
 }
 
 apt_via_tor() {
   local f
   for f in /etc/apt/sources.list /etc/apt/sources.list.d/*.list /etc/apt/sources.list.d/*.sources; do
     [[ -f $f ]] || continue
-    cp -a "$f" "$STATE_DIR/$(basename "$f").pre-tor" 2>/dev/null || true
+    [[ -e $STATE_DIR/$(basename "$f").pre-tor ]] || cp -a "$f" "$STATE_DIR/$(basename "$f").pre-tor" 2>/dev/null || true
     # deb822: "URIs: https://..." ; one-line: "deb https://..."
     sed -i -E \
       -e 's#^(URIs:[[:space:]]*)(https?://)#\1tor+\2#' \
       -e 's#^(deb(-src)?([[:space:]]+\[[^]]*\])?[[:space:]]+)(https?://)#\1tor+\4#' \
       "$f"
+  done
+  # Debian cloud images: the sources say "mirror+file:///etc/apt/mirrors/x.list"
+  # and the real URLs are in those list files, one per line.
+  for f in /etc/apt/mirrors/*.list; do
+    [[ -f $f ]] || continue
+    [[ -e $STATE_DIR/mirror-$(basename "$f").pre-tor ]] || cp -a "$f" "$STATE_DIR/mirror-$(basename "$f").pre-tor"
+    sed -i -E 's#^(https?://)#tor+\1#' "$f"
   done
 }
 
@@ -771,7 +791,7 @@ add_client_key() {
 Private key (Orbot / Tor Browser asks for this):
   $CLIENT_PRIV
 Line for a C tor ClientOnionAuthDir file ($name.auth_private):
-  ${onion:-<onion-address-without-.onion>}:descriptor:x25519:$CLIENT_PRIV
+  ${onion:-$ONION_PLACEHOLDER}:descriptor:x25519:$CLIENT_PRIV
 EOF
 }
 

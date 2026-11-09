@@ -1,6 +1,8 @@
 #!/usr/bin/env bash
 # setup-front.sh — a disposable Tor or I2P front for the private Matrix core.
-# Debian 13. UNTESTED (no Tor in the build environment). Read before running.
+# Debian 13. 2026-11-09: install dry-run in a Debian 13 VM (tor and i2p types)
+# without a working Tor or I2P network. Never run against the real networks.
+# Read before running.
 #
 # A front is a blind byte pipe: relays connect to the front's onion service;
 # the front forwards the raw bytes over Tor to the core's ingress onion
@@ -71,8 +73,11 @@ gen_x25519() {
 }
 
 write_nft() {
-  local keep_ssh=$1 ssh_rule="" i2p_rule=""
+  local keep_ssh=$1 ssh_rule="" ssh_out_rule="" i2p_rule=""
   [[ $keep_ssh == yes ]] && ssh_rule="    tcp dport 22 accept"
+  # Without this, an SSH session opened before the rules load freezes: conntrack
+  # has not seen it yet, so sshd's packets are not "established" and get dropped.
+  [[ $keep_ssh == yes ]] && ssh_out_rule="    tcp sport 22 accept"
   [[ $(cat "$STATE_DIR/type" 2>/dev/null) == i2p ]] && i2p_rule="    meta skuid \"$I2P_USER\" accept"
   cat > "$NFT_CONF" <<EOF
 #!/usr/sbin/nft -f
@@ -98,6 +103,7 @@ $ssh_rule
     ct state established,related accept
     meta skuid "$TOR_USER" accept
 $i2p_rule
+$ssh_out_rule
     icmpv6 type { nd-neighbor-solicit, nd-neighbor-advert, nd-router-solicit } accept
     udp sport 68 udp dport 67 accept
     udp sport 546 udp dport 547 accept
@@ -243,12 +249,17 @@ EOF
     sed -i -E -e 's#^(URIs:[[:space:]]*)(https?://)#\1tor+\2#' \
       -e 's#^(deb(-src)?([[:space:]]+\[[^]]*\])?[[:space:]]+)(https?://)#\1tor+\4#' "$f"
   done
+  # Debian cloud images keep the real URLs in mirror list files, one per line.
+  for f in /etc/apt/mirrors/*.list; do
+    [[ -f $f ]] || continue
+    sed -i -E 's#^(https?://)#tor+\1#' "$f"
+  done
   systemctl disable --now systemd-timesyncd.service 2>/dev/null || true
 
   info "Firewall (clearnet SSH still open)"
   write_nft yes
   systemctl enable nftables.service
-  nft -f "$NFT_CONF"
+  systemctl restart nftables.service
 
   local front admin
   front=$(front_address)

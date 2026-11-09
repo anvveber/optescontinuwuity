@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # setup-relay.sh — run optes-relay for your own user (Fedora or Debian).
-# UNTESTED end to end (no Tor in the build environment). Read before running.
+# 2026-11-09: install dry-run on Debian 13 without a working Tor network. Never
+# run on Fedora, never against real Tor. Read before running.
 #
 # Usage (as your normal user; uses sudo only to install tor):
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \
@@ -51,6 +52,9 @@ cmd_install() {
   [[ -f $list ]] || die "--front-list: file not found"
   [[ $key =~ ^[A-Za-z0-9+/]{43}=$ ]] || die "--list-key must be the base64 key setup-core.sh printed"
   [[ $level =~ ^[123]$ ]] || die "--level must be 1, 2 or 3"
+  if [[ ! -f $CONF_DIR/device.key && ! -x $(dirname "$bin")/optes-keys ]]; then
+    die "optes-keys must sit next to optes-relay to create the device key"
+  fi
 
   info "Tor (system package; the relay uses its SOCKS port)"
   if ! command -v tor >/dev/null; then
