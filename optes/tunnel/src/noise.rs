@@ -19,6 +19,9 @@ const REKEY_EVERY: u64 = 1 << 16;
 pub struct Hello {
 	pub level: u8,
 	pub list_version: u64,
+	/// Replay protection: must be higher than in every earlier handshake
+	/// from this device. The gateway remembers the highest value it accepted.
+	pub counter: u64,
 }
 
 impl Hello {
@@ -27,13 +30,18 @@ impl Hello {
 		out[0] = PROTOCOL_VERSION;
 		out[1] = self.level;
 		out[2..10].copy_from_slice(&self.list_version.to_be_bytes());
+		out[10..18].copy_from_slice(&self.counter.to_be_bytes());
 		out
 	}
 
 	fn decode(buf: &[u8]) -> Result<Self> {
 		ensure!(buf.len() == HELLO_PAYLOAD, "hello payload has wrong size");
 		ensure!(buf[0] == PROTOCOL_VERSION, "unsupported protocol version {}", buf[0]);
-		Ok(Self { level: buf[1], list_version: u64::from_be_bytes(buf[2..10].try_into()?) })
+		Ok(Self {
+			level: buf[1],
+			list_version: u64::from_be_bytes(buf[2..10].try_into()?),
+			counter: u64::from_be_bytes(buf[10..18].try_into()?),
+		})
 	}
 }
 
@@ -43,6 +51,9 @@ pub struct Welcome {
 	pub tick_ms: u32,
 	pub window_secs: u32,
 	pub list_version: u64,
+	/// The gateway's clock (Unix ms) when it wrote this message. Relays align
+	/// their level-2 windows to it, not to their own clock.
+	pub gateway_time_ms: u64,
 }
 
 impl Welcome {
@@ -53,6 +64,7 @@ impl Welcome {
 		out[2..6].copy_from_slice(&self.tick_ms.to_be_bytes());
 		out[6..10].copy_from_slice(&self.window_secs.to_be_bytes());
 		out[10..18].copy_from_slice(&self.list_version.to_be_bytes());
+		out[18..26].copy_from_slice(&self.gateway_time_ms.to_be_bytes());
 		out
 	}
 
@@ -64,6 +76,7 @@ impl Welcome {
 			tick_ms: u32::from_be_bytes(buf[2..6].try_into()?),
 			window_secs: u32::from_be_bytes(buf[6..10].try_into()?),
 			list_version: u64::from_be_bytes(buf[10..18].try_into()?),
+			gateway_time_ms: u64::from_be_bytes(buf[18..26].try_into()?),
 		})
 	}
 }
@@ -148,8 +161,10 @@ where
 	Ok((Crypto::new(hs.into_transport_mode()?), welcome))
 }
 
-/// Gateway side. `allowed` decides whether a device key may connect;
-/// `welcome` builds the reply from the client's hello.
+/// Gateway side. `allowed` decides whether this handshake may proceed: the
+/// device key must be known and the hello's counter must be fresh (a recorded
+/// message 1 sent again must get no reply). `welcome` builds the reply from
+/// the client's hello.
 ///
 /// On any failure nothing is written; the caller decides how to close.
 pub async fn respond<S, A, W>(
@@ -160,7 +175,7 @@ pub async fn respond<S, A, W>(
 ) -> Result<(Crypto, Hello, [u8; 32])>
 where
 	S: AsyncRead + AsyncWrite + Unpin,
-	A: FnOnce(&[u8; 32]) -> bool,
+	A: FnOnce(&[u8; 32], &Hello) -> bool,
 	W: FnOnce(&Hello) -> Welcome,
 {
 	let mut hs: HandshakeState = builder()?
@@ -176,8 +191,8 @@ where
 		.get_remote_static()
 		.context("no remote static key")?
 		.try_into()?;
-	if !allowed(&device) {
-		bail!("device key not allowed");
+	if !allowed(&device, &hello) {
+		bail!("device key not allowed, or handshake replayed");
 	}
 
 	let mut reply = [0_u8; FRAME];
@@ -195,7 +210,13 @@ mod tests {
 	use crate::keys::generate_x25519;
 
 	fn welcome_for(hello: &Hello) -> Welcome {
-		Welcome { level: hello.level, tick_ms: 200, window_secs: 15, list_version: 9 }
+		Welcome {
+			level: hello.level,
+			tick_ms: 200,
+			window_secs: 15,
+			list_version: 9,
+			gateway_time_ms: 1_700_000_000_123,
+		}
 	}
 
 	#[tokio::test]
@@ -205,11 +226,11 @@ mod tests {
 		let (mut a, mut b) = tokio::io::duplex(1 << 16);
 
 		let server = tokio::spawn(async move {
-			respond(&mut b, &gw_priv, |k| *k == dev_pub, welcome_for)
+			respond(&mut b, &gw_priv, |k, _| *k == dev_pub, welcome_for)
 				.await
 				.map(|(c, h, d)| (c, h, d, b))
 		});
-		let hello = Hello { level: 3, list_version: 4 };
+		let hello = Hello { level: 3, list_version: 4, counter: 77 };
 		let (mut client_crypto, welcome) = initiate(&mut a, &dev_priv, &gw_pub, hello).await.unwrap();
 		let (mut server_crypto, got_hello, device, _b) = server.await.unwrap().unwrap();
 
@@ -231,11 +252,12 @@ mod tests {
 		let (mut a, mut b) = tokio::io::duplex(1 << 16);
 
 		let server = tokio::spawn(async move {
-			let res = respond(&mut b, &gw_priv, |_| false, welcome_for).await;
+			let res = respond(&mut b, &gw_priv, |_, _| false, welcome_for).await;
 			drop(b);
 			res.is_err()
 		});
-		let res = initiate(&mut a, &dev_priv, &gw_pub, Hello { level: 1, list_version: 0 }).await;
+		let hello = Hello { level: 1, list_version: 0, counter: 1 };
+		let res = initiate(&mut a, &dev_priv, &gw_pub, hello).await;
 		assert!(res.is_err(), "client must not complete a handshake");
 		assert!(server.await.unwrap(), "server must reject");
 	}
@@ -248,13 +270,73 @@ mod tests {
 		let (mut a, mut b) = tokio::io::duplex(1 << 16);
 
 		let server = tokio::spawn(async move {
-			let res = respond(&mut b, &gw_priv, |_| true, welcome_for).await;
+			let res = respond(&mut b, &gw_priv, |_, _| true, welcome_for).await;
 			drop(b);
 			res.is_err()
 		});
-		let res = initiate(&mut a, &dev_priv, &other_pub, Hello { level: 1, list_version: 0 }).await;
+		let hello = Hello { level: 1, list_version: 0, counter: 1 };
+		let res = initiate(&mut a, &dev_priv, &other_pub, hello).await;
 		assert!(res.is_err());
 		assert!(server.await.unwrap());
+	}
+
+	/// A recorded message 1, sent again, reaches `allowed` with the same
+	/// counter, so a gateway that remembers the highest counter rejects it
+	/// and writes nothing.
+	#[tokio::test]
+	async fn replayed_hello_gets_no_reply() {
+		use std::sync::{Arc, Mutex};
+
+		use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+		let (gw_priv, gw_pub) = generate_x25519().unwrap();
+		let (dev_priv, _) = generate_x25519().unwrap();
+		let highest = Arc::new(Mutex::new(0_u64));
+		let fresh = |highest: Arc<Mutex<u64>>| {
+			move |_: &[u8; 32], hello: &Hello| {
+				let mut last = highest.lock().unwrap();
+				let ok = hello.counter > *last;
+				if ok {
+					*last = hello.counter;
+				}
+				ok
+			}
+		};
+
+		// First run, recording message 1 as a front would see it.
+		let (mut a, mut b) = tokio::io::duplex(1 << 16);
+		let (mut tap_client, mut tap_server) = tokio::io::duplex(1 << 16);
+		let allowed = fresh(highest.clone());
+		let server = tokio::spawn(async move {
+			respond(&mut b, &gw_priv, allowed, welcome_for).await.map(|(c, h, d)| (c, h, d, b))
+		});
+		let recorder = tokio::spawn(async move {
+			let mut msg1 = [0_u8; FRAME];
+			tap_server.read_exact(&mut msg1).await.unwrap();
+			a.write_all(&msg1).await.unwrap();
+			let mut msg2 = [0_u8; FRAME];
+			a.read_exact(&mut msg2).await.unwrap();
+			tap_server.write_all(&msg2).await.unwrap();
+			msg1
+		});
+		let hello = Hello { level: 1, list_version: 0, counter: 5 };
+		initiate(&mut tap_client, &dev_priv, &gw_pub, hello).await.unwrap();
+		let msg1 = recorder.await.unwrap();
+		assert!(server.await.unwrap().is_ok());
+
+		// Replay: same bytes on a new connection.
+		let (mut a, mut b) = tokio::io::duplex(1 << 16);
+		let allowed = fresh(highest.clone());
+		let server = tokio::spawn(async move {
+			let res = respond(&mut b, &gw_priv, allowed, welcome_for).await;
+			drop(b);
+			res.is_err()
+		});
+		a.write_all(&msg1).await.unwrap();
+		assert!(server.await.unwrap(), "replayed message 1 must be rejected");
+		let mut rest = Vec::new();
+		a.read_to_end(&mut rest).await.unwrap();
+		assert!(rest.is_empty(), "gateway must write nothing to a replay");
 	}
 
 	#[test]

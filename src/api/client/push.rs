@@ -506,6 +506,12 @@ pub(crate) async fn set_pushers_route(
 	let sender_user = body.identity.expect_sender_user()?;
 	let sender_device = body.identity.expect_sender_device()?;
 
+	// allow_pushers = false: answer a registration with success, store
+	// nothing. Deletions still go through.
+	if !services.config.allow_pushers && matches!(body.action, set_pusher::v3::PusherAction::Post(_)) {
+		return Ok(set_pusher::v3::Response::new(false));
+	}
+
 	let needs_activation = services
 		.pusher
 		.set_pusher(sender_user, sender_device, &body.action)

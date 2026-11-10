@@ -11,13 +11,15 @@ fuzz_target!(|data: &[u8]| {
 		let (gw_priv, gw_pub) = keys::generate_x25519().unwrap();
 		let (dev_priv, _) = keys::generate_x25519().unwrap();
 		let (mut a, mut b) = tokio::io::duplex(4 * FRAME);
-		let server = noise::respond(&mut b, &gw_priv, |_| true, |h| noise::Welcome {
+		let server = noise::respond(&mut b, &gw_priv, |_, _| true, |h| noise::Welcome {
 			level: h.level,
 			tick_ms: 200,
 			window_secs: 15,
 			list_version: 0,
+			gateway_time_ms: 0,
 		});
-		let client = noise::initiate(&mut a, &dev_priv, &gw_pub, noise::Hello { level: 1, list_version: 0 });
+		let hello = noise::Hello { level: 1, list_version: 0, counter: 1 };
+		let client = noise::initiate(&mut a, &dev_priv, &gw_pub, hello);
 		let (s, c) = tokio::join!(server, client);
 		let (mut server_crypto, _, _) = s.unwrap();
 		let (mut client_crypto, _) = c.unwrap();

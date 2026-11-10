@@ -10,8 +10,8 @@
 # everything is encrypted relay-to-core. Burn and replace freely.
 #
 # Usage:
-#   setup-front.sh install --core <ingress>.onion --core-auth <private key> [--type tor|i2p]
-#   setup-front.sh add-client <name>        (tor fronts: onion client auth for a relay; optional)
+#   setup-front.sh install --core <ingress>.onion --core-auth <private key> [--type tor|i2p] [--open]
+#   setup-front.sh add-client <name>        (tor fronts: another onion client key for relays)
 #   setup-front.sh remove-client <name>
 #   setup-front.sh lockdown --i-tested-onion-ssh
 #   setup-front.sh status
@@ -19,9 +19,14 @@
 # --core-auth: on the core run `setup-core.sh add-client <frontname>`; pass the
 # 52-character private key it prints.
 #
-# Tor front: without any add-client, the front's onion is open to anyone who
-# knows the address (they still can't get past the core's gateway without a
-# device key). After the first add-client, only listed relays can reach it.
+# Tor front: the front's onion requires client authorization. Install makes
+# one key, "relays", and prints it once; give it to every relay
+# (setup-relay.sh front-auth). Make more with add-client, e.g. one per relay,
+# so one can be revoked alone. With --open no key is made and anyone who knows
+# the address can connect (they still can't get past the core's gateway
+# without a device key, but each connection costs the core a Tor stream).
+#
+# Logs: journald keeps them in memory only (lost at reboot); no core dumps.
 #
 # I2P front: i2pd in hidden mode (no published router address, no transit
 # traffic) hosts a server tunnel; the front still reaches the core over Tor.
@@ -116,12 +121,13 @@ EOF
 }
 
 cmd_install() {
-  local core="" core_auth="" type=tor
+  local core="" core_auth="" type=tor open=no
   while [[ $# -gt 0 ]]; do
     case "$1" in
       --type)      type=${2:-}; shift 2 ;;
       --core)      core=${2:-}; shift 2 ;;
       --core-auth) core_auth=${2:-}; shift 2 ;;
+      --open)      open=yes; shift ;;
       *) die "unknown option: $1" ;;
     esac
   done
@@ -132,6 +138,7 @@ cmd_install() {
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
   echo "$type" > "$STATE_DIR/type"
+  echo "$open" > "$STATE_DIR/open"
 
   info "Packages"
   export DEBIAN_FRONTEND=noninteractive
@@ -142,6 +149,19 @@ cmd_install() {
   if ! id "$FWD_USER" &>/dev/null; then
     adduser --system --group --no-create-home --home /nonexistent "$FWD_USER"
   fi
+
+  # Logs in memory only: nothing about when relays connected survives a
+  # reboot or ends up in a disk image. Existing logs on disk go. No core dumps.
+  info "Logs in memory only"
+  mkdir -p /etc/systemd/journald.conf.d
+  printf '# Written by setup-front.sh\n[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n' \
+    > /etc/systemd/journald.conf.d/90-optes.conf
+  chmod 644 /etc/systemd/journald.conf.d/90-optes.conf
+  systemctl restart systemd-journald.service
+  rm -rf /var/log/journal
+  printf '# Written by setup-front.sh\nkernel.core_pattern = |/bin/false\nfs.suid_dumpable = 0\n' \
+    > /etc/sysctl.d/90-optes-front.conf
+  sysctl --system > /dev/null
 
   info "Tor"
   [[ -f $TORRC.orig ]] || cp -a "$TORRC" "$TORRC.orig" 2>/dev/null || true
@@ -188,6 +208,7 @@ UMask=0007
 ExecStart=/usr/bin/socat $(listen_spec "$type") SOCKS4A:127.0.0.1:$core:443,socksport=9050
 Restart=always
 RestartSec=2
+LimitCORE=0
 RuntimeDirectory=optes-front
 RuntimeDirectoryMode=0750
 
@@ -227,6 +248,19 @@ EOF
   echo "descriptor:x25519:$CLIENT_PUB" > "$HS_ADMIN/authorized_clients/admin1.auth"
   chown "$TOR_USER:$TOR_USER" "$HS_ADMIN/authorized_clients/admin1.auth"
   chmod 600 "$HS_ADMIN/authorized_clients/admin1.auth"
+
+  # Tor fronts require client authorization unless --open: written before Tor
+  # starts, so the onion never exists without it.
+  local relay_priv=""
+  if [[ $type == tor && $open == no ]] \
+      && ! compgen -G "$HS_FRONT/authorized_clients/*.auth" > /dev/null; then
+    info "First relay key"
+    gen_x25519
+    relay_priv=$CLIENT_PRIV
+    echo "descriptor:x25519:$CLIENT_PUB" > "$HS_FRONT/authorized_clients/relays.auth"
+    chown "$TOR_USER:$TOR_USER" "$HS_FRONT/authorized_clients/relays.auth"
+    chmod 600 "$HS_FRONT/authorized_clients/relays.auth"
+  fi
 
   info "Starting"
   systemctl daemon-reload
@@ -273,28 +307,58 @@ Front address:    $front  ($type)
 Admin SSH onion:  $admin
 Admin key (Orbot / Tor Browser / ClientOnionAuthDir):
   ${admin%.onion}:descriptor:x25519:$admin_priv
+$(relay_key_summary "$type" "$front" "$relay_priv")
+
+Keys above are not stored on this server and won't be shown again.
+Logs are kept in memory only and are gone after a reboot.
 
 Next:
  1. On the core:  setup-core.sh add-front $type:$front:443
- 2. Optional (tor fronts): restrict who can reach this front:  $0 add-client <relayname>
- 3. Test SSH over the admin onion, then:  $0 lockdown --i-tested-onion-ssh
+ 2. Test SSH over the admin onion, then:  $0 lockdown --i-tested-onion-ssh
 =====================================================================
 EOF
+}
+
+relay_key_summary() {
+  local type=$1 front=$2 priv=$3
+  if [[ $type != tor ]]; then
+    echo
+    echo "I2P front: no client authorization; anyone who knows the address can connect."
+  elif [[ -n $priv ]]; then
+    cat <<EOF
+
+Relay key "relays" (every relay needs it to reach this front):
+  $priv
+  on each relay machine:  setup-relay.sh front-auth $front $priv
+  more keys, e.g. one per relay:  $0 add-client <name>
+EOF
+  elif compgen -G "$HS_FRONT/authorized_clients/*.auth" > /dev/null; then
+    echo
+    echo "Relay keys: already set up (see '$0 status'); add more with '$0 add-client <name>'."
+  else
+    echo
+    echo "OPEN front: no client authorization; anyone who knows the address can connect."
+  fi
 }
 
 cmd_add_client() {
   local name=${1:-}
   [[ $(cat "$STATE_DIR/type" 2>/dev/null) == tor ]] || die "add-client is for tor fronts only"
   valid_name "$name"
+  [[ $name != locked ]] || die "the name 'locked' is reserved"
   [[ -e $HS_FRONT/authorized_clients/$name.auth ]] && die "client '$name' exists"
   gen_x25519
   echo "descriptor:x25519:$CLIENT_PUB" > "$HS_FRONT/authorized_clients/$name.auth"
   chown "$TOR_USER:$TOR_USER" "$HS_FRONT/authorized_clients/$name.auth"
   chmod 600 "$HS_FRONT/authorized_clients/$name.auth"
+  rm -f "$HS_FRONT/authorized_clients/locked.auth"
   systemctl reload tor@default.service
   local onion
   onion=$(cut -d. -f1 < "$HS_FRONT/hostname")
-  echo "Line for the relay machine's tor ClientOnionAuthDir ($name.auth_private):"
+  echo "Relay key '$name' (not stored here, shown once):"
+  echo "  $CLIENT_PRIV"
+  echo "On the relay machine:  setup-relay.sh front-auth $onion.onion $CLIENT_PRIV"
+  echo "Or as a line for its tor ClientOnionAuthDir ($name.auth_private):"
   echo "  $onion:descriptor:x25519:$CLIENT_PRIV"
 }
 
@@ -303,6 +367,18 @@ cmd_remove_client() {
   valid_name "$name"
   [[ -e $HS_FRONT/authorized_clients/$name.auth ]] || die "no client '$name'"
   rm -f "$HS_FRONT/authorized_clients/$name.auth"
+  # Tor enforces client authorization only while a client is listed. With none
+  # left the front would be open to everyone; unless it was installed with
+  # --open, list a key nobody holds instead.
+  if [[ $(cat "$STATE_DIR/open" 2>/dev/null) != yes ]] \
+      && ! compgen -G "$HS_FRONT/authorized_clients/*.auth" > /dev/null; then
+    gen_x25519
+    CLIENT_PRIV=""
+    echo "descriptor:x25519:$CLIENT_PUB" > "$HS_FRONT/authorized_clients/locked.auth"
+    chown "$TOR_USER:$TOR_USER" "$HS_FRONT/authorized_clients/locked.auth"
+    chmod 600 "$HS_FRONT/authorized_clients/locked.auth"
+    info "no client left: front locked until the next add-client"
+  fi
   systemctl reload tor@default.service
   info "removed '$name'"
 }
@@ -390,7 +466,12 @@ cmd_status() {
   printf '%-24s %s\n' "type" "$(cat "$STATE_DIR/type" 2>/dev/null || echo -)"
   printf '%-24s %s\n' "front address" "$(front_address 2>/dev/null || echo -)"
   printf '%-24s %s\n' "admin onion" "$(cat "$HS_ADMIN/hostname" 2>/dev/null || echo -)"
-  printf '%-24s %s\n' "relay clients" "$(find "$HS_FRONT/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)"
+  local clients
+  clients=$(find "$HS_FRONT/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)
+  printf '%-24s %s\n' "relay clients" "${clients:-none}"
+  [[ -z $clients && $(cat "$STATE_DIR/type" 2>/dev/null) == tor ]] \
+    && warn "this front is open: anyone who knows the address can connect ('add-client <name>' closes it)"
+  return 0
 }
 
 main() {
@@ -402,7 +483,7 @@ main() {
     remove-client) need_root; cmd_remove_client "$@" ;;
     lockdown)      need_root; cmd_lockdown "$@" ;;
     status)        need_root; cmd_status ;;
-    *) sed -n '2,29p' "$0"; exit 1 ;;
+    *) sed -n '2,36p' "$0"; exit 1 ;;
   esac
 }
 

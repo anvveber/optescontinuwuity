@@ -7,7 +7,8 @@
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \
 #       --front-list <frontlist.signed> --list-key <base64> [--level 1|2|3] [--i2p]
 #   (--i2p also installs i2pd so the relay can use I2P fronts)
-#   setup-relay.sh front-auth <front>.onion <52-char private key>   (if the front requires it)
+#   setup-relay.sh front-auth <front>.onion <52-char private key>   (tor fronts require it
+#                                       unless they were installed with --open)
 #   setup-relay.sh status
 #
 # After install, give the printed device key to the core admin:
@@ -95,6 +96,10 @@ Description=optes relay (Matrix client endpoint on 127.0.0.1:8008)
 After=network-online.target
 
 [Service]
+# Warnings only: at "info" the relay logs every connect, a record of when
+# this machine was online. For troubleshooting: RUST_LOG=info (debug also
+# shows front addresses).
+Environment=RUST_LOG=warn
 ExecStart=$BIN_DIR/optes-relay --listen 127.0.0.1:8008 --socks 127.0.0.1:9050$i2p_arg \\
   --front-list $CONF_DIR/frontlist.signed --list-key $CONF_DIR/list.pub \\
   --device-key $CONF_DIR/device.key --level $level --state-dir $STATE_DIR
@@ -117,7 +122,9 @@ Device key — give this to the core admin:
   (on the core: setup-core.sh add-device <name> <that key>)
 
 Matrix client homeserver:  http://127.0.0.1:8008
-Logs:  journalctl --user -u optes-relay -f
+Tor fronts need a key before the relay can reach them:
+  $0 front-auth <front>.onion <key printed by setup-front.sh>
+Logs (warnings only):  journalctl --user -u optes-relay -f
 
 For level 4 (always on), install this on a machine that stays on and
 reach it from your phone over WireGuard; then use --listen <wg-ip>:8008.

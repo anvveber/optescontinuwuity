@@ -21,4 +21,6 @@ optes-relay --socks 127.0.0.1:9050 --front-list frontlist.signed \
 
 Then set the Matrix client's homeserver to `http://127.0.0.1:8008`.
 
-Tests: `../test/run-tunnel-e2e.sh <continuwuity-binary> target/debug <level>`.
+Tests: `../test/run-tunnel-e2e.sh <continuwuity-binary> target/test-fronts/debug <level>`
+(needs a test build: `cargo build --features test-fronts --target-dir target/test-fronts`;
+normal builds refuse the plain-TCP front the test uses).

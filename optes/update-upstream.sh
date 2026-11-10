@@ -25,8 +25,11 @@ run_tests() {
   echo "==> build"
   cargo build -q -p conduwuit
   (cd optes/tunnel && cargo build -q && cargo test -q)
+  # Test build: knows plain-TCP fronts, which normal builds refuse.
+  (cd optes/tunnel && cargo build -q --features test-fronts --target-dir target/test-fronts)
   echo "==> unit tests (patches)"
   cargo test -q -p conduwuit_service --features url_preview --lib -- release:: sync::
+  cargo test -q -p conduwuit_router -p conduwuit_service --features conduwuit_service/url_preview --lib -- guard_tests::
   echo "==> end-to-end"
   optes/test/run-e2e.sh target/debug/conduwuit 15
   optes/test/run-e2e.sh target/debug/conduwuit 0
@@ -34,10 +37,12 @@ run_tests() {
   RELEASE=15 optes/test/run-spaces-e2e.sh target/debug/conduwuit
   optes/test/run-hardening-e2e.sh target/debug/conduwuit on
   optes/test/run-hardening-e2e.sh target/debug/conduwuit off
+  optes/test/run-browser-guard-e2e.sh target/debug/conduwuit on
+  optes/test/run-browser-guard-e2e.sh target/debug/conduwuit off
   optes/test/run-retention-e2e.sh target/debug/conduwuit
   RELEASE=15 optes/test/run-retention-e2e.sh target/debug/conduwuit
   for level in 1 2 3; do
-    optes/test/run-tunnel-e2e.sh target/debug/conduwuit optes/tunnel/target/debug "$level"
+    optes/test/run-tunnel-e2e.sh target/debug/conduwuit optes/tunnel/target/test-fronts/debug "$level"
   done
   optes/test/run-socks-path-e2e.sh target/debug/conduwuit optes/tunnel/target/debug tor
   optes/test/run-socks-path-e2e.sh target/debug/conduwuit optes/tunnel/target/debug i2p

@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Minimal SOCKS4a + SOCKS5 CONNECT proxy, standing in for Tor's SocksPort.
 
-Usage: socks_proxy.py <port> <log_file>
-Logs one line per connection: "<socks version> <host>:<port>".
+Usage: socks_proxy.py <port> <log_file> [<host>:<port>=<host>:<port> ...]
+Logs one line per connection: "<socks version> <host>:<port>" (as requested).
+Each extra argument maps a requested address to the one to connect to, so a
+test can use onion-shaped front addresses.
 """
 
 import asyncio
@@ -11,6 +13,7 @@ import struct
 import sys
 
 PORT, LOG = int(sys.argv[1]), sys.argv[2]
+MAP = dict(arg.split("=", 1) for arg in sys.argv[3:])
 log = open(LOG, "a", buffering=1)
 
 
@@ -50,6 +53,8 @@ async def handle(r, w):
         w.close()
         return
     log.write(f"socks{ver} {host}:{port}\n")
+    if f"{host}:{port}" in MAP:
+        host, port = MAP[f"{host}:{port}"].rsplit(":", 1)
     try:
         ur, uw = await asyncio.open_connection(host, port)
     except OSError:

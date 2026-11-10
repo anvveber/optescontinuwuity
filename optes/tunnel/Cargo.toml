@@ -21,6 +21,13 @@ path = "src/bin/gateway.rs"
 name = "optes-keys"
 path = "src/bin/keys.rs"
 
+[features]
+# Test builds only. Lets the relay dial "tcp" fronts (a direct connection, no
+# Tor) and accept any host name for tor/i2p fronts. Never enable this for a
+# binary that users run: a front list could then make the relay connect
+# without Tor.
+test-fronts = []
+
 [dependencies]
 anyhow = "1"
 base64 = "0.22"

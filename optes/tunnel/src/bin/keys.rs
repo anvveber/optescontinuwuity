@@ -56,13 +56,10 @@ fn parse_front(value: &str) -> Result<Front> {
 	let Some((transport, address)) = value.split_once(':') else {
 		bail!("front must be transport:host:port, got {value}");
 	};
-	if !matches!(transport, "tor" | "i2p" | "tcp") {
-		bail!("transport must be tor, i2p or tcp, got {transport}");
-	}
-	if !address.contains(':') {
-		bail!("front address needs a port: {address}");
-	}
-	Ok(Front { transport: transport.into(), address: address.into() })
+	let front = Front { transport: transport.into(), address: address.into() };
+	// The same rule relays apply: a front they would refuse is not signed.
+	front.check().with_context(|| format!("front {value}"))?;
+	Ok(front)
 }
 
 fn main() -> Result<()> {

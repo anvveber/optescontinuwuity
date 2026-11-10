@@ -8,7 +8,7 @@ use std::{
 		atomic::{AtomicU32, Ordering},
 		Arc, Mutex,
 	},
-	time::Duration,
+	time::{Duration, Instant},
 };
 
 use anyhow::{bail, Context, Result};
@@ -25,7 +25,7 @@ use optes_tunnel::{
 use rand::seq::SliceRandom;
 use tokio::{
 	io::{AsyncRead, AsyncWrite},
-	net::{TcpListener, TcpStream},
+	net::TcpListener,
 	sync::mpsc,
 };
 use tracing::{debug, info, warn};
@@ -142,6 +142,30 @@ impl Relay {
 
 	fn state_version(&self) -> PathBuf { self.args.state_dir.join("frontlist.version") }
 
+	/// The counter for the next handshake (replay protection, see the
+	/// gateway). One higher than the last one used; stored before it is sent,
+	/// so a value is never used twice. With no stored value (first run, or the
+	/// state directory was lost) it starts at the current time in ms, which is
+	/// above anything this device key can have used before.
+	fn next_hello_counter(&self) -> Result<u64> {
+		let path = self.args.state_dir.join("hello.counter");
+		let next = match fs::read_to_string(&path) {
+			| Ok(text) => text
+				.trim()
+				.parse::<u64>()
+				.with_context(|| format!("{} is not a number", path.display()))?
+				.checked_add(1)
+				.context("handshake counter overflow")?,
+			| Err(e) if e.kind() == std::io::ErrorKind::NotFound => now_ms().max(1),
+			| Err(e) => return Err(e).with_context(|| format!("reading {}", path.display())),
+		};
+		let tmp = path.with_extension("tmp");
+		fs::write(&tmp, next.to_string())
+			.and_then(|()| fs::rename(&tmp, &path))
+			.with_context(|| format!("writing {}", path.display()))?;
+		Ok(next)
+	}
+
 	fn accepted_version(&self) -> u64 {
 		fs::read_to_string(self.state_version())
 			.ok()
@@ -190,21 +214,39 @@ impl Relay {
 		let usable: Vec<&Front> = list.fronts.iter().filter(|f| self.can_dial(f)).collect();
 		let front = (*usable
 			.choose(&mut rand::thread_rng())
-			.context("no front in the list uses a transport this relay has a proxy for")?)
+			.context("no front in the list is usable: each needs an onion or b32.i2p address and a SOCKS proxy for its transport")?)
 		.clone();
 
-		info!(address = %front.address, "connecting");
+		// The address stays out of the default log level: logs are kept.
+		debug!(address = %front.address, "connecting");
+		info!(transport = %front.transport, "connecting");
 		let mut io = tokio::time::timeout(Duration::from_secs(120), self.dial(&front))
 			.await
 			.context("connect timed out")??;
 
-		let hello = Hello { level: self.level as u8, list_version: list.version };
+		let hello = Hello {
+			level: self.level as u8,
+			list_version: list.version,
+			counter: self.next_hello_counter()?,
+		};
+		let sent_at = Instant::now();
 		let (crypto, welcome) = tokio::time::timeout(
 			Duration::from_secs(120),
 			noise::initiate(&mut io, &self.device_key, &gateway_key, hello),
 		)
 		.await
 		.context("handshake timed out")??;
+		// Gateway clock minus ours. The welcome was stamped about half a round
+		// trip ago.
+		let half_trip = i64::try_from(sent_at.elapsed().as_millis() / 2).unwrap_or(0);
+		let clock_offset_ms = if welcome.gateway_time_ms == 0 {
+			0
+		} else {
+			i64::try_from(welcome.gateway_time_ms)
+				.unwrap_or(i64::MAX)
+				.saturating_add(half_trip)
+				.saturating_sub(i64::try_from(now_ms()).unwrap_or(i64::MAX))
+		};
 
 		let level = Level::from_u8(welcome.level)?;
 		if level < self.level {
@@ -218,6 +260,7 @@ impl Relay {
 			tick: Duration::from_millis(welcome.tick_ms.into()),
 			window: Duration::from_secs(welcome.window_secs.into()),
 			window_offset: Duration::ZERO,
+			clock_offset_ms,
 		};
 		info!(?level, "tunnel up");
 
@@ -289,11 +332,21 @@ impl Relay {
 		}
 	}
 
+	/// A front is usable if its address passes [`Front::check`] (onion or
+	/// b32.i2p only) and this relay has a proxy for its transport.
 	fn can_dial(&self, front: &Front) -> bool {
-		front.transport == "tcp" || self.proxy_for(&front.transport).is_some()
+		if front.check().is_err() {
+			return false;
+		}
+		#[cfg(feature = "test-fronts")]
+		if front.transport == "tcp" {
+			return true;
+		}
+		self.proxy_for(&front.transport).is_some()
 	}
 
 	async fn dial(&self, front: &Front) -> Result<Box<dyn Io>> {
+		front.check()?;
 		match front.transport.as_str() {
 			| "tor" | "i2p" => {
 				let proxy = self
@@ -302,7 +355,8 @@ impl Relay {
 				let stream = tokio_socks::tcp::Socks5Stream::connect(proxy, front.address.as_str()).await?;
 				Ok(Box::new(stream))
 			},
-			| "tcp" => Ok(Box::new(TcpStream::connect(&front.address).await?)),
+			#[cfg(feature = "test-fronts")]
+			| "tcp" => Ok(Box::new(tokio::net::TcpStream::connect(&front.address).await?)),
 			| other => bail!("unknown transport {other}"),
 		}
 	}

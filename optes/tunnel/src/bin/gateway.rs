@@ -4,7 +4,7 @@
 use std::{
 	fs,
 	path::{Path, PathBuf},
-	sync::Arc,
+	sync::{Arc, Mutex},
 	time::Duration,
 };
 
@@ -15,7 +15,8 @@ use optes_tunnel::{
 	frontlist, keys,
 	noise::{self, Welcome},
 	policy::{Level, Policy},
-	session, MAX_PAYLOAD,
+	session::{self, now_ms},
+	MAX_PAYLOAD,
 };
 use rand::Rng;
 use tokio::{
@@ -43,6 +44,10 @@ struct Args {
 	/// Signed front list served to relays
 	#[arg(long)]
 	front_list: Option<PathBuf>,
+	/// Where the highest handshake counter of each device is kept (replay
+	/// protection). Must survive restarts.
+	#[arg(long)]
+	state_dir: PathBuf,
 	/// Constant-rate tick (level 3), ms. Same for every client.
 	#[arg(long, default_value_t = 200)]
 	tick_ms: u32,
@@ -72,9 +77,63 @@ impl Endpoint {
 	}
 }
 
+/// Replay protection for handshake message 1.
+///
+/// Message 1 of Noise IK can be recorded (by a front) and sent again. Each
+/// hello therefore carries a counter, and the gateway accepts a hello only if
+/// its counter is higher than the highest one it accepted from that device.
+/// The highest value is kept in `<state-dir>/<device key in hex>.ctr`. A
+/// relay starts its counter at the time of its first run and then adds one
+/// per handshake, so the file shows when a device was set up and how often it
+/// has connected since, not when it connected.
+struct Replay {
+	dir: PathBuf,
+	lock: Mutex<()>,
+}
+
+impl Replay {
+	fn path(&self, device: &[u8; 32]) -> PathBuf {
+		let name: String = device.iter().map(|b| format!("{b:02x}")).collect();
+		self.dir.join(format!("{name}.ctr"))
+	}
+
+	/// True if `counter` is higher than every counter accepted from `device`
+	/// before; records it. Fails closed: if the new value can't be stored,
+	/// the handshake is refused.
+	fn accept(&self, device: &[u8; 32], counter: u64) -> bool {
+		let _guard = self.lock.lock().expect("replay lock");
+		let path = self.path(device);
+		let last = match fs::read_to_string(&path) {
+			| Ok(text) => match text.trim().parse::<u64>() {
+				| Ok(last) => last,
+				| Err(_) => {
+					warn!(file = %path.display(), "unreadable replay counter; refusing handshake");
+					return false;
+				},
+			},
+			| Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
+			| Err(e) => {
+				warn!(file = %path.display(), "cannot read replay counter: {e}");
+				return false;
+			},
+		};
+		if counter <= last {
+			return false;
+		}
+
+		let tmp = path.with_extension("tmp");
+		if let Err(e) = fs::write(&tmp, counter.to_string()).and_then(|()| fs::rename(&tmp, &path)) {
+			warn!(file = %path.display(), "cannot store replay counter: {e}");
+			return false;
+		}
+		true
+	}
+}
+
 struct Gateway {
 	key: [u8; 32],
 	devices: PathBuf,
+	replay: Replay,
 	front_list: Option<PathBuf>,
 	upstream: Endpoint,
 	tick_ms: u32,
@@ -97,9 +156,12 @@ async fn main() -> Result<()> {
 	if args.window_secs == 0 {
 		bail!("--window-secs must be at least 1");
 	}
+	fs::create_dir_all(&args.state_dir)
+		.with_context(|| format!("creating {}", args.state_dir.display()))?;
 	let gateway = Arc::new(Gateway {
 		key: keys::read32(&args.key)?,
 		devices: args.devices,
+		replay: Replay { dir: args.state_dir, lock: Mutex::new(()) },
 		front_list: args.front_list,
 		upstream: Endpoint::parse(&args.upstream)?,
 		tick_ms: args.tick_ms,
@@ -152,7 +214,8 @@ where
 	let handshake = noise::respond(
 		&mut conn,
 		&gateway.key,
-		|key| allowed(&gateway.devices, key),
+		// Known device first, so unknown keys never create a counter file.
+		|key, hello| allowed(&gateway.devices, key) && gateway.replay.accept(key, hello.counter),
 		|hello| Welcome {
 			level: Level::from_u8(hello.level)
 				.unwrap_or(Level::Constant)
@@ -160,6 +223,7 @@ where
 			tick_ms: gateway.tick_ms,
 			window_secs: gateway.window_secs,
 			list_version: list_version(gateway.front_list.as_deref()),
+			gateway_time_ms: now_ms(),
 		},
 	);
 
@@ -184,6 +248,7 @@ where
 		tick: Duration::from_millis(gateway.tick_ms.into()),
 		window: Duration::from_secs(gateway.window_secs.into()),
 		window_offset: Duration::from_secs(1),
+		clock_offset_ms: 0,
 	};
 	info!(?level, "tunnel up");
 

@@ -50,6 +50,10 @@ pub struct Policy {
 	/// Added to window boundaries on this side (the gateway sends 1 s after
 	/// the boundary so data released at the tick is included).
 	pub window_offset: Duration,
+	/// Added to the local clock (ms) before computing window boundaries. The
+	/// relay sets it to (gateway clock - own clock) so that every relay sends
+	/// on the gateway's grid whatever its own clock says. 0 on the gateway.
+	pub clock_offset_ms: i64,
 }
 
 #[cfg(test)]

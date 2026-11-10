@@ -21,5 +21,5 @@ pub const MAX_PAYLOAD: usize = CELL - CELL_HEADER;
 
 /// Noise protocol name and prologue.
 pub const NOISE_PATTERN: &str = "Noise_IK_25519_ChaChaPoly_BLAKE2s";
-pub const PROLOGUE: &[u8] = b"optes-tunnel-v1";
-pub const PROTOCOL_VERSION: u8 = 1;
+pub const PROLOGUE: &[u8] = b"optes-tunnel-v2";
+pub const PROTOCOL_VERSION: u8 = 2;

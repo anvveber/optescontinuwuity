@@ -1847,6 +1847,62 @@ pub struct Config {
 	#[serde(default = "default_retention_purge_interval_secs")]
 	pub retention_purge_interval_secs: u64,
 
+	/// Refuse requests whose `Host` header is a DNS name. Accepted hosts: IP
+	/// addresses, `localhost`, `.onion` and `.i2p` names, and the names in
+	/// `allowed_hosts`.
+	///
+	/// For servers that clients reach through a local proxy (e.g.
+	/// `http://127.0.0.1:8008`). It stops DNS rebinding: a website whose
+	/// domain is re-pointed at 127.0.0.1 sends its own domain as `Host`.
+	///
+	/// default: false
+	#[serde(default)]
+	pub restrict_request_hosts: bool,
+
+	/// Extra `Host` names accepted when `restrict_request_hosts` is true
+	/// (without port, e.g. "matrix.example.org").
+	///
+	/// default: []
+	#[serde(default)]
+	pub allowed_hosts: Vec<String>,
+
+	/// Which web origins may use this server from a browser.
+	///
+	/// Not set: any origin (`Access-Control-Allow-Origin: *`, the Matrix
+	/// default).
+	///
+	/// Set: a request with an `Origin` header is refused unless the origin is
+	/// in this list or is the server's own address (same-origin), and only
+	/// listed origins get CORS headers. `[]` means no website at all. Native
+	/// clients send no `Origin` and are not affected; clients built on web
+	/// technology need their origin listed (e.g. "vector://vector" for
+	/// Element Desktop).
+	///
+	/// With clients reaching the server through a local proxy, the default
+	/// lets every website open in the user's browser query the server. Use
+	/// this together with `restrict_request_hosts`: without it, DNS rebinding
+	/// makes a website count as the server's own address.
+	///
+	/// example: ["vector://vector", "tauri://localhost"]
+	pub allowed_origins: Option<Vec<String>>,
+
+	/// Accept push notification registrations (pushers). If false, a client's
+	/// registration is answered with success but not stored, so no push token
+	/// (which identifies a phone to Google or Apple) is kept in the database.
+	/// For servers that cannot send push notifications anyway.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub allow_pushers: bool,
+
+	/// Issue OpenID tokens (`/user/{userId}/openid/request_token`). Clients
+	/// use them to prove a user's Matrix ID to third-party services such as
+	/// integration managers. If false, the request is refused.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub allow_openid_tokens: bool,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP

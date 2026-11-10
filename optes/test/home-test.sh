@@ -136,6 +136,7 @@ EOF
   launch gateway "$bin_dir/optes-gateway" --listen "unix:$RUN/gateway.sock" \
     --upstream "unix:$RUN/continuwuity.sock" --key "$DIR/gateway.key" \
     --devices "$DIR/devices" --front-list "$DIR/bundle/frontlist.signed" \
+    --state-dir "$DIR/gateway-state" \
     --tick-ms 200 --window-secs "$RELEASE_SECS"
   wait_for "$RUN/gateway.sock" 30 || die "gateway did not start; see $DIR/logs/gateway.log"
 

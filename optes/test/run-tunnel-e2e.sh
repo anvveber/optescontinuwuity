@@ -1,6 +1,11 @@
 #!/usr/bin/env bash
 # End-to-end test of relay -> front -> gateway -> continuwuity, no Tor.
 # Usage: run-tunnel-e2e.sh <continuwuity-binary> <tunnel-target-dir> <level>
+#
+# <tunnel-target-dir> must be a test build: the relay dials a plain TCP front
+# here, which normal builds refuse.
+#   (cd optes/tunnel && cargo build --features test-fronts --target-dir target/test-fronts)
+#   -> optes/tunnel/target/test-fronts/debug
 set -euo pipefail
 
 server_bin=$(realpath "$1")
@@ -49,6 +54,7 @@ first=$(sed 's/\x1b\[[0-9;]*m//g' "$work/server.log" | grep -o 'using the regist
 
 "$tdir/optes-gateway" --listen "tcp:127.0.0.1:$gport" --upstream "tcp:127.0.0.1:$mport" \
   --key "$work/gateway.key" --devices "$work/devices" --front-list "$work/list-v2.signed" \
+  --state-dir "$work/gateway-state" \
   --tick-ms $tick --window-secs $window > "$work/gateway.log" 2>&1 & pids+=($!)
 python3 "$here/front_recorder.py" "$fport" "127.0.0.1:$gport" "$work/wire.log" & pids+=($!)
 sleep 1

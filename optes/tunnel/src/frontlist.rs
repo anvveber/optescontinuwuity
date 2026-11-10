@@ -3,7 +3,7 @@
 //! File format: the JSON bytes, a newline, `-----SIG-----`, a newline, the
 //! base64 Ed25519 signature over the JSON bytes exactly as stored.
 
-use anyhow::{bail, Context, Result};
+use anyhow::{bail, ensure, Context, Result};
 use base64::{engine::general_purpose::STANDARD, Engine};
 use ed25519_dalek::{Signature, Signer, SigningKey, Verifier, VerifyingKey};
 use serde::{Deserialize, Serialize};
@@ -14,11 +14,50 @@ const SEPARATOR: &str = "\n-----SIG-----\n";
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Front {
-	/// "tor" or "i2p" (each through its own SOCKS proxy), or "tcp" (direct;
-	/// tests only).
+	/// "tor" or "i2p" (each through its own SOCKS proxy). Test builds
+	/// (feature `test-fronts`) also know "tcp", a direct connection.
 	pub transport: String,
 	/// host:port
 	pub address: String,
+}
+
+/// Whether `host` is `len` base32 characters followed by `suffix`.
+fn is_base32_host(host: &str, len: usize, suffix: &str) -> bool {
+	host.strip_suffix(suffix).is_some_and(|name| {
+		name.len() == len && name.bytes().all(|b| matches!(b, b'a'..=b'z' | b'2'..=b'7'))
+	})
+}
+
+impl Front {
+	/// Whether this relay may dial the front.
+	///
+	/// A front is only ever reached through an anonymity network: `tor`
+	/// fronts must be v3 onion addresses and `i2p` fronts `.b32.i2p`
+	/// addresses. Anything else is refused, so a front list (even a
+	/// correctly signed one) can't make the relay connect somewhere directly
+	/// or through a Tor exit. Unknown transports are refused too; a list
+	/// may carry them for newer relays.
+	pub fn check(&self) -> Result<()> {
+		let (host, port) = self
+			.address
+			.rsplit_once(':')
+			.context("front address must be host:port")?;
+		ensure!(port.parse::<u16>().is_ok_and(|p| p != 0), "front port is not valid: {port}");
+
+		match self.transport.as_str() {
+			| "tor" => ensure!(
+				cfg!(feature = "test-fronts") || is_base32_host(host, 56, ".onion"),
+				"tor front is not a v3 onion address: {host}"
+			),
+			| "i2p" => ensure!(
+				cfg!(feature = "test-fronts") || is_base32_host(host, 52, ".b32.i2p"),
+				"i2p front is not a .b32.i2p address: {host}"
+			),
+			| "tcp" if cfg!(feature = "test-fronts") => {},
+			| other => bail!("unknown transport {other}"),
+		}
+		Ok(())
+	}
 }
 
 #[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -100,6 +139,43 @@ mod tests {
 			gateway_key: keys::encode(&[3_u8; 32]),
 			fronts: vec![Front { transport: "tor".into(), address: "x.onion:443".into() }],
 		}
+	}
+
+	fn front(transport: &str, address: &str) -> Front {
+		Front { transport: transport.into(), address: address.into() }
+	}
+
+	#[test]
+	fn accepts_onion_and_b32_fronts() {
+		let onion = format!("{}.onion:443", "a".repeat(56));
+		let b32 = format!("{}.b32.i2p:443", "b2".repeat(26));
+		assert!(front("tor", &onion).check().is_ok());
+		assert!(front("i2p", &b32).check().is_ok());
+	}
+
+	#[test]
+	fn rejects_bad_ports_and_unknown_transports() {
+		let onion = "a".repeat(56) + ".onion";
+		assert!(front("tor", &onion).check().is_err(), "no port");
+		assert!(front("tor", &format!("{onion}:0")).check().is_err());
+		assert!(front("tor", &format!("{onion}:70000")).check().is_err());
+		assert!(front("nym", &format!("{onion}:443")).check().is_err());
+	}
+
+	/// Release builds: nothing but onion / b32 addresses, and no direct TCP.
+	#[cfg(not(feature = "test-fronts"))]
+	#[test]
+	fn rejects_anything_that_leaves_the_anonymity_network() {
+		let onion = "a".repeat(56) + ".onion";
+		assert!(front("tcp", "203.0.113.5:443").check().is_err(), "direct tcp");
+		assert!(front("tcp", &format!("{onion}:443")).check().is_err(), "tcp transport");
+		assert!(front("tor", "example.org:443").check().is_err(), "clearnet host via tor");
+		assert!(front("tor", "203.0.113.5:443").check().is_err(), "ip via tor");
+		assert!(front("tor", &format!("{}.onion:443", "a".repeat(16))).check().is_err(), "v2 onion");
+		assert!(front("tor", &format!("{}.onion:443", "A".repeat(56))).check().is_err(), "upper case");
+		assert!(front("tor", &format!("{onion}.example.org:443")).check().is_err(), "suffix trick");
+		assert!(front("i2p", "example.i2p:443").check().is_err(), "named i2p host");
+		assert!(front("i2p", &format!("{onion}:443")).check().is_err(), "onion as i2p");
 	}
 
 	#[test]

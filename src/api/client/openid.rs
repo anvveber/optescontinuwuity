@@ -18,6 +18,10 @@ pub(crate) async fn create_openid_token_route(
 ) -> Result<account::request_openid_token::v3::Response> {
 	let sender_user = body.identity.expect_sender_user()?;
 
+	if !services.config.allow_openid_tokens {
+		return Err!(Request(Forbidden("OpenID tokens are disabled on this server.")));
+	}
+
 	if sender_user != body.user_id {
 		return Err!(Request(InvalidParam(
 			"Not allowed to request OpenID tokens on behalf of other users",

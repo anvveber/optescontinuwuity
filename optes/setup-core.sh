@@ -14,6 +14,8 @@
 #   setup-core.sh add-client <name> [--service ingress|admin]   (onion client auth)
 #   setup-core.sh remove-client <name> [--service ingress|admin]
 #   setup-core.sh lockdown --i-tested-onion-ssh
+#   setup-core.sh allow-origin <origin>      (a web-based client's origin, e.g. vector://vector)
+#   setup-core.sh remove-origin <origin>
 #   setup-core.sh status
 #
 # Phase 2 (tunnel; needs --tunnel-bin-dir at install):
@@ -40,6 +42,10 @@
 #       admin   port 22  -> sshd on 127.0.0.1:22
 #   - optes-gateway, like continuwuity, runs with no network and talks only
 #     over unix sockets.
+#   - continuwuity's socket belongs to group "matrix-sock" (gateway only)
+#     while port 80 is closed, and to Tor's group only while it is open.
+#   - Logs: journald keeps them in memory only (lost at reboot); the gateway
+#     logs warnings only; no core dumps.
 #   - nftables: outbound allowed only for the Tor user (plus loopback, DHCP,
 #     IPv6 neighbour discovery). Everything else fails closed, including DNS.
 #   - apt goes through Tor (tor+https) after install.
@@ -50,6 +56,7 @@ umask 077
 # ---- fixed paths -----------------------------------------------------------
 SVC_USER=continuwuity
 TOR_USER=debian-tor
+SOCK_GROUP=matrix-sock
 BIN=/usr/local/bin/continuwuity
 CONF_DIR=/etc/continuwuity
 CONF=$CONF_DIR/continuwuity.toml
@@ -63,6 +70,9 @@ TORRC=/etc/tor/torrc
 NFT_CONF=/etc/nftables.conf
 SYSCTL_CONF=/etc/sysctl.d/90-matrix-core.conf
 UNIT=/etc/systemd/system/continuwuity.service
+UNIT_GROUP_DROPIN=/etc/systemd/system/continuwuity.service.d/socket-group.conf
+JOURNALD_DROPIN=/etc/systemd/journald.conf.d/90-optes.conf
+ORIGINS=$STATE_DIR/allowed_origins
 RET_SVC=/etc/systemd/system/matrix-media-retention.service
 RET_TIMER=/etc/systemd/system/matrix-media-retention.timer
 OPTES_DIR=/etc/optes
@@ -80,6 +90,7 @@ FRONTS=$OPTES_DIR/fronts.txt
 LIST_VERSION=$OPTES_DIR/list.version
 LIST_SIGNED=$OPTES_DIR/frontlist.signed
 RELEASE_SECS=15
+GW_STATE=/var/lib/optes-gateway
 ONION_PLACEHOLDER="<onion-address-without-.onion>"
 
 # ---- helpers ---------------------------------------------------------------
@@ -112,6 +123,21 @@ gen_x25519() {
   shred -u "$tmp/k.pem" 2>/dev/null || rm -f "$tmp/k.pem"
   rmdir "$tmp"
   [[ ${#CLIENT_PRIV} -eq 52 && ${#CLIENT_PUB} -eq 52 ]] || die "key generation produced unexpected output"
+}
+
+# Tor enforces client authorization only while at least one client is listed;
+# with none, the onion is open to anyone who knows the address. So when a
+# service would have no client, list a key whose private half is thrown away:
+# nobody can connect until a real client is added.
+# Arg: onion service directory
+lock_if_no_clients() {
+  local dir=$1
+  compgen -G "$dir/authorized_clients/*.auth" > /dev/null && return 0
+  gen_x25519
+  CLIENT_PRIV=""
+  echo "descriptor:x25519:$CLIENT_PUB" > "$dir/authorized_clients/locked.auth"
+  chown "$TOR_USER:$TOR_USER" "$dir/authorized_clients/locked.auth"
+  chmod 600 "$dir/authorized_clients/locked.auth"
 }
 
 wait_for_file() {
@@ -227,6 +253,8 @@ cmd_install() {
     echo "kernel.yama.ptrace_scope = 2"
     echo "net.ipv4.ip_forward = 0"
     echo "net.ipv6.conf.all.forwarding = 0"
+    echo "kernel.core_pattern = |/bin/false"
+    echo "fs.suid_dumpable = 0"
     if [[ $io_uring == off ]]; then
       echo "kernel.io_uring_disabled = 2"
     else
@@ -235,10 +263,13 @@ cmd_install() {
   } > "$SYSCTL_CONF"
   sysctl --system > /dev/null
 
+  volatile_journal
+
   info "Service user"
   if ! id "$SVC_USER" &>/dev/null; then
     adduser --system --group --home /var/lib/continuwuity --no-create-home "$SVC_USER"
   fi
+  getent group "$SOCK_GROUP" >/dev/null || addgroup --system "$SOCK_GROUP"
 
   info "Binary"
   install -o root -g root -m 0755 "$binary" "$BIN"
@@ -253,6 +284,13 @@ cmd_install() {
   fi
   chown root:"$SVC_USER" "$REG_TOKEN"
   chmod 640 "$REG_TOKEN"
+
+  # Origins of web-based clients allowed to use the server (see allow-origin).
+  # The defaults are app-internal origins no website can have: Element Desktop,
+  # and Tauri apps such as Cinny desktop.
+  if [[ ! -f $ORIGINS ]]; then
+    printf '%s\n' "vector://vector" "tauri://localhost" "http://tauri.localhost" "https://tauri.localhost" > "$ORIGINS"
+  fi
 
   cat > "$CONF" <<EOF
 # Written by setup-core.sh. Keys verified against the continuwuity config
@@ -327,6 +365,23 @@ hide_server_identity = true
 # Set per channel with make-space.py (retention = "30d").
 allow_room_retention = true
 
+# Websites must not reach the server through a user's local relay
+# (optescontinuwuity patch).
+# - Host must be an IP address, localhost or an onion/i2p name: stops DNS
+#   rebinding.
+# - A request with an Origin header is refused unless the origin is listed
+#   here or is the server's own address. Change the list with
+#   "setup-core.sh allow-origin|remove-origin", not by hand.
+restrict_request_hosts = true
+$(origins_line)
+
+# The server has no network and can never send a push notification. Don't
+# store the push tokens clients register (they identify a phone to Google or
+# Apple). Don't issue OpenID tokens (they prove a user's Matrix ID to
+# third-party services). (optescontinuwuity patch)
+allow_pushers = false
+allow_openid_tokens = false
+
 # Logging and telemetry.
 log = "warn"
 log_colors = false
@@ -337,12 +392,20 @@ allow_prometheus_metrics = false
 # Media retention: run on SIGUSR2 (sent daily by matrix-media-retention.timer).
 # Deletes ALL media (local too) older than the window. TEST the syntax.
 admin_signal_execute = ["media delete-past-remote-media -b $retention --yes-i-want-to-delete-local-media"]
+
+# Legacy (password) login only. With OAuth on, the unauthenticated endpoint
+# /_matrix/client/v1/auth_metadata publishes the server name, and its URLs
+# point at an address that is never served. Must stay the last section.
+[global.oauth]
+compatibility_mode = "disabled"
 EOF
   chown root:"$SVC_USER" "$CONF"
   chmod 640 "$CONF"
 
   info "systemd units"
-  # Group=$TOR_USER makes the socket's group debian-tor, so Tor can connect.
+  # Group= decides the socket's group, i.e. who can connect. It is set by a
+  # drop-in (write_sock_group): matrix-sock (the gateway only) while port 80
+  # is closed, debian-tor while it is open.
   # SupplementaryGroups=$SVC_USER: Group= replaces the user's own group, and
   # the config and token are readable only by that group.
   # /var/lib/tor and /etc/tor are made inaccessible to continuwuity.
@@ -354,13 +417,14 @@ After=local-fs.target
 [Service]
 Type=simple
 User=$SVC_USER
-Group=$TOR_USER
+Group=$SOCK_GROUP
 SupplementaryGroups=$SVC_USER
 Environment=CONTINUWUITY_CONFIG=$CONF
 ExecStart=$BIN
 Restart=on-failure
 RestartSec=5
 LimitNOFILE=65536
+LimitCORE=0
 
 StateDirectory=continuwuity
 StateDirectoryMode=0700
@@ -431,6 +495,7 @@ EOF
     if [[ -f $GW_UNIT ]]; then echo off; else echo on; fi > "$STATE_DIR/direct_ingress"
   fi
   write_torrc
+  write_sock_group
   for d in "$HS_INGRESS" "$HS_ADMIN"; do
     install -d -o "$TOR_USER" -g "$TOR_USER" -m 0700 "$d" "$d/authorized_clients"
   done
@@ -438,10 +503,13 @@ EOF
 
   # Before Tor starts, so the onions never exist without client authorization.
   # The onion addresses are not known yet; they are filled in below.
-  info "First client keys"
-  local admin_out="" ingress_out=""
+  # No usable ingress key is made here: each front (or test relay) gets its
+  # own with "add-client <name>", so there is no unused key lying around.
+  # Until then the ingress onion is locked (see lock_if_no_clients).
+  info "First admin key"
+  local admin_out=""
   [[ -e $HS_ADMIN/authorized_clients/admin1.auth ]] || admin_out=$(add_client_key admin admin1)
-  [[ -e $HS_INGRESS/authorized_clients/test1.auth ]] || ingress_out=$(add_client_key ingress test1)
+  lock_if_no_clients "$HS_INGRESS"
 
   info "Starting services"
   systemctl daemon-reload
@@ -473,7 +541,6 @@ EOF
   ingress=$(cat "$HS_INGRESS/hostname")
   admin=$(cat "$HS_ADMIN/hostname")
   admin_out=${admin_out//"$ONION_PLACEHOLDER"/${admin%.onion}}
-  ingress_out=${ingress_out//"$ONION_PLACEHOLDER"/${ingress%.onion}}
 
   cat <<EOF
 
@@ -494,7 +561,14 @@ Later accounts use: $(cat "$REG_TOKEN")   (also in $REG_TOKEN)
 
 $admin_out
 
-$ingress_out
+The ingress onion has no client key yet and is locked: nothing can reach it.
+Make one key per front (and one for a relay that talks to the core directly,
+for tests):
+  $0 add-client <name>
+
+Web-based clients need their origin allowed (Element Desktop and Tauri apps
+such as Cinny desktop already are):  $0 allow-origin <origin>
+Logs are kept in memory only and are gone after a reboot.
 
 Next:
  1. Test SSH through the admin onion from your machine.
@@ -544,14 +618,76 @@ write_apparmor() {
     return 0
   fi
   mkdir -p /etc/apparmor.d/local
-  cat > /etc/apparmor.d/local/system_tor <<EOF
-# Written by setup-core.sh
-$SOCK_DIR/ r,
-$SOCK rw,
-$GW_SOCK_DIR/ r,
-$GW_SOCK rw,
-EOF
+  {
+    echo "# Written by setup-core.sh"
+    if [[ $(cat "$STATE_DIR/direct_ingress" 2>/dev/null) == on ]]; then
+      echo "$SOCK_DIR/ r,"
+      echo "$SOCK rw,"
+    fi
+    echo "$GW_SOCK_DIR/ r,"
+    echo "$GW_SOCK rw,"
+  } > /etc/apparmor.d/local/system_tor
   apparmor_parser -r /etc/apparmor.d/system_tor || warn "apparmor reload failed"
+}
+
+# Who may connect to continuwuity's socket: the socket's group is the
+# service's Group=. Port 80 closed: matrix-sock (only the gateway is in it).
+# Port 80 open: Tor's group (the gateway has it as well).
+write_sock_group() {
+  local group=$SOCK_GROUP
+  [[ $(cat "$STATE_DIR/direct_ingress" 2>/dev/null) == on ]] && group=$TOR_USER
+  mkdir -p "$(dirname "$UNIT_GROUP_DROPIN")"
+  printf '# Written by setup-core.sh (direct-ingress)\n[Service]\nGroup=%s\n' "$group" > "$UNIT_GROUP_DROPIN"
+  chmod 644 "$UNIT_GROUP_DROPIN"
+}
+
+# Logs in memory only: nothing about when services ran or who connected
+# survives a reboot or ends up in a disk image. Existing logs on disk go.
+volatile_journal() {
+  info "Logs in memory only"
+  mkdir -p "$(dirname "$JOURNALD_DROPIN")"
+  printf '# Written by setup-core.sh\n[Journal]\nStorage=volatile\nRuntimeMaxUse=64M\n' > "$JOURNALD_DROPIN"
+  chmod 644 "$JOURNALD_DROPIN"
+  systemctl restart systemd-journald.service
+  rm -rf /var/log/journal
+}
+
+# The config line for allowed_origins, from $ORIGINS (one origin per line).
+origins_line() {
+  local origin list=""
+  while read -r origin; do
+    [[ -n $origin ]] && list+="${list:+, }\"$origin\""
+  done < "$ORIGINS"
+  echo "allowed_origins = [$list]"
+}
+
+valid_origin() {
+  [[ $1 =~ ^[a-z][a-z0-9+.-]*://[A-Za-z0-9._:-]+$ ]] \
+    || die "an origin looks like scheme://host or scheme://host:port (no path), e.g. vector://vector"
+}
+
+apply_origins() {
+  sed -i "s|^allowed_origins = .*|$(origins_line)|" "$CONF"
+  systemctl restart continuwuity.service
+  info "allowed origins: $(tr '\n' ' ' < "$ORIGINS")"
+}
+
+cmd_allow_origin() {
+  local origin=${1:-}
+  valid_origin "$origin"
+  [[ -f $ORIGINS ]] || die "not installed"
+  grep -qxF "$origin" "$ORIGINS" && die "origin already allowed"
+  echo "$origin" >> "$ORIGINS"
+  apply_origins
+}
+
+cmd_remove_origin() {
+  local origin=${1:-}
+  [[ -f $ORIGINS ]] || die "not installed"
+  grep -qxF "$origin" "$ORIGINS" || die "origin not listed: $origin"
+  grep -vxF "$origin" "$ORIGINS" > "$ORIGINS.tmp" || true
+  mv "$ORIGINS.tmp" "$ORIGINS"
+  apply_origins
 }
 
 install_gateway() {
@@ -599,8 +735,10 @@ EOF
   chmod 600 "$OPTES_DIR/list.key"
   touch "$FRONTS"
 
-  # Group debian-tor: lets Tor reach the gateway's socket and the gateway
-  # reach continuwuity's socket (both 0660/0770, group debian-tor).
+  # Group debian-tor: lets Tor reach the gateway's socket (0770, group
+  # debian-tor). matrix-sock: lets the gateway reach continuwuity's socket.
+  # RUST_LOG=warn: no "tunnel up/down" lines, which would be a record of when
+  # relays connected.
   cat > "$GW_UNIT" <<EOF
 [Unit]
 Description=optes gateway (tunnel endpoint; no network, unix sockets only)
@@ -610,15 +748,19 @@ After=continuwuity.service
 Type=simple
 User=$GW_USER
 Group=$TOR_USER
-SupplementaryGroups=$GW_USER
+SupplementaryGroups=$GW_USER $SOCK_GROUP
 UMask=0007
+Environment=RUST_LOG=warn
 ExecStart=$GW_BIN --listen unix:$GW_SOCK --upstream unix:$SOCK \\
   --key $OPTES_DIR/gateway.key --devices $DEVICES --front-list $LIST_SIGNED \\
-  --tick-ms 200 --window-secs $RELEASE_SECS
+  --state-dir $GW_STATE --tick-ms 200 --window-secs $RELEASE_SECS
 Restart=on-failure
 RestartSec=5
+LimitCORE=0
 RuntimeDirectory=optes-gateway
 RuntimeDirectoryMode=0750
+StateDirectory=optes-gateway
+StateDirectoryMode=0700
 
 PrivateNetwork=yes
 InaccessiblePaths=/var/lib/tor /etc/tor /var/lib/continuwuity $STATE_DIR $OPTES_DIR/list.key
@@ -704,7 +846,8 @@ cmd_renew_front_list() {
 cmd_add_front() {
   local front=${1:-}
   need_gateway
-  [[ $front =~ ^(tor|i2p):[a-z0-9.-]+:[0-9]{1,5}$ ]] || die "front must look like tor:<address>.onion:443 or i2p:<address>.b32.i2p:443"
+  [[ $front =~ ^(tor:[a-z2-7]{56}\.onion|i2p:[a-z2-7]{52}\.b32\.i2p):[0-9]{1,5}$ ]] \
+    || die "front must look like tor:<56 chars>.onion:443 or i2p:<52 chars>.b32.i2p:443"
   grep -qxF "$front" "$FRONTS" && die "front already listed"
   echo "$front" >> "$FRONTS"
   sign_front_list
@@ -749,6 +892,11 @@ cmd_direct_ingress() {
   fi
   echo "$mode" > "$STATE_DIR/direct_ingress"
   write_torrc
+  # The socket changes group, so continuwuity restarts (a few seconds down).
+  write_sock_group
+  write_apparmor
+  systemctl daemon-reload
+  systemctl restart continuwuity.service
   systemctl reload tor@default.service
   info "direct (plain HTTP) ingress: $mode"
   [[ $mode == on ]] && warn "port 80 is open: clients holding an ingress key can skip the tunnel and fronts. Turn it off after testing."
@@ -785,6 +933,8 @@ add_client_key() {
   echo "descriptor:x25519:$CLIENT_PUB" > "$dir/authorized_clients/$name.auth"
   chown "$TOR_USER:$TOR_USER" "$dir/authorized_clients/$name.auth"
   chmod 600 "$dir/authorized_clients/$name.auth"
+  # A real client exists now; the placeholder that kept the onion locked goes.
+  rm -f "$dir/authorized_clients/locked.auth"
   [[ -s $dir/hostname ]] && onion=$(cut -d. -f1 < "$dir/hostname")
   cat <<EOF
 --- client '$name' for $service ---
@@ -805,6 +955,7 @@ cmd_add_client() {
     esac
   done
   valid_name "$name"
+  [[ $name != locked ]] || die "the name 'locked' is reserved"
   add_client_key "$service" "$name"
   systemctl reload tor@default.service
 }
@@ -821,9 +972,16 @@ cmd_remove_client() {
   valid_name "$name"
   dir=$(hs_dir_for "$service")
   [[ -e $dir/authorized_clients/$name.auth ]] || die "no client '$name' for $service"
+  if [[ $service == admin && $(find "$dir/authorized_clients" -name '*.auth' | wc -l) -le 1 ]]; then
+    die "'$name' is the last admin key; removing it would lock you out. Add another first."
+  fi
   rm -f "$dir/authorized_clients/$name.auth"
+  # With no client left Tor would open the onion to everyone: lock it instead.
+  lock_if_no_clients "$dir"
   systemctl reload tor@default.service
   info "removed '$name' from $service"
+  [[ -e $dir/authorized_clients/locked.auth ]] && info "no client left: $service onion locked until the next add-client"
+  return 0
 }
 
 cmd_lockdown() {
@@ -842,9 +1000,11 @@ cmd_status() {
   printf '%-32s %s\n' "ingress onion" "$(cat "$HS_INGRESS/hostname" 2>/dev/null || echo -)"
   printf '%-32s %s\n' "admin onion" "$(cat "$HS_ADMIN/hostname" 2>/dev/null || echo -)"
   printf '%-32s %s\n' "clearnet ssh open" "$(cat "$STATE_DIR/keep_clearnet_ssh" 2>/dev/null || echo -)"
-  printf '%-32s %s\n' "ingress clients" "$(find "$HS_INGRESS/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)"
+  printf '%-32s %s\n' "ingress clients" "$(find "$HS_INGRESS/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null | sed 's/^locked\.auth $/none (locked: nothing can connect)/')"
   printf '%-32s %s\n' "admin clients" "$(find "$HS_ADMIN/authorized_clients" -name '*.auth' -printf '%f ' 2>/dev/null)"
   printf '%-32s %s\n' "direct ingress (port 80)" "$(cat "$STATE_DIR/direct_ingress" 2>/dev/null || echo -)"
+  printf '%-32s %s\n' "socket group" "$(stat -c %G "$SOCK" 2>/dev/null || echo -)"
+  printf '%-32s %s\n' "allowed origins" "$(tr '\n' ' ' < "$ORIGINS" 2>/dev/null)"
   [[ $(cat "$STATE_DIR/direct_ingress" 2>/dev/null) == on && -f $GW_UNIT ]] \
     && warn "port 80 open: plain HTTP bypasses the tunnel ('direct-ingress off' to close)"
   if [[ -f $GW_UNIT ]]; then
@@ -864,6 +1024,8 @@ main() {
     add-client)    need_root; cmd_add_client "$@" ;;
     remove-client) need_root; cmd_remove_client "$@" ;;
     lockdown)      need_root; cmd_lockdown "$@" ;;
+    allow-origin)  need_root; cmd_allow_origin "$@" ;;
+    remove-origin) need_root; cmd_remove_origin "$@" ;;
     status)        need_root; cmd_status ;;
     add-device)    need_root; cmd_add_device "$@" ;;
     remove-device) need_root; cmd_remove_device "$@" ;;
@@ -871,7 +1033,7 @@ main() {
     renew-front-list) need_root; cmd_renew_front_list ;;
     remove-front)  need_root; cmd_remove_front "$@" ;;
     direct-ingress) need_root; cmd_direct_ingress "$@" ;;
-    *) sed -n '2,25p' "$0"; exit 1 ;;
+    *) sed -n '2,29p' "$0"; exit 1 ;;
   esac
 }
 

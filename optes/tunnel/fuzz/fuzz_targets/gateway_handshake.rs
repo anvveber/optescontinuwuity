@@ -15,11 +15,12 @@ fuzz_target!(|data: &[u8]| {
 		msg.resize(FRAME, 0);
 		client.write_all(&msg).await.unwrap();
 
-		let result = noise::respond(&mut server, &GATEWAY_PRIV, |_| true, |h| noise::Welcome {
+		let result = noise::respond(&mut server, &GATEWAY_PRIV, |_, _| true, |h| noise::Welcome {
 			level: h.level,
 			tick_ms: 200,
 			window_secs: 15,
 			list_version: 0,
+			gateway_time_ms: 0,
 		})
 		.await;
 		drop(server);

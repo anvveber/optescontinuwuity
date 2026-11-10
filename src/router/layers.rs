@@ -57,6 +57,7 @@ pub(crate) fn build(services: &Arc<Services>) -> Result<(Router, Guard)> {
 				.on_request(DefaultOnRequest::new().level(tracing::Level::TRACE))
 				.on_response(DefaultOnResponse::new().level(tracing::Level::DEBUG)),
 		)
+		.layer(axum::middleware::from_fn_with_state(Arc::clone(services), request::guard))
 		.layer(axum::middleware::from_fn_with_state(Arc::clone(services), request_ip))
 		.layer(axum::middleware::from_fn_with_state(Arc::clone(services), request::handle))
 		.layer(ResponseBodyTimeoutLayer::new(Duration::from_secs(
@@ -139,7 +140,7 @@ fn compression_layer(server: &Server) -> tower_http::compression::CompressionLay
 	compression_layer
 }
 
-fn cors_layer(_server: &Server) -> CorsLayer {
+fn cors_layer(server: &Server) -> CorsLayer {
 	const METHODS: [Method; 7] = [
 		Method::GET,
 		Method::HEAD,
@@ -158,8 +159,17 @@ fn cors_layer(_server: &Server) -> CorsLayer {
 		header::AUTHORIZATION,
 	];
 
+	// allowed_origins set: only those origins get CORS headers. (Requests
+	// from other origins are already refused by `request::guard`.)
+	let origin = match server.config.allowed_origins.clone() {
+		| None => cors::AllowOrigin::any(),
+		| Some(list) => cors::AllowOrigin::predicate(move |origin: &HeaderValue, _| {
+			list.iter().any(|allowed| allowed.as_bytes() == origin.as_bytes())
+		}),
+	};
+
 	CorsLayer::new()
-		.allow_origin(cors::Any)
+		.allow_origin(origin)
 		.allow_methods(METHODS)
 		.allow_headers(headers)
 		.max_age(Duration::from_hours(24))

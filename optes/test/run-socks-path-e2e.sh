@@ -7,6 +7,10 @@
 #
 # Usage: run-socks-path-e2e.sh <continuwuity-binary> <tunnel-target-dir> [tor|i2p]
 # (i2p: the relay reaches the front through --socks-i2p, as with i2pd)
+#
+# <tunnel-target-dir> must be a normal build (no `test-fronts` feature), as
+# deployed: this test also checks that such a build refuses fronts that are
+# not onion / b32.i2p addresses.
 set -euo pipefail
 
 server_bin=$(realpath "$1")
@@ -27,9 +31,14 @@ mkdir -p "$work/devices" "$work/relay-state"
 "$keys" gen-x25519 "$work/device" >/dev/null
 "$keys" gen-ed25519 "$work/list" >/dev/null
 cp "$work/device.pub" "$work/devices/test.pub"
-# "localhost" goes to the proxy as a hostname, like a .onion would.
+# The front has a real-looking address; the SOCKS stand-in maps it to the shim.
+if [[ $transport == i2p ]]; then
+  front_addr="$(printf 'b%.0s' $(seq 52)).b32.i2p:443"
+else
+  front_addr="$(printf 'a%.0s' $(seq 56)).onion:443"
+fi
 "$keys" sign-list --key "$work/list.key" --version 1 --gateway-key "$work/gateway.pub" \
-  --front "$transport:localhost:$fport" --out "$work/list.signed" >/dev/null
+  --front "$transport:$front_addr" --out "$work/list.signed" >/dev/null
 
 cat > "$work/config.toml" <<EOF
 [global]
@@ -48,9 +57,10 @@ CONTINUWUITY_CONFIG="$work/config.toml" "$server_bin" > "$work/server.log" 2>&1 
 for _ in $(seq 1 60); do curl -sf "http://127.0.0.1:$mport/_matrix/client/versions" >/dev/null && break; sleep 1; done
 first=$(sed 's/\x1b\[[0-9;]*m//g' "$work/server.log" | grep -o 'using the registration token [^ ]*' | awk '{print $NF}' | head -1)
 
-python3 "$here/socks_proxy.py" "$pport" "$work/socks.log" & pids+=($!)
+python3 "$here/socks_proxy.py" "$pport" "$work/socks.log" "$front_addr=127.0.0.1:$fport" & pids+=($!)
 "$tdir/optes-gateway" --listen "tcp:127.0.0.1:$gport" --upstream "tcp:127.0.0.1:$mport" \
-  --key "$work/gateway.key" --devices "$work/devices" --window-secs 5 > "$work/gateway.log" 2>&1 & pids+=($!)
+  --key "$work/gateway.key" --devices "$work/devices" --state-dir "$work/gateway-state" \
+  --window-secs 5 > "$work/gateway.log" 2>&1 & pids+=($!)
 # Front: the same socat line setup-front.sh installs (core = localhost:$gport).
 socat "UNIX-LISTEN:$work/front.sock,fork,unlink-early" \
   "SOCKS4A:127.0.0.1:localhost:$gport,socksport=$pport" & pids+=($!)
@@ -66,7 +76,15 @@ status=0
 : > "$work/wire.log"
 python3 "$here/tunnel_e2e.py" "http://127.0.0.1:$rport" "$token" "$first" 1 "$work/wire.log" 5 200 || status=1
 
-grep -q "socks5 localhost:$fport" "$work/socks.log" && echo "PASS relay used SOCKS5 with a hostname" || { echo "FAIL relay SOCKS5"; status=1; }
+grep -q "socks5 $front_addr" "$work/socks.log" && echo "PASS relay used SOCKS5 with a hostname" || { echo "FAIL relay SOCKS5"; status=1; }
+
+# A deployed build must not sign or dial anything but onion / b32.i2p fronts.
+for bad in "tcp:127.0.0.1:$fport" "$transport:localhost:$fport" "$transport:203.0.113.5:443"; do
+  if "$keys" sign-list --key "$work/list.key" --version 9 --gateway-key "$work/gateway.pub" \
+      --front "$bad" --out "$work/bad.signed" >/dev/null 2>&1; then
+    echo "FAIL signed a front list with $bad"; status=1
+  else echo "PASS refused to sign a front list with $bad"; fi
+done
 grep -q "socks4 localhost:$gport" "$work/socks.log" && echo "PASS front used SOCKS4a with a hostname" || { echo "FAIL front SOCKS4a"; status=1; }
 
 if [[ $status != 0 ]]; then

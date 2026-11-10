@@ -156,7 +156,7 @@ where
 			}
 		},
 		| Level::Window => loop {
-			let now = now_ms();
+			let now = now_ms().saturating_add_signed(policy.clock_offset_ms);
 			sleep(until_next_window(now, policy.window, policy.window_offset)).await;
 			if !burst(&mut writer, &crypto, &mut out_rx, None).await? {
 				return Ok(());

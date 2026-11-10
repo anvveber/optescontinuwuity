@@ -1,6 +1,9 @@
 # Phase 2 protocol — relay ↔ core tunnel
 
-Status: design v1, 2026-10-24. Covers handbook section 9 items 1–4, 6, 7.
+Status: protocol version 2, 2026-11-10 (version 1: 2026-10-24). Version 2 adds the
+handshake counter (replay protection), the gateway time in `WELCOME`, and the front
+address rules; see `audit-2026-11-10.md`. Versions 1 and 2 do not interoperate.
+Covers handbook section 9 items 1–4, 6, 7.
 Delayed release (item 5) is in `delayed-release-spec.md`.
 
 ## 1. Pieces
@@ -48,16 +51,16 @@ No length prefixes, no variable sizes. Handshake messages are frames too.
 ### 3.1 Handshake
 
 Noise pattern `Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue
-`b"optes-tunnel-v1"`.
+`b"optes-tunnel-v2"`.
 
 - **Message 1** (relay → gateway): IK message 1 (ephemeral 32 + encrypted
   static 48 + encrypted payload). Payload = `HELLO` (below), zero-padded so
   the whole message is exactly 2048 bytes.
 - The gateway reads exactly 2048 bytes, runs the handshake, checks the device
-  key against its allowlist.
-  - Unknown key or decryption failure: **send nothing**, wait a random
-    5–30 s, close. Same for any malformed input. A prober learns nothing
-    except "accepts TCP".
+  key against its allowlist, then checks the counter in `HELLO` (below).
+  - Unknown key, stale counter or decryption failure: **send nothing**, wait a
+    random 5–30 s, close. Same for any malformed input. A prober learns
+    nothing except "accepts TCP".
 - **Message 2** (gateway → relay): IK message 2, payload = `WELCOME`, padded to
   2048 bytes.
 
@@ -65,19 +68,44 @@ Noise pattern `Noise_IK_25519_ChaChaPoly_BLAKE2s`, prologue
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 1 | protocol version = 1 |
+| 0 | 1 | protocol version = 2 |
 | 1 | 1 | level: 1, 2 or 3 (4 is deployment, not protocol) |
 | 2 | 8 | front-list version the relay holds (u64 BE) |
+| 10 | 8 | handshake counter (u64 BE) |
+
+**Replay protection.** Message 1 of Noise IK can be recorded (a front sees it)
+and sent again. Without a check the gateway would answer it, which tells the
+sender that the device is still allowed. So:
+
+- The relay keeps a counter in its state directory (`hello.counter`). For each
+  handshake it uses the stored value + 1 and stores that before sending. With
+  no stored value it starts at the current time in ms.
+- The gateway keeps the highest counter it accepted from each device
+  (`<state-dir>/<device key, hex>.ctr`) and accepts a `HELLO` only if its
+  counter is higher. It fails closed: if it can't store the new value, it
+  refuses.
+- The counter is inside the encrypted, authenticated handshake payload; only
+  the device key's owner can produce a higher one.
+
+What the gateway's file shows: roughly when the relay was first set up, and
+how many handshakes it has made since. Not when it connected.
+
+If a relay loses its state directory but keeps its device key, the new start
+value (current time) is above the old one, so it keeps working. If the stored
+value on the gateway is ever above what the relay sends (e.g. the relay's
+clock was far in the future at first run), the relay is refused silently:
+give the device a new key (`remove-device`, `add-device`).
 
 `WELCOME`:
 
 | Offset | Size | Field |
 |---|---|---|
-| 0 | 1 | protocol version = 1 |
+| 0 | 1 | protocol version = 2 |
 | 1 | 1 | level accepted (gateway may raise, never lower) |
 | 2 | 4 | constant-rate tick, ms (u32 BE) — server-wide |
 | 6 | 4 | window length, s (u32 BE) — server-wide, = release interval |
 | 10 | 8 | current front-list version (u64 BE) |
+| 18 | 8 | gateway clock, Unix ms (u64 BE), when this message was written |
 
 ### 3.2 Cells
 
@@ -113,12 +141,32 @@ interval (15 s now).
 | Level | Rule | Line observer sees | Cost |
 |---|---|---|---|
 | 1 | Send when there's data. After the send queue drains, add PAD frames until the burst is a **power of two, minimum 4** frames. | When the user is active; burst sizes rounded up. | ~0 |
-| 2 | Send only at window boundaries (wall-clock multiples of `WINDOW`, +1 s for gateway → relay so released data is included). **Every window**, each side sends a burst padded as in level 1, even when idle. | A fixed 8 KB+ burst every window, same for every user. Burst size rounded. | delay up to 2×`WINDOW`; idle = 8 KB per 15 s ≈ 0.55 KB/s → ~1.4 GB/month per direction |
+| 2 | Send only at window boundaries (multiples of `WINDOW` **on the gateway's clock**, +1 s for gateway → relay so released data is included). **Every window**, each side sends a burst padded as in level 1, even when idle. | A fixed 8 KB+ burst every window, same for every user. Burst size rounded. | delay up to 2×`WINDOW`; idle = 8 KB per 15 s ≈ 0.55 KB/s → ~1.4 GB/month per direction |
 | 3 | Exactly one frame every `TICK`, both directions, while connected. Data replaces PAD. Never bursts, never skips ahead to catch up. | A flat 10 KB/s stream. | 10 KB/s each way (~26 GB/month if 24/7); throughput capped at 10 KB/s |
 
 Level 2 and the server's delayed release use the same tick grid, so every
 level-2 user's bursts happen at the same moments: the crowd is everyone
 connected, not just everyone active.
+
+**Whose clock.** The grid is the gateway's. The relay takes the gateway time
+from `WELCOME`, adds half the handshake round trip, and uses the difference to
+its own clock for all window timing. Reasons:
+
+- With each relay on its own clock, a device whose clock is off by a second
+  sends every burst a second off the grid: a stable mark that a front can use
+  to recognise the device across connections.
+- The core has no time sync (NTP is blocked), so its clock can drift away from
+  the relays'. The release tick follows the core's clock; the relays must too.
+
+Limit: the difference is measured once, at the handshake. A level-2 tunnel
+that stays up for weeks drifts off the grid by however much the two clocks
+drift apart in that time; it is corrected at the next connect. (Level 4 uses
+level 3, which has no windows.)
+
+Cost: the gateway chooses each relay's phase. A hostile gateway could give
+every relay a different one to tell their lines apart for an observer it works
+with. At levels 1 and 2 it can already do that by sending one relay a larger
+burst, so this adds nothing; level 3 has no windows and is not affected.
 
 Level 4 = level 3 from an always-on relay at home; the phone reaches it over
 WireGuard. The tunnel then never goes up or down with the user's activity.
@@ -142,6 +190,18 @@ section 5 cost table).
 
 Signed file = the JSON bytes, then a line `-----SIG-----`, then the base64
 Ed25519 signature over the JSON bytes exactly as stored.
+
+Address rules (enforced by the relay for every front before dialling, and by
+`optes-keys sign-list`):
+
+- `tor` fronts: a v3 onion address, `<56 base32 chars>.onion:<port>`.
+- `i2p` fronts: `<52 base32 chars>.b32.i2p:<port>`.
+- Anything else is ignored: other host names, IP addresses, unknown transports.
+
+So a front list can only ever send a relay into Tor or I2P, even if the list
+key is stolen: the key is on the core's disk (for the weekly re-sign), where
+the host can read it. The plain-TCP transport used by the tests exists only in
+builds with the cargo feature `test-fronts`; never ship such a build.
 
 Relay rules:
 - Verify the signature against the pinned front-list key. Reject on failure.
