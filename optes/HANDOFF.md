@@ -1,7 +1,8 @@
 # optes — project state
 
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b) and 2026-11-14 (kit
-script: §4c; review of spaces, template tool and tests: §4d). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
+§4e). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -100,17 +101,15 @@ Design notes for each feature: `delayed-release-spec.md`, `bouncer-decision.md`,
 
 ## 4. What has NOT been verified
 
-- **Nothing has run over real Tor or I2P.** The build environment can't reach either.
-  Tunnel and SOCKS paths were tested with stand-ins: `socks_proxy.py`,
-  `onion_map_proxy.py`, `front_recorder.py`.
-- **The setup scripts have only run in a VM with no Tor or I2P network** (§4a). Still
-  never exercised:
-  - Tor connecting to the unix sockets through its AppArmor profile. The rules are
-    loaded and Tor is confined; no onion connection has ever arrived to use them.
-  - apt over Tor. apt accepts the `tor+http` sources; no download has gone through.
-  - SSH over the admin onion.
-  - `setup-relay.sh` on Fedora (ran on Debian 13 only).
-  - an I2P front on the real I2P network.
+- **Real Tor: in VMs only (§4e).** Core, relay and a Tor front ran in Debian 13
+  VMs on the real Tor network. Nothing has run on a VPS (provider image, real IP
+  address, memory limits), or on I2P.
+- Still never exercised:
+  - `setup-front.sh lockdown`; a front or core in daily use (T7)
+  - level 1 padding on the wire
+  - `setup-relay.sh` on Fedora (ran on Debian 13 only)
+  - an I2P front on the real I2P network
+  - a relay machine that sleeps and wakes (recovery of the relay not shown)
 - **One audit (`audit-2026-11-10.md`), not independent. No outside review yet.**
 - **The browser guard was tested with crafted requests only**, not with real clients or
   browsers. The origins that `setup-core.sh` allows for Element Desktop and Tauri apps
@@ -270,9 +269,70 @@ space); the server's unit tests.
 
 Open: level-1 padding on the wire, the test gaps in L10, `home-test.sh` (L11).
 
+## 4e. First run over real Tor (2026-11-14)
+
+Three Debian 13 VMs (`vm.py`, KVM) on one host, all on the real Tor network: core,
+relay (normal user), Tor front. Kit from `make-kit.sh` at `fd04b47`; the script fixes
+below were copied in by hand. Throwaway server name and keys, VMs deleted afterwards.
+
+Passed, in plan order:
+- Core `install` from the kit's README: all services active; Tor bootstraps; both
+  onions published (the relay fetched the ingress descriptor). A fresh
+  `apt-get update` fetched 16 index files over `tor+https`, a package download
+  worked; clearnet HTTPS and DNS time out.
+- Relay straight to the core (`add-client`, `add-front` of the core's own ingress,
+  `front-auth`, `add-device`): `curl 127.0.0.1:8008/_matrix/client/versions` → 200.
+  **First proof that Tor reaches the gateway socket through AppArmor.**
+- First account with the one-time token (2 s at level 1); `make-space.py
+  example-server.toml` (55 s at level 1).
+- Level 2: each request takes one 15 s window. Room creation outside a space,
+  joining the invite-only space and a plaintext message are refused, as configured.
+- Level 3 after reinstalling the relay with `--level 3`.
+- SSH over the admin onion with the admin client key (`torsocks ssh`); `lockdown`
+  given over that SSH; clearnet SSH closed; reboot over onion SSH; everything came
+  back, clearnet SSH still closed, the relay reconnected by itself.
+- Front: `setup-front.sh install` with its own ingress key; `add-front`,
+  `front-auth`, `remove-front` of the direct entry, `remove-client` of the relay's
+  direct key. The relay then connects only through the front: its stream goes to
+  the front's onion, a socat child on the front carries it.
+- Traffic on the relay's link to its Tor guard (`tcpdump` in the relay VM):
+  - level 3: 13.45 KB/s out and in, the same in idle seconds and during 50 s of
+    large uploads; ±4% in 5 s bins. Payload is 10.24 KB/s; the rest is Tor.
+  - level 2: one burst of exactly 8804 bytes out every 15 s, at second 0 of the
+    window (gateway clock), whether or not a request was waiting; the same inbound
+    one second later. Requests sent at other times left no trace of their own.
+    Between bursts only Tor's own traffic (≤ 1.1 KB per second).
+  - level 1: not checked.
+
+Found and fixed (details: `audit-2026-11-10.md`, last section):
+- `remove-client` did not cut off a client that already held the descriptor
+  (finding 17). It now restarts Tor. **Deployers: after `remove-client`, every
+  tunnel drops and reconnects.**
+- `setup-relay.sh front-auth` right after `install`: Tor never read the key (L12).
+- `setup-relay.sh install` again with another `--level` kept the old relay
+  running (L13).
+- The retention test failed on two harmless startup errors on this machine (§5).
+
+Checked, not a code bug:
+- Spec §6 was wrong: Tor puts all relay connections through one front on one
+  circuit to the core (audit L4). Spec corrected.
+- The first onion connection after a Tor start is often slower than the relay's
+  120 s timeout; the relay retries and the next try works (audit, last section).
+  Expect up to a few minutes after installing, restarting or `remove-client`.
+
+Also run: `update-upstream.sh --test-only` on `fd04b47`. The server's
+unit tests pass (`release::`, `sync::`: 11; `guard_tests::`: 2); all e2e suites
+pass (the retention suite after its fix).
+
+Still needed: a VPS run (§6), daily use (T7), level 1 on the wire, the front's
+`lockdown`.
+
 ## 5. Building and testing
 
-Build environment used so far: Ubuntu 24.04, Rust toolchain 1.98.1.
+Build environments used so far: Ubuntu 24.04, and Debian 13 (LLVM 19), Rust toolchain
+1.98.1. On machines with `/tmp` on tmpfs or
+with 4+ cores, a debug server logs two harmless startup errors from upstream code
+(`DEVNAME not found`, `mallctl: …`); the retention test skips them by name.
 - System packages: `libclang-dev` (or a versioned one such as `libclang-18-dev`),
   `liburing-dev`, `clang`, `pkg-config`, `build-essential`
 - `make-kit.sh` and `update-upstream.sh` use the newest `/usr/lib/llvm-*/lib`
@@ -312,8 +372,8 @@ Test VMs for the setup scripts: `optes/test/vm.py` (header: usage). `create` onc
 downloads the Debian 13 nocloud image, checks it against Debian's SHA512SUMS and
 prepares a clean disk (SSH key, larger disk). `start` boots a fresh copy each time;
 `--name` runs a second VM next to it (e.g. core and relay). Uses KVM when available.
-Tested 2026-11-14 without KVM: `create`, two VMs at once, `ssh`, `copy`, `stop`. Not
-tested with KVM. The setup scripts change firewall, sysctls, journald and apt sources:
+Tested 2026-11-14 without KVM: `create`, two VMs at once, `ssh`, `copy`, `stop`; and
+with KVM: `create` (4 minutes), three VMs at once (§4e). The setup scripts change firewall, sysctls, journald and apt sources:
 run them only in such a VM.
 
 **Run them with delayed release on as well as off.** A real bug, the room-ID collision,

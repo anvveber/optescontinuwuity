@@ -221,7 +221,16 @@ signature; a replayed old list fails the version check.
 
 ## 6. Front → core link
 
-v1: **one Tor circuit per relay connection**. No multiplexing at the front.
+v1: the front adds no multiplexing of its own. Each relay connection becomes
+one socat process and one Tor stream from the front to the core's ingress
+onion.
+
+**Tor shares one circuit among them.** Earlier versions of this section said
+"one Tor circuit per relay connection". Checked over real Tor on 2026-11-14
+(audit L4): the front's Tor put three streams to the core's onion (one relay
+tunnel and two test connections) on the same rendezvous circuit. A relay's
+own Tor does the same for streams to one front. Tor opens another circuit
+only when the first one is gone or too old for new streams.
 
 Why no front multiplexing: a network observer at the core sees one TLS
 connection to its Tor guard carrying all circuits; it can't separate them.
@@ -229,8 +238,12 @@ Separating circuits requires being the guard relay or the host. Against the
 host, multiplexing doesn't help (it terminates the tunnels). So the front stays
 a dumb pipe with no code, which is worth more than the small gain.
 
-What this leaves visible to the core's guard relay or host: how many relays are
-connected and when they connect. Level 4 removes the "when".
+What this leaves visible to the core's guard relay or host: when relays
+connect, and, from the volume on the circuit, roughly how many are connected
+through each front (at level 3 each adds a fixed rate). The host sees each
+tunnel anyway. Level 4 removes the "when". Because the circuit is shared, all
+tunnels through one front fail together when that circuit breaks, and share
+its bandwidth.
 
 ## 7. Not covered
 

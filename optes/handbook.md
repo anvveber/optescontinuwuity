@@ -4,8 +4,9 @@ A build spec for a hardened, metadata-minimizing Matrix homeserver reachable ove
 Tor, I2P, and Nym, with no public entry point and a modified client. Written as a
 build specification.
 
-Status (2026-11-10): phases 1 and 2 built and tested locally; nothing yet run on
-real VPSes or real Tor. Section 14 summarizes what changed from the original
+Status (2026-11-14): phases 1 and 2 built and tested locally; core, relay and a
+Tor front run in Debian 13 VMs over the real Tor network (`HANDOFF.md` §4e);
+nothing yet run on a real VPS. Section 14 summarizes what changed from the original
 design and where each piece lives. Sections 1–2 (threat model, limitations)
 still govern; the audit of 2026-11-10 (`audit-2026-11-10.md`) added
 limitations 6–8 and the front threat in 4.6.
@@ -176,11 +177,12 @@ reproducible script so the core rebuilds from encrypted backup + offline keys.
 - **No user data, no state.** Rebuilt from the setup script; burn and replace freely.
 - **Client authorization on Tor fronts** (default): only relays holding the
   front's key can connect. I2P fronts have none.
-- **Front→core link (decided):** one Tor circuit per relay connection, no
-  multiplexing at the front. A network observer at the core can't separate
-  circuits inside the Tor connection anyway, and the host terminates the tunnels;
-  so the front stays a plain socat pipe with no custom code
-  (`phase2-protocol-spec.md` §6).
+- **Front→core link (decided):** no multiplexing in the front's own code: one
+  Tor stream per relay connection. Tor itself puts these streams on one
+  shared circuit to the core (checked over real Tor, 2026-11-14). A network
+  observer at the core can't separate circuits inside the Tor connection
+  anyway, and the host terminates the tunnels; so the front stays a plain
+  socat pipe with no custom code (`phase2-protocol-spec.md` §6).
 
 ### 4.3 Client-to-core tunnel
 
@@ -526,13 +528,13 @@ thin.
 | Piece | State | Where |
 |---|---|---|
 | Verification of section 10 | done for phases 1–2 | `verification-notes.md` |
-| Core setup (Tor, sandboxing, firewall, config) | dry-run in a Debian 13 VM without Tor (2026-11-09, `HANDOFF.md` §4a); not run on a VPS or over real Tor | `setup-core.sh` |
+| Core setup (Tor, sandboxing, firewall, config) | dry-run in a Debian 13 VM without Tor (2026-11-09, `HANDOFF.md` §4a); 2026-11-14 in a Debian 13 VM over real Tor: install, apt over Tor, admin onion SSH, `lockdown`, reboot, `add-client`/`remove-client` (revocation now restarts Tor), `add-front`/`remove-front` (`HANDOFF.md` §4e). Not run on a VPS | `setup-core.sh` |
 | Delayed release patch | built, e2e tested | `delayed-release-spec.md`, `src/service/release/` |
 | `record_device_activity` (replaces the bouncer) | built, e2e tested | `bouncer-decision.md` |
 | Bouncer | **dropped** (covered by the above + relay) | `bouncer-decision.md` |
-| Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor) | `tunnel/`, `phase2-protocol-spec.md` |
-| Tor front setup | install dry-run in a Debian 13 VM without Tor (2026-11-09); its socat path tested via a SOCKS stand-in | `setup-front.sh --type tor` |
-| Relay setup (user machine) | install dry-run on Debian 13 without Tor (2026-11-09); not run on Fedora | `setup-relay.sh` |
+| Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor); 2026-11-14 over real Tor between VMs at levels 1–3, straight and through a front. Level 2 and 3 traffic shape checked on the relay's link to its Tor guard; level 1 not | `tunnel/`, `phase2-protocol-spec.md` |
+| Tor front setup | install dry-run in a Debian 13 VM without Tor (2026-11-09); 2026-11-14 in a Debian 13 VM over real Tor: install, a relay through it to the core, `add-client`/`remove-client`. Not tested: its `lockdown` | `setup-front.sh --type tor` |
+| Relay setup (user machine) | install dry-run on Debian 13 without Tor (2026-11-09); 2026-11-14 on Debian 13 in a VM over real Tor (two fixes: `front-auth` restarts Tor, a second `install` restarts the relay); not run on Fedora | `setup-relay.sh` |
 | Space auto-join, creation limits, template tool | built, e2e tested. 2026-11-14: a room is a space's channel only if it names the space (audit findings 14, 15); e2e tested, not with real clients | `spaces.md` |
 | `require_encryption` (plaintext messages refused, rooms encrypted by default) | built, e2e tested | `hardening.md` |
 | `hide_server_identity` | built, e2e tested | `hardening.md` |
@@ -545,7 +547,7 @@ thin.
 | `allow_pushers`, `allow_openid_tokens` | built, e2e tested | `hardening.md` |
 | Memory-only logs, no core dumps, front client auth by default, socket group by ingress mode | in the setup scripts; dry-run in a Debian 13 VM without Tor (2026-11-10) | `setup-core.sh`, `setup-front.sh` |
 | I2P front | install dry-run in a Debian 13 VM without I2P (2026-11-09): i2pd starts with the config. Open: DNS for reseeding is blocked by the firewall on systemd-resolved images (`HANDOFF.md` §4a). i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
-| Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c). The server binary still names the checkout directory; same binaries on two machines not checked | `make-kit.sh` |
+| Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c), and in VMs over real Tor (§4e). The server binary still names the checkout directory; same binaries on two machines not checked | `make-kit.sh` |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |
 
