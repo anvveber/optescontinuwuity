@@ -49,8 +49,19 @@ for _ in $(seq 1 60); do
   sleep 1
 done
 sleep 2
-if [[ $ok == yes ]] && ! sed 's/\x1b\[[0-9;]*m//g' "$work/server2.log" | grep -v "config::check" | grep -qE " (ERROR|WARN) |panicked"; then
+# Warnings and errors at startup, minus two that come from the machine, not
+# from the database (both upstream code):
+#  - "DEVNAME not found": the database is on a filesystem with no block
+#    device (/tmp on tmpfs); the storage probe gives up.
+#  - "mallctl: ...": jemalloc tuning of worker threads (4+ cores) failed;
+#    logged at ERROR in debug builds only.
+startup_problems() {
+  sed 's/\x1b\[[0-9;]*m//g' "$work/server2.log" | grep -v "config::check" \
+    | grep -vE "DEVNAME not found|ERROR conduwuit_core::error::log: mallctl: " \
+    | grep -E " (ERROR|WARN) |panicked"
+}
+if [[ $ok == yes ]] && ! startup_problems >/dev/null; then
   echo "PASS server restarts cleanly on the purged database"
 else
-  echo "FAIL restart after purge (ok=$ok)"; sed 's/\x1b\[[0-9;]*m//g' "$work/server2.log" | grep -v "config::check" | grep -E " (ERROR|WARN) |panicked" | head -10; exit 1
+  echo "FAIL restart after purge (ok=$ok)"; startup_problems | head -10; exit 1
 fi
