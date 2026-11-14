@@ -18,6 +18,13 @@
 //! Only changes *into* or *out of* the joined state count, so a profile
 //! update in a space doesn't re-join channels the user left.
 //!
+//! A room counts as a child only if the room itself says it belongs to the
+//! space: an `m.space.parent` event naming the space, or a restricted join
+//! rule that admits the space's members. Both need power in the child room.
+//! An `m.space.child` event alone is not enough: it needs power in the space
+//! only, so a space moderator could list any room there and then take a
+//! member out of that room by removing them from the space.
+//!
 //! The work runs in the background after the triggering event is stored.
 
 use std::sync::Arc;
@@ -32,9 +39,9 @@ use ruma::{
 	events::{
 		StateEventType, TimelineEventType,
 		room::member::{MembershipState, RoomMemberEventContent},
-		space::child::SpaceChildEventContent,
+		space::{child::SpaceChildEventContent, parent::SpaceParentEventContent},
 	},
-	room::RoomType,
+	room::{AllowRule, JoinRule, RoomType},
 };
 use serde_json::Value as JsonValue;
 
@@ -155,6 +162,10 @@ impl Service {
 					self.leave(&user, &child).await;
 				},
 			| Action::ChildAdded(child) => {
+				if !self.declares_parent(&child, space).await {
+					debug!(%space, %child, "space auto-join skipped: the room does not name the space");
+					return;
+				}
 				let members: Vec<OwnedUserId> = self
 					.services
 					.state_cache
@@ -175,7 +186,35 @@ impl Service {
 		)
 	}
 
-	/// Child rooms of a space (`m.space.child` events with a non-empty `via`).
+	/// Whether `child` itself says it is part of `space` (see the module
+	/// documentation).
+	async fn declares_parent(&self, child: &RoomId, space: &RoomId) -> bool {
+		// A removed parent has empty content, which does not parse.
+		if self
+			.services
+			.state_accessor
+			.room_state_get_content::<SpaceParentEventContent>(
+				child,
+				&StateEventType::SpaceParent,
+				space.as_str(),
+			)
+			.await
+			.is_ok_and(|parent| !parent.via.is_empty())
+		{
+			return true;
+		}
+
+		match self.services.state_accessor.get_join_rules(child).await {
+			| JoinRule::Restricted(rule) | JoinRule::KnockRestricted(rule) =>
+				rule.allow.iter().any(|allow| {
+					matches!(allow, AllowRule::RoomMembership(m) if m.room_id == space)
+				}),
+			| _ => false,
+		}
+	}
+
+	/// Child rooms of a space: `m.space.child` events with a non-empty `via`
+	/// whose room names the space in return.
 	async fn children(&self, space: &RoomId) -> Vec<OwnedRoomId> {
 		let Ok(shortstatehash) = self.services.state.get_room_shortstatehash(space).await else {
 			return Vec::new();
@@ -200,6 +239,7 @@ impl Service {
 			if pdu
 				.get_content::<SpaceChildEventContent>()
 				.is_ok_and(|c| !c.via.is_empty())
+				&& self.declares_parent(&child, space).await
 			{
 				children.push(child);
 			}

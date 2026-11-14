@@ -9,6 +9,21 @@ categories. This fork adds three config keys (all set by `setup-core.sh`):
 | `allow_space_creation = false` | Only server admins create top-level spaces ("servers"). |
 | `restrict_room_creation_to_spaces = true` | Non-admins create rooms only inside a space where they have the power to add rooms (power 50 by default = moderator), or DMs. |
 
+**Which rooms count as channels of a server.** A room listed in a space
+(`m.space.child`) is treated as its channel only if the room names the space
+in return: an `m.space.parent` event for the space, or a restricted join rule
+that admits the space's members. Listing a room needs power in the space only;
+the two things above need power in the room. Without this rule a moderator of
+a space could list any room there, then remove a member from the space, and
+the server would take that member out of the room as well.
+
+- Rooms made with `make-space.py` have both. A client that creates a room
+  "inside a space" has to send one of them anyway, or the server refuses the
+  creation for non-admins.
+- A room that existed before and is added to a server with a client's "add
+  existing room" is not joined automatically, and not left automatically,
+  unless it names the space. Members can still join it by hand.
+
 So: admins make servers; moderators of a server add channels and categories
 to it; everyone can DM. Clients that create rooms "inside a space" (Cinny,
 Element) send what the server needs; plain "create room" outside a space is
@@ -44,6 +59,8 @@ power level to 50. They can then add channels and categories to that space.
 - Leaving one channel while staying in the server works: you stay out of that
   channel until you rejoin it. Leaving and rejoining the whole server joins all
   channels again.
+- A channel that belongs to two servers is left when the user leaves one of
+  them, even if they are still in the other.
 - `is_direct` is trusted: a non-admin could create a "DM" and invite many
   people. Cheap to abuse only in the sense of creating group chats.
 

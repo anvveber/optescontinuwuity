@@ -150,6 +150,50 @@ check("moderator still cannot create a top-level space", status == 403, str(stat
 status, resp = create(bob, "bob-category", space=True, parent=server)
 check("moderator can create a category (sub-space) in the server", status == 200, str(status))
 
+# --- rooms that do not name the space are not its channels ------------------
+# Adding a child needs power in the space only. A moderator must not be able
+# to pull members into a room that way, or to take them out of one.
+carol, carol_id, _ = register("carol" + sfx, TOKEN)
+dave, dave_id, _ = register("dave" + sfx, TOKEN)
+call("POST", f"/_matrix/client/v3/rooms/{q(server)}/invite", {"user_id": carol_id}, admin)
+call("POST", f"/_matrix/client/v3/join/{q(server)}", {}, carol)
+check("carol joins the server and its channels", wait_until(lambda: open_rooms <= joined(carol)))
+
+# A private conversation between carol and dave. Bob (moderator) is not in it.
+status, resp = call("POST", "/_matrix/client/v3/createRoom",
+                    {"preset": "trusted_private_chat", "is_direct": True, "invite": [dave_id]}, carol)
+dm = resp.get("room_id")
+call("POST", f"/_matrix/client/v3/join/{q(dm)}", {}, dave)
+# An open room outside the server, made by the admin.
+status, resp = call("POST", "/_matrix/client/v3/createRoom", {"name": "elsewhere", "preset": "public_chat"}, admin)
+outside = resp.get("room_id")
+# A room bob invited carol to; she has not accepted.
+status, resp = create(bob, "bob-room", parent=server, private=True)
+bob_room = resp.get("room_id")
+call("POST", f"/_matrix/client/v3/rooms/{q(bob_room)}/invite", {"user_id": carol_id}, bob)
+status, resp = call("POST", "/_matrix/client/v3/createRoom",
+                    {"preset": "trusted_private_chat", "is_direct": True, "invite": [carol_id]}, bob)
+bob_dm = resp.get("room_id")
+
+check("moderator can list a foreign room as a child (the space allows it)",
+      add_child(bob, server, dm) == 200 and add_child(bob, server, outside) == 200
+      and add_child(bob, server, bob_dm) == 200)
+add_child(bob, server, bob_room)
+check("a channel of the server is still joined through an open invitation",
+      wait_until(lambda: bob_room in joined(carol)))
+time.sleep(2)  # the background work for the other three would have run by now
+check("members are not joined to an open room that does not name the space", outside not in joined(carol))
+check("an invitation to a room that does not name the space is not accepted for the member",
+      bob_dm not in joined(carol))
+
+status, _ = call("POST", f"/_matrix/client/v3/rooms/{q(server)}/kick", {"user_id": carol_id}, bob)
+check("moderator removes carol from the server", status == 200, str(status))
+check("removal from the server leaves its channels",
+      wait_until(lambda: not ((open_rooms | {bob_room}) & joined(carol))),
+      f"still in {len((open_rooms | {bob_room}) & joined(carol))}")
+check("removal from the server does not touch a room that does not name the space",
+      dm in joined(carol))
+
 # --- leaving ---------------------------------------------------------------
 call("POST", f"/_matrix/client/v3/rooms/{q(server)}/leave", {}, bob)
 ok = wait_until(lambda: not (open_rooms & joined(bob)))
