@@ -228,6 +228,11 @@ the wire, signed front list. The core end is a separate process,
 
 Last row is the residual weak point (limitations 3 and 7).
 
+The host can also read the software itself. Script copies, unit names and
+config keys show which software this is, and so lead to its public source.
+Binaries from `make-kit.sh` do not carry the builder's home directory, git
+remote or commit, with one known rest (`HANDOFF.md` §4c).
+
 **A compromised front can attack the core's location.** It holds an ingress
 client key, so it can connect to the core's onion as often as it likes, with a
 Tor client it controls and rendezvous points it picks. That is the starting
@@ -533,6 +538,7 @@ thin.
 | `allow_pushers`, `allow_openid_tokens` | built, e2e tested | `hardening.md` |
 | Memory-only logs, no core dumps, front client auth by default, socket group by ingress mode | in the setup scripts; dry-run in a Debian 13 VM without Tor (2026-11-10) | `setup-core.sh`, `setup-front.sh` |
 | I2P front | install dry-run in a Debian 13 VM without I2P (2026-11-09): i2pd starts with the config. Open: DNS for reseeding is blocked by the firewall on systemd-resolved images (`HANDOFF.md` §4a). i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
+| Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c). The server binary still names the checkout directory; same binaries on two machines not checked | `make-kit.sh` |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |
 

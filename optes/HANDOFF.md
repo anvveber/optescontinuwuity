@@ -1,7 +1,7 @@
 # optes — project state
 
-Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b). Read this first, then
-`optes/handbook.md` (design, threat model, §14 status).
+Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b) and 2026-11-14 (kit
+script: §4c). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -90,6 +90,7 @@ Everything else:
 - **Tools:**
   - `tools/make-space.py`: builds a whole server (space, categories, channels) from a TOML file
   - `update-upstream.sh`: rebases onto a new upstream tag and runs every test
+  - `make-kit.sh`: builds the release binaries and packs the deploy kit (§4c)
 - **Tests:** `optes/test/` (see §5)
   - `home-test.sh` is a user-level real-Tor trial kit, no longer the plan (see §6).
 
@@ -130,7 +131,7 @@ Bugs found and fixed (the scripts on `main` have the fixes):
 | core | client-auth files were written after Tor first started | written before Tor starts |
 | core | `status` said `nftables inactive`; `direct-ingress off` exited with status 1 after succeeding | fixed |
 | relay | the script noticed a missing `optes-keys` only after editing torrc | check moved to the start |
-| deploy kit | `relay/` had no `optes-keys`; `setup-front.sh` and `setup-relay.sh` were not executable | scripts are now mode 755 in the repo. The kit is packaged by hand: put `optes-keys` next to `optes-relay` |
+| deploy kit | `relay/` had no `optes-keys`; `setup-front.sh` and `setup-relay.sh` were not executable | scripts are now mode 755 in the repo. The kit was packaged by hand then; since 2026-11-14 `make-kit.sh` does it (§4c) |
 
 What passed after the fixes:
 - core: `install`, then continuwuity and optes-gateway running under their systemd
@@ -203,6 +204,48 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
 Open after the audit (not fixed): full vanguards on the core (6), device names visible
 to other members (12), low items L1 and L4–L7.
 
+## 4c. Kit script (2026-11-14)
+
+`optes/make-kit.sh` builds the release binaries and packs the kit. Layout and
+options: the header of the script. What it does besides copying files:
+
+- **No test build ships.** The tunnel is built without cargo features. Then the
+  script asks the built `optes-keys` to sign a plain-TCP front and stops if it
+  agrees. Checked both ways: a release build refuses, a `test-fronts` build signs.
+- **Build paths.** Cargo's directory, the toolchain's directory and the checkout
+  are mapped to `/cargo`, `/rust` and `/src`. The tunnel binaries then contain no
+  path of the build machine.
+  - Not solved: the server binary still names the checkout directory 10 times.
+    Its web pages are embedded together with their source paths (crate
+    `memory-serve`). The script warns. Build from a checkout in a directory with
+    a neutral name if that matters. This belongs to reproducible builds (audit L7).
+- **No git remote, no commit in the server binary.** continuwuity's build script
+  would record the URL of the remote `origin` and the commit. The kit build sets
+  fixed values; the server reports its version as `26.9.1 (kit)`. The kit's name
+  and README give the commit. A commit that changes no source needs no rebuild.
+- **Same input, same archive** (fixed order, owner and times in the tar file).
+  Whether two machines produce the same binaries is not checked.
+
+How it was tested (no Tor or I2P anywhere):
+- Every e2e suite of §5 against the release server binary, delayed release on
+  and off. `run-tunnel-e2e.sh` used the debug `test-fronts` tunnel build,
+  `run-socks-path-e2e.sh` the release tunnel build. Tunnel unit tests (22).
+- Debian 13.7 VM as in §4a, with a kit made by the script:
+  - `sha256sum -c SHA256SUMS`; scripts and binaries have mode 755.
+  - Core `install` with the command printed in the kit's README. `status`: all
+    services active. After a reboot: all active again.
+  - The kit's relay binary → SOCKS stand-in running as `debian-tor` →
+    `gateway.sock` → continuwuity, at levels 1 and 2. First account with the
+    one-time token. `make-space.py example-server.toml` through the tunnel
+    (7 minutes at level 2).
+  - Through the relay: a website `Origin` gets 403, a DNS-name `Host` gets 403,
+    `auth_metadata` is 404.
+  - `setup-relay.sh install`, `front-auth` and `status` as a normal user, from
+    the kit's `relay/` directory.
+- Not tested: `setup-front.sh` from the kit (the script has not changed since
+  §4b); `lockdown`; Fedora; the server's unit tests (`release::`, `sync::`,
+  `guard_tests::`), which need a debug build.
+
 ## 5. Building and testing
 
 Build environment used so far: Ubuntu 24.04, Rust toolchain 1.98.1.
@@ -216,10 +259,16 @@ Build environment used so far: Ubuntu 24.04, Rust toolchain 1.98.1.
 - A debug build plus the unit-test build needs about 25 GB in `target/`.
 
 ```
+optes/make-kit.sh                             # release build of everything + the deploy kit in target/kit/
 cargo build --release -p conduwuit            # → target/release/conduwuit (deploy as "continuwuity")
 (cd optes/tunnel && cargo build --release && cargo test)
 optes/update-upstream.sh --test-only          # builds debug + runs every e2e suite
 ```
+
+Binaries for a server come from `make-kit.sh`, not from a plain `cargo build`: a
+plain build records the build machine's paths and the git remote URL in the
+binaries (§4c). The release build alone needs about 3 GB in `target/` and took
+about 40 minutes on 2 cores.
 
 The tunnel has a second, test-only build (`cargo build --features test-fronts --target-dir
 target/test-fronts`): its relay can dial a plain TCP front. `run-tunnel-e2e.sh` needs it;
@@ -256,7 +305,7 @@ anonymous payment method ("decision E") is still open.
 
 Test order:
 1. **Done 2026-11-09 (§4a):** dry-run of all three scripts in a local Debian 13 VM.
-2. **Core:**
+2. **Core** (the kit's README has this command with the checksum filled in):
    ```
    setup-core.sh install --server-name <mkp224o>.onion --binary continuwuity \
      --sha256 <hex> --tunnel-bin-dir <dir>

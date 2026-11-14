@@ -17,6 +17,7 @@ Start with `HANDOFF.md` (project state), then `handbook.md` (design, threat mode
 | `setup-core.sh` | Core VPS (Debian 13) |
 | `setup-front.sh` | Front VPS, Tor or I2P (Debian 13) |
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
+| `make-kit.sh` | Build the release binaries and pack a deploy kit (`core/ front/ relay/ tools/`, README, checksums) |
 | `test/` | End-to-end tests (no Tor needed) |
 | `test/home-test.sh` | Try everything over real Tor on a machine you already use, as your normal user, no system changes |
 | `hardening.md` | `require_encryption`, `hide_server_identity`, the browser guard (`restrict_request_hosts`, `allowed_origins`), `allow_pushers`, `allow_openid_tokens`: what they do and don't cover |
