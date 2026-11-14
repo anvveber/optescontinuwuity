@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # setup-relay.sh — run optes-relay for your own user (Fedora or Debian).
-# 2026-11-09: install dry-run on Debian 13 without a working Tor network. Never
-# run on Fedora, never against real Tor. Read before running.
+# 2026-11-09: install dry-run on Debian 13 without a working Tor network.
+# 2026-11-14: install and front-auth on Debian 13 in a VM over real Tor, straight
+# to a core (no front). Never run on Fedora. Read before running.
 #
 # Usage (as your normal user; uses sudo only to install tor):
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \
@@ -110,7 +111,10 @@ RestartSec=5
 WantedBy=default.target
 EOF
   systemctl --user daemon-reload
-  systemctl --user enable --now optes-relay.service
+  systemctl --user enable optes-relay.service
+  # restart, not start: a second install (e.g. another --level) must replace
+  # a relay that is already running
+  systemctl --user restart optes-relay.service
 
   cat <<EOF
 
@@ -141,7 +145,11 @@ cmd_front_auth() {
   echo "${onion%.onion}:descriptor:x25519:$priv" | sudo tee "$file" >/dev/null
   sudo chown "$(tor_user):$(tor_user)" "$file"
   sudo chmod 600 "$file"
-  sudo systemctl reload tor
+  # Restart, not reload. On Debian "reload tor" is passed on to tor@default,
+  # and is lost if tor@default is still starting (for example right after
+  # install). Tor then never reads the key and cannot decrypt the front's
+  # descriptor. A restart always reads it.
+  sudo systemctl restart tor
   info "front auth stored"
 }
 
