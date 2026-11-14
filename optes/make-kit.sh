@@ -35,6 +35,15 @@
 set -euo pipefail
 umask 022
 
+# libclang for bindgen: the newest installed LLVM unless LIBCLANG_PATH is set
+# (Ubuntu 24.04: llvm-18, Debian 13: llvm-19).
+find_libclang() {
+  local d
+  for d in $(printf '%s\n' /usr/lib/llvm-*/lib | sort -t- -k2 -n -r); do
+    compgen -G "$d/libclang*.so*" > /dev/null && { echo "$d"; return; }
+  done
+}
+
 die()  { echo "ERROR: $*" >&2; exit 1; }
 warn() { echo "WARNING: $*" >&2; }
 info() { echo "==> $*"; }
@@ -75,7 +84,8 @@ kit=$out/$name
 # ---- build -----------------------------------------------------------------
 if [[ $build == yes ]]; then
   cargo_home=${CARGO_HOME:-$HOME/.cargo}
-  export LIBCLANG_PATH=${LIBCLANG_PATH:-/usr/lib/llvm-18/lib}
+  export LIBCLANG_PATH=${LIBCLANG_PATH:-$(find_libclang)}
+  [[ -n $LIBCLANG_PATH ]] || die "libclang not found: install libclang-dev or set LIBCLANG_PATH"
   export CARGO_INCREMENTAL=0
   # Keep build paths out of the binaries (panic messages and C asserts carry
   # source file names).

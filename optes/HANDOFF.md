@@ -273,8 +273,10 @@ Open: level-1 padding on the wire, the test gaps in L10, `home-test.sh` (L11).
 ## 5. Building and testing
 
 Build environment used so far: Ubuntu 24.04, Rust toolchain 1.98.1.
-- System packages: `libclang-18-dev`, `liburing-dev`
-- Environment: `LIBCLANG_PATH=/usr/lib/llvm-18/lib`
+- System packages: `libclang-dev` (or a versioned one such as `libclang-18-dev`),
+  `liburing-dev`, `clang`, `pkg-config`, `build-essential`
+- `make-kit.sh` and `update-upstream.sh` use the newest `/usr/lib/llvm-*/lib`
+  unless `LIBCLANG_PATH` is set
 - Release builds use `CARGO_INCREMENTAL=0`; the disk allowance is small, and
   `target/debug` may have to be deleted.
 - Binaries built here need glibc ≥ 2.39, so they run on Debian 13 but not Debian 12.
@@ -305,6 +307,14 @@ e2e suites (each prints PASS/FAIL lines and ends with ALL PASSED):
 - `run-browser-guard-e2e.sh` (on and off)
 - `run-tunnel-e2e.sh` (levels 1–3)
 - `run-socks-path-e2e.sh` (tor and i2p)
+
+Test VMs for the setup scripts: `optes/test/vm.py` (header: usage). `create` once
+downloads the Debian 13 nocloud image, checks it against Debian's SHA512SUMS and
+prepares a clean disk (SSH key, larger disk). `start` boots a fresh copy each time;
+`--name` runs a second VM next to it (e.g. core and relay). Uses KVM when available.
+Tested 2026-11-14 without KVM: `create`, two VMs at once, `ssh`, `copy`, `stop`. Not
+tested with KVM. The setup scripts change firewall, sysctls, journald and apt sources:
+run them only in such a VM.
 
 **Run them with delayed release on as well as off.** A real bug, the room-ID collision,
 only appeared with release on.
