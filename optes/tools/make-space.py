@@ -61,6 +61,11 @@ import uuid
 
 UNITS = {"s": 1, "m": 60, "h": 3600, "d": 86400, "w": 7 * 86400, "y": 365 * 86400}
 
+# Requests go straight to the homeserver address, never through a proxy.
+# Python would otherwise use http_proxy from the environment, also for
+# 127.0.0.1, and that proxy would get the login with the password.
+OPENER = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+
 
 def parse_duration_ms(value):
     """'30d' -> milliseconds. None or 'forever' -> None (keep forever)."""
@@ -85,11 +90,13 @@ class Matrix:
         if self.token:
             req.add_header("Authorization", "Bearer " + self.token)
         try:
-            with urllib.request.urlopen(req, timeout=180) as resp:
+            with OPENER.open(req, timeout=180) as resp:
                 return json.loads(resp.read() or b"{}")
         except urllib.error.HTTPError as err:
             detail = err.read().decode(errors="replace")
             sys.exit(f"{method} {path} failed: {err.code} {detail}")
+        except urllib.error.URLError as err:
+            sys.exit(f"cannot reach {self.base}: {err.reason}")
 
     def login(self, user, password):
         resp = self.call("POST", "/_matrix/client/v3/login", {
