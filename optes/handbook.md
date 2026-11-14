@@ -242,6 +242,13 @@ point of a guard-discovery attack on the core. What limits it:
   installed by `setup-core.sh`**; add it before the core runs for long.
 - Each front has its own ingress key (`setup-core.sh add-client <front>`). When
   a front is burned: `remove-front`, then `remove-client <front>`.
+  `remove-client` restarts Tor. A reload is not enough: Tor's client
+  authorization only encrypts the onion's descriptor, and a client that
+  already holds a decrypted descriptor keeps its introduction points and can
+  still connect (seen over real Tor, 2026-11-14). After the restart the
+  onion has new introduction points that only listed clients can learn.
+  Cost: every tunnel and admin SSH session drops; clients can need a few
+  minutes to reconnect while their cached descriptor is stale.
 - An attacker who never gets a front's key can't reach the ingress onion at
   all.
 

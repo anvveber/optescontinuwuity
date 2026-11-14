@@ -362,6 +362,18 @@ cmd_add_client() {
   echo "  $onion:descriptor:x25519:$CLIENT_PRIV"
 }
 
+# Restart Tor a few seconds from now, detached from this shell. A reload is
+# not enough to revoke a client key: a client that already holds the onion's
+# descriptor keeps its introduction points and can still connect. A restart
+# makes Tor pick new introduction points, so only clients that can decrypt
+# the new descriptor get in. Detached, because the admin usually runs this
+# over the admin onion, and the restart ends that SSH session.
+restart_tor_soon() {
+  # AccuracySec: timers may otherwise fire up to a minute late
+  systemd-run --quiet --on-active=3 --timer-property=AccuracySec=100ms \
+    --unit="optes-tor-restart-$(date +%s)" systemctl restart tor@default.service
+}
+
 cmd_remove_client() {
   local name=${1:-}
   valid_name "$name"
@@ -379,8 +391,9 @@ cmd_remove_client() {
     chmod 600 "$HS_FRONT/authorized_clients/locked.auth"
     info "no client left: front locked until the next add-client"
   fi
-  systemctl reload tor@default.service
   info "removed '$name'"
+  info "Tor restarts in 3 s to cut '$name' off: every connection through this front and admin SSH session drops"
+  restart_tor_soon
 }
 
 # Tor fronts: Tor delivers to a unix socket. I2P fronts: i2pd server tunnels

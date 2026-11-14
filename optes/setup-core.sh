@@ -960,6 +960,18 @@ cmd_add_client() {
   systemctl reload tor@default.service
 }
 
+# Restart Tor a few seconds from now, detached from this shell. A reload is
+# not enough to revoke a client key: a client that already holds the onion's
+# descriptor keeps its introduction points and can still connect. A restart
+# makes Tor pick new introduction points, so only clients that can decrypt
+# the new descriptor get in. Detached, because the admin usually runs this
+# over the admin onion, and the restart ends that SSH session.
+restart_tor_soon() {
+  # AccuracySec: timers may otherwise fire up to a minute late
+  systemd-run --quiet --on-active=3 --timer-property=AccuracySec=100ms \
+    --unit="optes-tor-restart-$(date +%s)" systemctl restart tor@default.service
+}
+
 cmd_remove_client() {
   local name=${1:-} service=ingress dir
   shift || true
@@ -978,9 +990,10 @@ cmd_remove_client() {
   rm -f "$dir/authorized_clients/$name.auth"
   # With no client left Tor would open the onion to everyone: lock it instead.
   lock_if_no_clients "$dir"
-  systemctl reload tor@default.service
   info "removed '$name' from $service"
   [[ -e $dir/authorized_clients/locked.auth ]] && info "no client left: $service onion locked until the next add-client"
+  info "Tor restarts in 3 s to cut '$name' off: every tunnel and admin SSH session drops and reconnects"
+  restart_tor_soon
   return 0
 }
 
