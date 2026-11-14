@@ -114,6 +114,19 @@ def wire_checks():
             expected = 4000 / TICK
             check(f"level 3 {d}: constant rate while idle",
                   abs(recent - expected) <= 2, f"{recent:.0f} frames in 4 s, expected {expected:.0f}")
+            # The same rate during the whole session, the 60 KB transfer
+            # included: no burst when there is data, no gap afterwards.
+            chunks = [(int(t), int(n)) for dd, t, n in rows if dd == d]
+            start = chunks[0][0]
+            per_second = {}
+            for t, n in chunks:
+                per_second[(t - start) // 1000] = per_second.get((t - start) // 1000, 0) + n / FRAME
+            whole = [per_second.get(i, 0) for i in range(1, max(per_second))]  # without the two ends
+            rate = 1000 / TICK
+            check(f"level 3 {d}: constant rate during the whole session",
+                  len(whole) >= 10 and max(whole) <= rate + 2 and min(whole) >= rate - 2,
+                  f"{len(whole)} s, {min(whole, default=0):.0f} to {max(whole, default=0):.0f} frames per second, "
+                  f"expected {rate:.0f}")
 
     if LEVEL == 2:
         # Idle: bursts only near window boundaries (+1 s for down).
@@ -133,6 +146,14 @@ def wire_checks():
                     per_window[k] = per_window.get(k, 0) + int(n) // FRAME
             check(f"level 2 {d}: every window sends >= 4 frames",
                   per_window and min(per_window.values()) >= 4, str(per_window))
+            # The whole session, the 60 KB transfer included, stays on the
+            # grid. Only the handshake (one frame each way, right after the
+            # connection opens) is sent at once.
+            opened = [int(t) for dd, t, n in rows if dd == "conn"][0]
+            later = [int(t) for dd, t, n in rows if dd == d and int(t) > opened + 1000]
+            off_grid = [t for t in later if min((t - offset) % w, w - (t - offset) % w) > 500]
+            check(f"level 2 {d}: nothing off the window grid during the whole session",
+                  len(later) >= 8 and not off_grid, f"{len(later)} chunks, {len(off_grid)} off-grid")
 
 
 wait_for_tunnel()
