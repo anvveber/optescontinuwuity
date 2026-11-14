@@ -526,13 +526,13 @@ thin.
 | Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor) | `tunnel/`, `phase2-protocol-spec.md` |
 | Tor front setup | install dry-run in a Debian 13 VM without Tor (2026-11-09); its socat path tested via a SOCKS stand-in | `setup-front.sh --type tor` |
 | Relay setup (user machine) | install dry-run on Debian 13 without Tor (2026-11-09); not run on Fedora | `setup-relay.sh` |
-| Space auto-join, creation limits, template tool | built, e2e tested | `spaces.md` |
+| Space auto-join, creation limits, template tool | built, e2e tested. 2026-11-14: a room is a space's channel only if it names the space (audit findings 14, 15); e2e tested, not with real clients | `spaces.md` |
 | `require_encryption` (plaintext messages refused, rooms encrypted by default) | built, e2e tested | `hardening.md` |
 | `hide_server_identity` | built, e2e tested | `hardening.md` |
 | Front-list renewal (weekly re-sign; relay refresh) | built, e2e tested | `phase2-protocol-spec.md` §5 |
 | Per-channel retention (MSC1763; whole events deleted) | built, e2e tested (incl. restart on purged DB) | `retention-design.md` |
 | Fuzzing of tunnel parsers (5 targets) | ~19M runs, no crashes (2026-10-25); not re-run after the protocol v2 changes (targets compile) | `tunnel/fuzz/` |
-| Audit of the fork's own parts | done 2026-11-10; findings and fixes listed | `audit-2026-11-10.md` |
+| Audit of the fork's own parts | done 2026-11-10; `space_autojoin`, `make-space.py` and the tests read on 2026-11-14; findings and fixes listed | `audit-2026-11-10.md` |
 | Tunnel protocol v2: handshake counter (no replay), gateway time for level-2 windows, onion/b32-only fronts | built, unit and e2e tested (no Tor) | `phase2-protocol-spec.md` §3.1, §4, §5 |
 | Browser guard (`restrict_request_hosts`, `allowed_origins`), OAuth off | built, e2e tested with crafted requests; not tested with real clients or browsers | `hardening.md` |
 | `allow_pushers`, `allow_openid_tokens` | built, e2e tested | `hardening.md` |

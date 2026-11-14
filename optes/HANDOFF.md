@@ -1,7 +1,7 @@
 # optes — project state
 
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b) and 2026-11-14 (kit
-script: §4c). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+script: §4c; review of spaces, template tool and tests: §4d). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -202,7 +202,7 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
   front after these changes; Fedora; the fuzz targets were only compiled.
 
 Open after the audit (not fixed): full vanguards on the core (6), device names visible
-to other members (12), low items L1 and L4–L7.
+to other members (12), low items L1 and L4–L7 (L7 partly done, §4c).
 
 ## 4c. Kit script (2026-11-14)
 
@@ -245,6 +245,30 @@ How it was tested (no Tor or I2P anywhere):
 - Not tested: `setup-front.sh` from the kit (the script has not changed since
   §4b); `lockdown`; Fedora; the server's unit tests (`release::`, `sync::`,
   `guard_tests::`), which need a debug build.
+
+## 4d. Review of 2026-11-14
+
+`space_autojoin`, `make-space.py` and the tests were read line by line. Findings
+14–16 and L9–L11 are in `audit-2026-11-10.md` (last section). What a deployer must
+know:
+
+- **A room is a channel of a space only if the room names the space**
+  (`m.space.parent`, or a restricted join rule for the space's members). Before,
+  a space moderator could remove a member from any room on the server, or join
+  members to rooms outside the space. Details and consequences: `spaces.md`.
+  This is a server change: it needs the new server binary.
+- **`make-space.py` never uses a proxy.** Before, `http_proxy` in the
+  environment sent the login, password included, to that proxy.
+- The tunnel test now checks the traffic shape of levels 2 and 3 over the
+  whole session, not only while idle.
+
+Tested: `run-spaces-e2e.sh` with new cases (they fail on the binary from before
+the fix and pass after it), with and without `RELEASE=15`; every other e2e
+suite again; `make-space.py` against a recording proxy. All with the release
+binaries. Not tested: real clients ("add existing room", room creation inside a
+space); the server's unit tests.
+
+Open: level-1 padding on the wire, the test gaps in L10, `home-test.sh` (L11).
 
 ## 5. Building and testing
 
