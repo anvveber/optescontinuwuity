@@ -547,7 +547,7 @@ thin.
 | `hide_server_identity` | built, e2e tested | `hardening.md` |
 | Front-list renewal (weekly re-sign; relay refresh) | built, e2e tested | `phase2-protocol-spec.md` §5 |
 | Per-channel retention (MSC1763; whole events deleted) | built, e2e tested (incl. restart on purged DB) | `retention-design.md` |
-| Fuzzing of tunnel parsers (6 targets) | 2026-11-15 on protocol v2: 15 minutes per target, ~137M runs, no crashes. New target `hello_counter`: real handshakes through the replay check | `tunnel/fuzz/` |
+| Fuzzing of tunnel parsers (6 targets) | 2026-11-15 on protocol v2: 15 minutes per target, ~136M runs, no crashes. New target `hello_counter`: real handshakes through the replay check | `tunnel/fuzz/` |
 | Audit of the fork's own parts | done 2026-11-10; `space_autojoin`, `make-space.py` and the tests read on 2026-11-14; findings and fixes listed | `audit-2026-11-10.md` |
 | Tunnel protocol v2: handshake counter (no replay), gateway time for level-2 windows, onion/b32-only fronts | built, unit and e2e tested (no Tor) | `phase2-protocol-spec.md` §3.1, §4, §5 |
 | Browser guard (`restrict_request_hosts`, `allowed_origins`), OAuth off | built, e2e tested with crafted requests; not tested with real clients or browsers | `hardening.md` |

@@ -84,7 +84,7 @@ Everything else:
   - A relay whose lists have all expired can still reach the gateway, but only to fetch a
     new list.
   - Fuzzing: 6 cargo-fuzz targets in `tunnel/fuzz/`. On protocol v2 (2026-11-15):
-    15 minutes each, ~137M runs, no crashes (`tunnel/fuzz/README.md`). The
+    15 minutes each, ~136M runs, no crashes (`tunnel/fuzz/README.md`). The
     gateway's replay check is in `src/replay.rs`, so a target can reach it.
 - **Setup scripts:**
   - `setup-core.sh` (install, add-client, add-device, add-front, remove-front,

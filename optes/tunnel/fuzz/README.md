@@ -47,4 +47,7 @@ Limit: random input can't produce a valid Noise handshake, so
 `gateway_handshake` reaches only the decryption of message 1. The hello
 decoding and the replay check after it are covered by `hello_counter`, which
 encrypts the hello itself. Not covered by fuzzing: the gateway's check that a
-device key is listed (a directory lookup), and the relay's own counter file.
+device key is listed (a directory lookup); what the gateway does with the
+hello's level (`hello_counter` varies it but checks nothing about it; the code
+maps unknown levels to the strictest one, see the unit tests); the relay's own
+counter file.
