@@ -1611,6 +1611,14 @@
 #
 #allow_openid_tokens = true
 
+# Show the display names of a user's devices (e.g. "Element Desktop:
+# Linux") to other users of this server, in their key queries. They name
+# the client and operating system. If false, other users see the device
+# ID instead; a user still sees the names of their own devices. Remote
+# servers are governed by `allow_device_name_federation`.
+#
+#show_device_names_to_others = true
+
 # Set this to true for continuwuity to compress HTTP response bodies using
 # zstd. This option does nothing if continuwuity was not built with
 # `zstd_compression` feature. Please be aware that enabling HTTP

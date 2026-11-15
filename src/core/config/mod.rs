@@ -1903,6 +1903,16 @@ pub struct Config {
 	#[serde(default = "true_fn")]
 	pub allow_openid_tokens: bool,
 
+	/// Show the display names of a user's devices (e.g. "Element Desktop:
+	/// Linux") to other users of this server, in their key queries. They name
+	/// the client and operating system. If false, other users see the device
+	/// ID instead; a user still sees the names of their own devices. Remote
+	/// servers are governed by `allow_device_name_federation`.
+	///
+	/// default: true
+	#[serde(default = "true_fn")]
+	pub show_device_names_to_others: bool,
+
 	/// Set this to true for continuwuity to compress HTTP response bodies using
 	/// zstd. This option does nothing if continuwuity was not built with
 	/// `zstd_compression` feature. Please be aware that enabling HTTP

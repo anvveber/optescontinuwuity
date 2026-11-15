@@ -163,7 +163,9 @@ pub(crate) async fn get_keys_route(
 		Some(sender_user),
 		&body.device_keys,
 		|u| u == sender_user,
-		true, // Always allow local users to see device names of other local users
+		// Own devices always; other local users' only if allowed
+		// (optescontinuwuity: show_device_names_to_others).
+		|u| u == sender_user || services.config.show_device_names_to_others,
 		body.timeout.unwrap_or(Duration::from_secs(10)),
 	)
 	.await
@@ -397,16 +399,17 @@ pub(crate) async fn get_key_changes_route(
 	))
 }
 
-pub(crate) async fn get_keys_helper<F>(
+pub(crate) async fn get_keys_helper<F, N>(
 	services: &Services,
 	sender_user: Option<&UserId>,
 	device_keys_input: &BTreeMap<OwnedUserId, Vec<OwnedDeviceId>>,
 	allowed_signatures: F,
-	include_display_names: bool,
+	include_display_names: N,
 	timeout: Duration,
 ) -> Result<get_keys::v3::Response>
 where
 	F: Fn(&UserId) -> bool + Send + Sync,
+	N: Fn(&UserId) -> bool + Send + Sync,
 {
 	let mut master_keys = BTreeMap::new();
 	let mut self_signing_keys = BTreeMap::new();
@@ -440,7 +443,7 @@ where
 							err!(Database("all_device_keys contained nonexistent device."))
 						})?;
 
-					add_unsigned_device_display_name(&mut keys, metadata, include_display_names)
+					add_unsigned_device_display_name(&mut keys, metadata, include_display_names(user_id))
 						.map_err(|_| err!(Database("invalid device keys in database")))?;
 
 					container.insert(device_id.clone(), keys);
@@ -462,7 +465,7 @@ where
 							)))
 						})?;
 
-					add_unsigned_device_display_name(&mut keys, metadata, include_display_names)
+					add_unsigned_device_display_name(&mut keys, metadata, include_display_names(user_id))
 						.map_err(|_| err!(Database("invalid device keys in database")))?;
 
 					container.insert(device_id.to_owned(), keys);
@@ -572,24 +575,25 @@ fn add_unsigned_device_display_name(
 	metadata: ruma::api::client::device::Device,
 	include_display_names: bool,
 ) -> serde_json::Result<()> {
-	if let Some(display_name) = metadata.display_name {
-		let mut object =
-			keys.deserialize_as_unchecked::<serde_json::Map<String, serde_json::Value>>()?;
-
-		let unsigned = object.entry("unsigned").or_insert_with(|| json!({}));
-		if let serde_json::Value::Object(unsigned_object) = unsigned {
-			if include_display_names {
-				unsigned_object.insert("device_display_name".to_owned(), display_name.into());
-			} else {
-				unsigned_object.insert(
-					"device_display_name".to_owned(),
-					Some(metadata.device_id.as_str().to_owned()).into(),
-				);
-			}
-		}
-
-		*keys = Raw::from_json(serde_json::value::to_raw_value(&object)?);
+	// Hidden names are replaced by the device ID even when the server has no
+	// name stored, so a name the client put into its own uploaded keys is
+	// covered too (optescontinuwuity: show_device_names_to_others).
+	if metadata.display_name.is_none() && include_display_names {
+		return Ok(());
 	}
+	let mut object =
+		keys.deserialize_as_unchecked::<serde_json::Map<String, serde_json::Value>>()?;
+
+	let unsigned = object.entry("unsigned").or_insert_with(|| json!({}));
+	if let serde_json::Value::Object(unsigned_object) = unsigned {
+		let shown = match metadata.display_name {
+			| Some(display_name) if include_display_names => display_name,
+			| _ => metadata.device_id.as_str().to_owned(),
+		};
+		unsigned_object.insert("device_display_name".to_owned(), shown.into());
+	}
+
+	*keys = Raw::from_json(serde_json::value::to_raw_value(&object)?);
 
 	Ok(())
 }

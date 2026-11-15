@@ -19,9 +19,9 @@
 #   setup-core.sh remove-origin <origin>
 #   setup-core.sh status
 #   setup-core.sh update --binary <path> --sha256 <hex> [--tunnel-bin-dir <dir>]
-#                         (from a new kit's core/: swap the programs, keep config,
-#                         database and keys; rolls back if the server does not
-#                         come up)
+#                         (from a new kit's core/: swap the programs, add config
+#                         keys newer than the install, keep database and keys;
+#                         rolls back if the server does not come up)
 #
 # Phase 2 (tunnel; needs --tunnel-bin-dir at install):
 #   setup-core.sh add-device <name> <device-public-key>    (relay allowed in)
@@ -487,6 +487,10 @@ $(origins_line)
 # third-party services). (optescontinuwuity patch)
 allow_pushers = false
 allow_openid_tokens = false
+
+# Other users see a device's ID, not its name ("Element Desktop: Linux"
+# names the client and OS). (optescontinuwuity patch)
+show_device_names_to_others = false
 
 # Logging and telemetry.
 log = "warn"
@@ -1143,6 +1147,32 @@ stop_services() {
 }
 
 CORE_PKGS=(tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades)
+
+# Config keys added after the first kits, with the value install writes and
+# the comment above it. update adds those an older config lacks, before the
+# [global.oauth] section; other lines are left alone.
+CONFIG_ADDED=(
+  'show_device_names_to_others = false|# Other users see device IDs, not device names (optescontinuwuity patch).'
+)
+
+config_add_missing() {
+  local entry line comment key
+  for entry in "${CONFIG_ADDED[@]}"; do
+    line=${entry%%|*}
+    comment=${entry#*|}
+    key=${line%% *}
+    grep -q "^$key = " "$CONF" && continue
+    grep -q '^\[global\.oauth\]$' "$CONF" || die "no [global.oauth] section in $CONF; add '$line' to [global] by hand"
+    awk -v c="$comment" -v l="$line" \
+      '/^\[global\.oauth\]$/ && !done { print c; print l; print ""; done = 1 } { print }' \
+      "$CONF" > "$CONF.new"
+    grep -q "^$key = " "$CONF.new" || die "could not add $key to $CONF"
+    chown root:"$SVC_USER" "$CONF.new"
+    chmod 640 "$CONF.new"
+    mv "$CONF.new" "$CONF"
+    info "config: added '$line'"
+  done
+}
 UPDATE_LOG=$UPDATE_DIR/log
 
 # Part 1, in the operator's session: checks and preparation. Nothing stops
@@ -1204,7 +1234,7 @@ cmd_update() {
   rm -rf "$UPDATE_DIR"
   install -d -m 0700 "$UPDATE_DIR/previous"
   local f
-  for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
+  for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN" "$CONF"; do
     [[ -e $f ]] && cp -a "$f" "$UPDATE_DIR/previous/"
   done
   touch "$UPDATE_DIR/previous.complete"
@@ -1244,6 +1274,7 @@ update_apply() {
   fi
   install_clock
   install_auto_updates
+  config_add_missing
   systemctl daemon-reload
 
   UPDATE_STAGE=started
@@ -1265,7 +1296,7 @@ update_rollback() {
   stop_services
   local f
   if [[ -e $UPDATE_DIR/previous.complete ]]; then
-    for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
+    for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN" "$CONF"; do
       [[ -e $UPDATE_DIR/previous/$(basename "$f") ]] && cp -a "$UPDATE_DIR/previous/$(basename "$f")" "$f"
     done
   fi

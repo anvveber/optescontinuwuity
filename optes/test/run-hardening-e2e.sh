@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# require_encryption and hide_server_identity against a throwaway server.
+# require_encryption, hide_server_identity and show_device_names_to_others
+# against a throwaway server.
 # Usage: run-hardening-e2e.sh <continuwuity-binary> <on|off>
 set -euo pipefail
 
@@ -9,7 +10,7 @@ here=$(cd "$(dirname "$0")" && pwd)
 work=$(mktemp -d)
 port=$((21000 + RANDOM % 1000))
 token=$(head -c 16 /dev/urandom | od -An -tx1 | tr -d ' \n')
-if [[ $mode == on ]]; then flag=true; else flag=false; fi
+if [[ $mode == on ]]; then flag=true; names=false; else flag=false; names=true; fi
 
 cat > "$work/config.toml" <<EOF
 [global]
@@ -25,6 +26,7 @@ allow_announcements_check = false
 log = "warn"
 require_encryption = $flag
 hide_server_identity = $flag
+show_device_names_to_others = $names
 EOF
 
 CONTINUWUITY_CONFIG="$work/config.toml" "$bin" > "$work/server.log" 2>&1 &

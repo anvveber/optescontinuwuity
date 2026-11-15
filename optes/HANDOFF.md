@@ -77,6 +77,7 @@ Server patches (in `src/`, config keys in `src/core/config/mod.rs` and `conduwui
 | `restrict_request_hosts`, `allowed_hosts`, `allowed_origins` | Browser guard: a website open in a user's browser can't use the server through the local relay (Host must be an IP, localhost or onion/i2p name; requests with an unlisted `Origin` are refused) | `src/router/request.rs` (`guard`), `src/router/layers.rs` |
 | `allow_pushers` | Off: push registrations are answered with success and not stored | `src/api/client/push.rs` |
 | `allow_openid_tokens` | Off: OpenID token requests are refused | `src/api/client/openid.rs` |
+| `show_device_names_to_others` | Off: other users see a device's ID, not its name (client and OS); the owner still sees it | `src/api/client/keys.rs` |
 
 Everything else:
 - **Tunnel:** `optes/tunnel/`, with binaries `optes-relay`, `optes-gateway` and `optes-keys`.
@@ -207,8 +208,9 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
   front after these changes; Fedora. The fuzz targets were only compiled then;
   they ran on 2026-11-15 (`tunnel/fuzz/README.md`).
 
-Open after the audit (not fixed): device names visible
-to other members (12), low items L1 and L4–L7 (L7 partly done, §4c).
+Open after the audit (not fixed): low items L1 and L4–L7 (L7 partly done, §4c;
+L5 done, §4g). Device names (12) are hidden since 2026-11-15
+(`show_device_names_to_others`, `hardening.md`).
 Finding 6 is accepted: the core uses Tor's built-in vanguards-lite only, not the
 full add-on (handbook §4.6).
 
@@ -436,8 +438,12 @@ change):
     erase them: the old copy, with events retention deletes later, stays in
     free disk space until it is overwritten (threat table, audit L1).
   - A leftover of an unfinished update (`in-progress`) blocks the next one.
-  - Not changed: config, keys, onions, Tor. A kit that needs a config change
-    says so in its README.
+  - Config: keys added to the server's config after the first kits are listed
+    in `CONFIG_ADDED` in `setup-core.sh`; `update` adds those a config lacks,
+    with the value `install` writes, before `[global.oauth]`. Nothing else in
+    the config changes. A rollback restores the config too. (Since 2026-11-15:
+    `show_device_names_to_others`.)
+  - Not changed: keys, onions, Tor.
   - Every tunnel drops and reconnects (the gateway restarts).
 - **Fronts** have no `update`: they hold no data. Replace a front with one
   built from the new kit.
@@ -472,8 +478,15 @@ registration token, config):
   services. `apt-get install --reinstall tor`: torrc and the AppArmor override
   kept, Tor up, the relay reconnected (after about 5 minutes). On a front:
   install from the new kit, upgrades over Tor.
-- Not tested: a real new server version (all kits had the same server
-  binary, so no database migration ran); `update` after `lockdown`; on a VPS;
+- 2026-11-15, with the device-name change: update from the kit of `da72e35`
+  (old server binary, config without `show_device_names_to_others`) to the
+  new kit. A real server version change: the new binary runs on the old
+  database. The option was added to the config; before, another user saw the
+  device name, after, the device ID; the owner still the name; every other
+  fingerprinted file unchanged. A broken-server update on a config without
+  the option: rolled back, config byte for byte as before.
+- Not tested: a new server version with a database migration (no kit so far
+  changes the schema); `update` after `lockdown`; on a VPS;
   a tor package that ships a changed torrc; the server's own signing key
   (its endpoint is off without federation; it lives in the database).
 - Seen once: a relay needed 36 minutes after the core's install to reach its

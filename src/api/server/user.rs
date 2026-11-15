@@ -95,7 +95,7 @@ pub(crate) async fn get_keys_route(
 		None,
 		&body.device_keys,
 		|u| u.server_name() == body.identity,
-		services.globals.allow_device_name_federation(),
+		|_| services.globals.allow_device_name_federation(),
 		Duration::from_secs(0),
 	)
 	.await?;

@@ -239,6 +239,7 @@ the wire, signed front list. The core end is a separate process,
 |----------------------------|-------------------------------------------------------------|
 | A front                    | someone connected, when, how much. No accounts, no content. It also holds a key to the core's ingress onion: see below. |
 | Observer at the core       | constant-rate Tor traffic.                                  |
+| Another member of the server | what Matrix shares with room members: membership, profile, devices (IDs, how many, when a new one appears). Not the device names (client and OS): `show_device_names_to_others = false`. |
 | Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). |
 | The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes, per check; forward moves add up over checks. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
 | Debian's mirrors (reached through Tor exits) | that a Tor client fetches Debian's package lists daily and some packages (unattended-upgrades on core and fronts, Debian's apt-daily timers); not who or where. The exit sees the same over HTTPS. |
@@ -570,6 +571,7 @@ thin.
 | Tunnel protocol v2: handshake counter (no replay), gateway time for level-2 windows, onion/b32-only fronts | built, unit and e2e tested (no Tor) | `phase2-protocol-spec.md` §3.1, §4, §5 |
 | Browser guard (`restrict_request_hosts`, `allowed_origins`), OAuth off | built, e2e tested with crafted requests; not tested with real clients or browsers | `hardening.md` |
 | `allow_pushers`, `allow_openid_tokens` | built, e2e tested | `hardening.md` |
+| `show_device_names_to_others` (device names hidden from other users) | built 2026-11-15, e2e tested (fails on the binary before the patch); in a VM: added to an older core's config by `update` | `hardening.md` |
 | Memory-only logs, no core dumps, front client auth by default, socket group by ingress mode | in the setup scripts; dry-run in a Debian 13 VM without Tor (2026-11-10) | `setup-core.sh`, `setup-front.sh` |
 | I2P front | install dry-run in a Debian 13 VM without I2P (2026-11-09): i2pd starts with the config. Open: DNS for reseeding is blocked by the firewall on systemd-resolved images (`HANDOFF.md` §4a). i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
 | Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c), and in VMs over real Tor (§4e). Since 2026-11-15 no build path in any binary; same binaries on two machines not checked | `make-kit.sh` |

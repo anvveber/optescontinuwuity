@@ -97,3 +97,23 @@ request one for integration managers and widgets, then send it there over the
 normal internet. With the option off the request is refused (403).
 
 Tests: `optes/test/run-browser-guard-e2e.sh target/debug/conduwuit on|off`.
+
+## `show_device_names_to_others = false`
+
+Every login is a device with a name the client picks, such as "Element
+Desktop: Linux" or "Element on iPhone": the client and the operating system.
+Upstream continuwuity hides it from other servers (`allow_device_name_federation`)
+but shows it to every user of the same server who asks for a user's
+encryption keys (`/keys/query`), which clients do for everyone they share an
+encrypted room with. With the option off, other users get the device ID in
+its place. This also replaces a name a client put into the keys it uploaded.
+A user still sees the names of their own devices (`/devices` and their own
+key query), so they can tell their sessions apart.
+
+Not covered: the device ID itself, the number of devices an account has, and
+when a new one appears (other members see all three; clients need them for
+encryption).
+
+Tests: `optes/test/run-hardening-e2e.sh target/debug/conduwuit on|off` (on:
+another user sees the device ID and neither name appears in the reply; off:
+the name; the owner sees the name in both).

@@ -1,8 +1,11 @@
 #!/usr/bin/env python3
-"""require_encryption and hide_server_identity, against a running server.
+"""require_encryption, hide_server_identity and show_device_names_to_others,
+against a running server.
 
 Usage: hardening_e2e.py <base_url> <registration_token> <first_run_token> <on|off>
-  on  = both options enabled; off = both disabled (checks upstream behaviour)
+  on  = require_encryption and hide_server_identity enabled,
+        show_device_names_to_others disabled;
+  off = the opposite (checks upstream behaviour)
 """
 
 import json
@@ -39,8 +42,10 @@ def check(name, ok, detail=""):
         FAILURES.append(name)
 
 
-def register(name, token):
+def register(name, token, device_name=None, full=False):
     body = {"username": name, "password": "pw-" + uuid.uuid4().hex}
+    if device_name:
+        body["initial_device_display_name"] = device_name
     status, resp = call("POST", "/_matrix/client/v3/register", body)
     if status == 401:
         body["auth"] = {"type": "m.login.registration_token", "token": token,
@@ -48,6 +53,8 @@ def register(name, token):
         status, resp = call("POST", "/_matrix/client/v3/register", body)
     if status != 200:
         sys.exit(f"register {name}: {status} {resp}")
+    if full:
+        return resp["access_token"], resp["user_id"], resp["device_id"]
     return resp["access_token"], resp["user_id"]
 
 
@@ -98,6 +105,37 @@ if status == 200:
     check("admin room still takes plaintext admin commands", status == 200, str(status))
 else:
     check("admin room found", False, str(status))
+
+# --- show_device_names_to_others -------------------------------------------
+NAME = "Element Desktop: Linux"
+CLIENT_NAME = "Name the client put in its own keys"
+alice, alice_id, alice_dev = register("alice" + sfx, TOKEN, NAME, full=True)
+bob, bob_id = register("bob" + sfx, TOKEN)
+status, _ = call("POST", "/_matrix/client/v3/keys/upload", {"device_keys": {
+    "user_id": alice_id, "device_id": alice_dev,
+    "algorithms": ["m.olm.v1.curve25519-aes-sha2", "m.megolm.v1.aes-sha2"],
+    "keys": {f"curve25519:{alice_dev}": "c" * 43, f"ed25519:{alice_dev}": "e" * 43},
+    "signatures": {alice_id: {f"ed25519:{alice_dev}": "s" * 86}},
+    "unsigned": {"device_display_name": CLIENT_NAME}}}, alice)
+check("device keys uploaded", status == 200, str(status))
+
+
+def shown_name(token):
+    status, resp = call("POST", "/_matrix/client/v3/keys/query", {"device_keys": {alice_id: []}}, token)
+    dev = resp.get("device_keys", {}).get(alice_id, {}).get(alice_dev)
+    if status != 200 or dev is None:
+        return None, json.dumps(resp)
+    return dev.get("unsigned", {}).get("device_display_name"), json.dumps(resp)
+
+
+name, raw = shown_name(bob)
+if ON:
+    check("another user sees the device ID, not the name", name == alice_dev, str(name))
+    check("neither name appears anywhere in the reply", NAME not in raw and CLIENT_NAME not in raw)
+else:
+    check("(off) another user sees the device name", name == NAME, str(name))
+name, _ = shown_name(alice)
+check("the owner sees the name of their own device", name == NAME, str(name))
 
 # --- hide_server_identity --------------------------------------------------
 for path in ("/_continuwuity/server_version", "/", "/_continuwuity/about",
