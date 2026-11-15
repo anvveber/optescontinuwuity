@@ -39,6 +39,8 @@ run_tests() {
   echo "==> unit tests (patches)"
   cargo test -q -p conduwuit_service --features url_preview --lib -- release:: sync::
   cargo test -q -p conduwuit_router -p conduwuit_service --features conduwuit_service/url_preview --lib -- guard_tests::
+  echo "==> clock tool (decision rule)"
+  optes/test/run-clock-decide-test.sh
   echo "==> end-to-end"
   optes/test/run-e2e.sh target/debug/conduwuit 15
   optes/test/run-e2e.sh target/debug/conduwuit 0

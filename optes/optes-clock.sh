@@ -32,9 +32,12 @@
 #     The old descriptor keeps working, so this matters only if Tor restarts
 #     (or `remove-client` runs) in that time; then the onion is unreachable
 #     until that moment. Steps forward are safe. (Tested in a VM, 2026-11-15.)
-#   - Never earlier than the start of the consensus Tor has on disk: that
-#     document is signed by Tor's directory authorities and can't be from the
-#     future.
+#   - Never more than an hour earlier than the start of the consensus Tor has
+#     on disk: that document is signed by Tor's directory authorities, so it
+#     can't be much from the future.
+# Exit status: 0 done; 1 no usable answer or sources disagree (the timer's
+# unit retries in 20 minutes); 3 refused by a limit above (no retry: that
+# waits for the operator).
 # Sources: /etc/optes-clock/sources, one onion address per line.
 # Result of the last check: /run/optes-clock/last (memory only).
 #
@@ -181,9 +184,9 @@ cmd_check() {
       local target floor
       target=$(( $(date +%s) + value ))
       floor=$(consensus_start)
-      if [[ -n $floor ]] && (( target < floor )); then
-        record "WARNING: refused: the sources put the time before Tor's consensus ($(date -u -d "@$floor" +%FT%TZ))"
-        exit 1
+      if [[ -n $floor ]] && (( target < floor - 3600 )); then
+        record "WARNING: refused: the sources put the time more than an hour before Tor's consensus ($(date -u -d "@$floor" +%FT%TZ))"
+        exit 3
       fi
       local before
       before=$(date +%s)
@@ -197,7 +200,9 @@ cmd_check() {
       ;;
     *)
       record "WARNING: clock not changed: $value ($answered of ${#onions[@]} sources answered)"
-      exit 1
+      # Too few answers or disagreement: worth another try. A limit: not.
+      [[ $value == only* || $value == "sources disagree"* ]] && exit 1
+      exit 3
       ;;
   esac
 }

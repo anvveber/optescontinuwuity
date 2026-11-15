@@ -112,8 +112,10 @@ Wants=tor@default.service
 Type=oneshot
 ExecStart=$CLOCK_BIN check
 # No answer yet (Tor still starting) or sources disagree: try again later.
+# Exit 3 = refused by a limit (waits for the operator): no retry.
 Restart=on-failure
 RestartSec=20min
+RestartPreventExitStatus=3
 UNIT
   cat > /etc/systemd/system/optes-clock.timer <<UNIT
 # Written by $(basename "$0")

@@ -162,12 +162,16 @@ entry point; clients encrypt all the way to the core.**
   four of Debian's onion services for the time (HTTP `Date` header; the onion
   address authenticates the answer, so no certificate or correct clock is
   needed). With 3 or more answers that agree, the clock is stepped if it is
-  more than 10 s off: forward up to 1 day, back up to 30 minutes. A larger step
+  more than 10 s off: forward up to 1 day, back up to 30 minutes, per check
+  (forward moves add up: two checks can move it 2 days, where Tor stops). A larger step
   back needs `optes-clock check --allow-back`, because it can make the host's
   own onions unreachable for up to that long (Tor's directories refuse the
   onion's new descriptors until real time passes the old clock; checked in a
   VM). A clock 2 or more days ahead stops Tor itself; then nothing answers,
-  `status` warns, and the clock must be set on the provider's console.
+  `status` warns, and the clock must be set on the provider's console. That is
+  a large step back: afterwards the host's onions can stay unreachable for a
+  while (in a VM after up to 3 days ahead: still unreachable when the test
+  ended; how long it lasts was not measured).
 - **Minimize stored metadata.** Media deleted after 30 days. No per-device
   last-seen time or IP (`record_device_activity = false`). No push tokens
   (`allow_pushers = false`). Logs at warn level, kept in memory only
@@ -236,7 +240,7 @@ the wire, signed front list. The core end is a separate process,
 | A front                    | someone connected, when, how much. No accounts, no content. It also holds a key to the core's ingress onion: see below. |
 | Observer at the core       | constant-rate Tor traffic.                                  |
 | Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). |
-| The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes per check. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
+| The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes, per check; forward moves add up over checks. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
 | Core's VPS host            | accounts, rooms, metadata. Content stays E2E-encrypted only against a host that just reads (limitation 7). The front-list signing key and gateway key are on its disk, so it can publish its own fronts; relays still only dial onion / b32.i2p addresses, so this gives it no user IP. |
 
 Last row is the residual weak point (limitations 3 and 7).

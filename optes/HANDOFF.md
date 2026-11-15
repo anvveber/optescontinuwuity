@@ -367,9 +367,15 @@ and Tor's own clock complaints. What a deployer must know:
   descriptor keeps working, so only a Tor restart (or `remove-client`) in that
   time makes the onion unreachable. `status` prints until when.
 - **2 or more days ahead, Tor itself fails** and nothing can answer. Set the
-  clock on the provider's console. Measured: Tor works up to at least 1 day
-  behind and 1 day ahead; at 2 and 3 days ahead it does not finish
-  bootstrapping. More than 1 day behind was not measured.
+  clock on the provider's console. That is a large step back, so afterwards
+  the host's onions can stay unreachable for a while (not measured how long).
+  Measured with a plain Tor client started with a wrong clock: it bootstraps
+  and reaches onions from 1 day behind to 1 day ahead; at 2 and 3 days ahead
+  it does not finish bootstrapping. Not measured: more than 1 day behind, and
+  whether a host's own onion stays reachable while its clock is that far off.
+- **A refused check is not retried** (exit 3: a limit was hit, it waits for
+  the operator). No usable answer or disagreeing sources (exit 1) is retried
+  after 20 minutes.
 - **A step moves the gateway's level-2 grid.** A relay connected before the step
   stays on the old grid until it reconnects. Tor also logs "clock just jumped"
   and rebuilds its circuits (seen after steps of 15 minutes and more); the
@@ -379,20 +385,29 @@ How it was tested (Debian 13 VMs, real Tor, kit from `make-kit.sh` with this
 change):
 - Decision rule: `test/run-clock-decide-test.sh` (fixed samples: too few,
   slow, disagreeing, malformed, each limit).
-- Sources: the four onions answered within 1–12 s once a circuit was warm; the
-  first request after a Tor start often takes much longer, hence a warm-up
-  request per source and all sources at once.
+- Sources: the four onions answered, mostly within 1–12 s once a circuit was
+  warm, sometimes 30–120 s; the first request after a Tor start often takes
+  longer. Hence a warm-up request per source, only answers under 6 s count,
+  and all sources are asked at once.
 - Core with a relay connected through a front: offsets 0 and 5 s left alone;
   5 min behind, 10 min ahead, 2 h and 1 day in both directions corrected to
   within 1 s; the relay got 200 after each. (This ran before the 30-minute
   limit existed; with it, 2 h and 1 day ahead need `--allow-back`.)
 - 3 days ahead: no source answered (all at once: 3 minutes), clock untouched,
-  `status` warned. Afterwards the core's onion stayed unreachable: its earlier
-  uploads, made while its clock was up to 3 days ahead, carried higher
-  numbers. This is the case the 30-minute limit avoids. Not waited out.
+  `status` warned. Afterwards the core's onion stayed unreachable: all 30
+  descriptor uploads in 5 minutes were refused. Most likely its uploads while
+  the clock was 1 or 3 days ahead (earlier in the same run) carried higher
+  numbers; which phase did it was not measured. This is the case the
+  30-minute limit avoids. Not waited out.
 - Front: 15 minutes behind corrected; 40 minutes ahead refused, then corrected
   with `--allow-back`; 10 minutes ahead corrected with the warning; timer
   active after a reboot and the check ran.
+- The timer's unit, from the final kit on a fresh core: right after install
+  only 1 of 4 sources answered fast enough (a fresh Tor is slow), exit 1, the
+  unit set itself to retry; 40 minutes ahead: exit 3, unit failed, no retry; a
+  made-up onion as the only source: exit 1, retry. Tor's consensus on disk
+  started 1.5 hours before real time there. The consensus check never refused
+  anything in these runs.
 - Not tested: after `lockdown`; on a VPS; a VPS's own clock behaviour (drift,
   wrong time at boot).
 
@@ -430,6 +445,7 @@ target/test-fronts`): its relay can dial a plain TCP front. `run-tunnel-e2e.sh` 
 `run-socks-path-e2e.sh` needs the normal build. `update-upstream.sh` builds both.
 
 e2e suites (each prints PASS/FAIL lines and ends with ALL PASSED):
+- `run-clock-decide-test.sh` (the clock tool's decision rule, no network)
 - `run-e2e.sh` (delayed release, at 15 s and at 0)
 - `run-spaces-e2e.sh` and `run-retention-e2e.sh` (with and without `RELEASE=15`)
 - `run-hardening-e2e.sh` (on and off)
