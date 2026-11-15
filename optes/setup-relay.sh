@@ -1,8 +1,8 @@
 #!/usr/bin/env bash
 # setup-relay.sh — run optes-relay for your own user (Fedora or Debian).
 # 2026-11-09: install dry-run on Debian 13 without a working Tor network.
-# 2026-11-14: install and front-auth on Debian 13 in a VM over real Tor, straight
-# to a core (no front). Never run on Fedora. Read before running.
+# 2026-11-14: on Debian 13 in a VM over real Tor, straight to a core and through
+# a front (HANDOFF.md §4e). Never run on Fedora. Read before running.
 #
 # Usage (as your normal user; uses sudo only to install tor):
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \

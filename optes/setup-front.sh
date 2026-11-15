@@ -1,7 +1,8 @@
 #!/usr/bin/env bash
 # setup-front.sh — a disposable Tor or I2P front for the private Matrix core.
 # Debian 13. 2026-11-09: install dry-run in a Debian 13 VM (tor and i2p types)
-# without a working Tor or I2P network. Never run against the real networks.
+# without a working Tor or I2P network. 2026-11-14: --type tor in a Debian 13 VM
+# over real Tor (HANDOFF.md §4e). Never run on a VPS or on the real I2P network.
 # Read before running.
 #
 # A front is a blind byte pipe: relays connect to the front's onion service;

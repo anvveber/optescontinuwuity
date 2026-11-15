@@ -4,7 +4,8 @@
 # only through Tor onion services with client authorization.
 #
 # Written 2026-10-24. 2026-11-09: install dry-run in a Debian 13 VM without a
-# working Tor network. Never run against real Tor. Read the whole script first.
+# working Tor network. 2026-11-14: in a Debian 13 VM over real Tor (HANDOFF.md
+# §4e). Never run on a VPS. Read the whole script first.
 #
 # Usage:
 #   setup-core.sh install --server-name <56chars>.onion \

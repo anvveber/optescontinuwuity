@@ -399,6 +399,8 @@ anonymous payment method ("decision E") is still open.
 
 Test order:
 1. **Done 2026-11-09 (§4a):** dry-run of all three scripts in a local Debian 13 VM.
+   **Done 2026-11-14 (§4e):** steps 2–4 below in Debian 13 VMs over real Tor; on a
+   VPS they are still to do.
 2. **Core** (the kit's README has this command with the checksum filled in):
    ```
    setup-core.sh install --server-name <mkp224o>.onion --binary continuwuity \
