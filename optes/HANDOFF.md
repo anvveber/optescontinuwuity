@@ -3,7 +3,7 @@
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
-fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g; backups: §4h). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -90,7 +90,7 @@ Everything else:
 - **Setup scripts:**
   - `setup-core.sh` (install, add-client, add-device, add-front, remove-front,
     renew-front-list, direct-ingress, allow-origin, remove-origin, lockdown, status,
-    update)
+    update, backup-key, backup, restore)
   - `setup-front.sh`
   - `optes-clock.sh`: the clock of core and fronts over Tor (§4f); installed by
     both setup scripts, so it must be next to them
@@ -492,6 +492,64 @@ registration token, config):
   (its endpoint is off without federation; it lives in the database).
 - Seen once: a relay needed 36 minutes after the core's install to reach its
   onion (the core's descriptor uploads were accepted; Tor network delay).
+
+## 4h. Backups (2026-11-15)
+
+Without a backup, a lost VPS loses everything: accounts, rooms, the server's
+signing key, both onions, the gateway and front-list keys, the relays' device
+keys.
+
+- **Key, once, on the operator's own machine:** `age-keygen -o core-backup.key`
+  (Debian/Ubuntu package `age`). Keep `core-backup.key` offline. Give the
+  core the public key it prints: `setup-core.sh backup-key age1...`. The core
+  can encrypt backups but never decrypt them.
+- **Backup, from the operator's machine:**
+  `torsocks ssh root@<admin>.onion 'optes-setup-core backup --out -' > core-$(date +%F).age`
+  The server stops while the files are read (about a second for a small
+  database); Tor and the gateway keep running. The encrypted file exists on
+  the core only while it is sent, then it is deleted.
+- **What is in it:** `/var/lib/continuwuity` (database, signing key),
+  `/etc/continuwuity` (config, registration token), both onion directories
+  (keys, client lists), `/etc/optes` (gateway and list keys, devices, fronts,
+  front list), `/var/lib/optes-gateway` (replay counters), allowed origins and
+  the direct-ingress setting. Not in it: programs and units (from the kit),
+  firewall, apt and clearnet-SSH state (from the new machine).
+- **Restore onto a new VPS:**
+  1. `setup-core.sh install` from a kit with the **same** `--server-name`.
+  2. From the operator's machine:
+     `age -d -i core-backup.key core-….age | torsocks ssh root@<new admin>.onion 'cd <kit>/core && ./setup-core.sh restore -'`
+  3. It checks the backup (only the expected paths, the same server name),
+     then runs as the systemd unit `optes-restore`: stops gateway, server and
+     Tor, puts the backup's files in place, starts everything, checks that
+     the server answers. The new machine then has the **old** onions: the SSH
+     session over the new admin onion drops; log in again over the old admin
+     onion with the old admin key. Fronts and relays need no change.
+  4. If the server does not come up, the new machine's own files go back.
+  - The old core must be off: two cores with the same onion keys compete.
+  - Replay counters are as old as the backup. A front that recorded a
+    relay's handshake after the backup could replay it until that relay
+    connects again (its counter is then higher). Low risk; relays reconnect
+    often.
+- **Not automatic.** There is no timer: the encrypted file must reach the
+  operator anyway, so the operator runs the command (or a cron job on their
+  machine).
+
+How it was tested (Debian 13 VMs over real Tor, 2026-11-15): core A with a
+relay straight to it and two users; `backup-key`; `backup --out -` over SSH
+(1 s, 1.4 MB, no user name readable in it); decrypted with `age` on another
+machine; core B installed with the same server name; `restore -` over SSH: 7
+s; B then had A's ingress onion, both users (device names still hidden from
+others), and all 16 fingerprinted key and config files equal to A's. A shut
+down: the relay, which knew only A's onion, reached B after 3 minutes, and a
+user logged in through it. A restore of a backup with a broken database:
+rolled back after 5 minutes, B unchanged. A backup for another server name:
+refused before anything changed. Found and fixed during the test:
+`backup-key` changed the group of `/etc/optes`, which would have stopped the
+gateway at its next start.
+
+Not tested: backup and restore after `lockdown` (over the admin onions; the
+commands are the same), on a VPS, a large database, restore with fronts in
+use.
 
 ## 5. Building and testing
 

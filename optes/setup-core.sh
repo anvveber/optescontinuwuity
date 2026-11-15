@@ -22,6 +22,10 @@
 #                         (from a new kit's core/: swap the programs, add config
 #                         keys newer than the install, keep database and keys;
 #                         rolls back if the server does not come up)
+#   setup-core.sh backup-key <age public key>   (backups are encrypted to it)
+#   setup-core.sh backup --out -|<file>       (encrypted; "-" = stdout, for ssh)
+#   setup-core.sh restore <backup.tar>|-     (decrypted; onto a fresh install
+#                         with the same --server-name)
 #
 # Phase 2 (tunnel; needs --tunnel-bin-dir at install):
 #   setup-core.sh add-device <name> <device-public-key>    (relay allowed in)
@@ -345,7 +349,7 @@ cmd_install() {
   info "Installing packages (clearnet apt, first and only time)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades
+  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades age
 
   info "Kernel hardening sysctls"
   {
@@ -1146,7 +1150,7 @@ stop_services() {
   systemctl stop continuwuity.service
 }
 
-CORE_PKGS=(tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades)
+CORE_PKGS=(tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades age)
 
 # Config keys added after the first kits, with the value install writes and
 # the comment above it. update adds those an older config lacks, before the
@@ -1318,6 +1322,210 @@ update_rollback() {
   exit 2
 }
 
+# ---- backup and restore ------------------------------------------------------
+BACKUP_RECIPIENTS=$STATE_DIR/backup-recipients
+BACKUP_DIR=/var/lib/optes-backup
+RESTORE_DIR=/var/lib/optes-restore
+# What a backup holds, relative to /. Everything needed to rebuild the core on
+# a fresh install with the same server name. Not in it: programs, units,
+# firewall and apt settings (the install makes them), clearnet-SSH state.
+BACKUP_PATHS=(
+  var/lib/continuwuity
+  etc/continuwuity
+  var/lib/tor/matrix_ingress
+  var/lib/tor/admin_ssh
+  etc/optes
+  var/lib/optes-gateway
+  etc/matrix-core/allowed_origins
+  etc/matrix-core/direct_ingress
+)
+
+# The age public key(s) backups are encrypted to. The matching private key
+# stays offline with the operator; the core can't decrypt its own backups.
+cmd_backup_key() {
+  local key=${1:-}
+  [[ $key =~ ^age1[02-9ac-hj-np-z]{58}$ ]] || die "give an age public key (age1..., from: age-keygen -o core-backup.key)"
+  [[ -d $STATE_DIR ]] || die "no core installed here"
+  touch "$BACKUP_RECIPIENTS"
+  chmod 600 "$BACKUP_RECIPIENTS"
+  grep -qxF "$key" "$BACKUP_RECIPIENTS" || echo "$key" >> "$BACKUP_RECIPIENTS"
+  info "backups are encrypted to: $(tr '\n' ' ' < "$BACKUP_RECIPIENTS")"
+}
+
+# Packs and encrypts. The server stops while the files are read (seconds), so
+# the database is consistent; Tor and the gateway keep running.
+#   --out -     write the encrypted backup to stdout (meant for:
+#               torsocks ssh root@<admin>.onion 'optes-setup-core backup --out -' > core.age)
+#   --out FILE  write it to FILE
+cmd_backup() {
+  local out=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --out) out=${2:-}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [[ -n $out ]] || die "--out - (stdout) or --out <file>"
+  [[ -f $CONF ]] || die "no core installed here"
+  [[ -s $BACKUP_RECIPIENTS ]] || die "no backup key yet: setup-core.sh backup-key <age public key>"
+  command -v age > /dev/null || die "age is not installed (apt-get install age)"
+  local p
+  for p in "${BACKUP_PATHS[@]}"; do
+    [[ -e /$p ]] || die "missing /$p; is this a complete core?"
+  done
+
+  install -d -m 0700 "$BACKUP_DIR"
+  local tmp server_name
+  tmp=$(mktemp "$BACKUP_DIR/core-XXXXXX.age")
+  server_name=$(sed -n 's/^server_name = "\(.*\)"$/\1/p' "$CONF")
+  printf 'optes core backup\nserver_name=%s\ncreated=%s\n' "$server_name" "$(date -u +%FT%TZ)" \
+    > "$BACKUP_DIR/manifest"
+
+  info "Stopping the server while the files are read" >&2
+  systemctl stop continuwuity.service
+  local rc=0
+  tar -C / --create --file - -- \
+      "${BACKUP_DIR#/}/manifest" "${BACKUP_PATHS[@]}" 2>/dev/null \
+    | age --encrypt -R "$BACKUP_RECIPIENTS" > "$tmp" || rc=$?
+  systemctl start continuwuity.service
+  rm -f "$BACKUP_DIR/manifest"
+  (( rc == 0 )) || { rm -f "$tmp"; die "backup failed (tar or age, status $rc)"; }
+  server_answers 120 || warn "the server did not answer again within 2 minutes; check: systemctl status continuwuity"
+
+  if [[ $out == - ]]; then
+    cat "$tmp"
+    rm -f "$tmp"
+    info "backup written to stdout ($(date -u +%FT%TZ))" >&2
+  else
+    mv "$tmp" "$out"
+    info "backup written to $out" >&2
+  fi
+}
+
+# Part 1, in the operator's session: reads the decrypted backup (a tar file,
+# or - for stdin), checks it, and unpacks it to a staging directory. Part 2
+# (restore_apply) runs as a systemd unit, because it brings back the old
+# onions, which ends an SSH session over the admin onion.
+#   age -d -i core-backup.key core.age | torsocks ssh root@<admin>.onion \
+#     'cd <kit>/core && ./setup-core.sh restore -'
+cmd_restore() {
+  local src=${1:-}
+  [[ -n $src ]] || die "restore <decrypted backup.tar> (or - for stdin)"
+  [[ -f $CONF && -x $BIN ]] || die "install first (with the same --server-name as the backup)"
+  [[ ! -e $RESTORE_DIR/in-progress ]] || die "an earlier restore did not finish ($RESTORE_DIR, log: $RESTORE_DIR/log)"
+  rm -rf "$RESTORE_DIR"
+  install -d -m 0700 "$RESTORE_DIR" "$RESTORE_DIR/new"
+  if [[ $src == - ]]; then
+    cat > "$RESTORE_DIR/backup.tar"
+  else
+    cp "$src" "$RESTORE_DIR/backup.tar"
+  fi
+
+  # Only the expected paths, no absolute paths, no "..".
+  local member ok p
+  while read -r member; do
+    ok=no
+    member=${member%/}
+    [[ $member == "${BACKUP_DIR#/}/manifest" ]] && ok=yes
+    for p in "${BACKUP_PATHS[@]}"; do
+      [[ $member == "$p" || $member == "$p"/* ]] && ok=yes
+    done
+    [[ $member != *..* && $member != /* && $ok == yes ]] || { rm -rf "$RESTORE_DIR"; die "unexpected path in the backup: $member"; }
+  done < <(tar -tf "$RESTORE_DIR/backup.tar")
+  tar -C "$RESTORE_DIR/new" --same-owner -xpf "$RESTORE_DIR/backup.tar"
+  rm -f "$RESTORE_DIR/backup.tar"
+
+  local want have
+  want=$(sed -n 's/^server_name=//p' "$RESTORE_DIR/new/${BACKUP_DIR#/}/manifest" 2>/dev/null)
+  have=$(sed -n 's/^server_name = "\(.*\)"$/\1/p' "$CONF")
+  [[ -n $want ]] || { rm -rf "$RESTORE_DIR"; die "not an optes core backup (no manifest)"; }
+  [[ $want == "$have" ]] || { rm -rf "$RESTORE_DIR"; die "the backup is for $want, this core was installed as $have; install with --server-name $want"; }
+  for p in "${BACKUP_PATHS[@]}"; do
+    [[ -e $RESTORE_DIR/new/$p ]] || { rm -rf "$RESTORE_DIR"; die "the backup lacks /$p"; }
+  done
+  info "backup of $want from $(sed -n 's/^created=//p' "$RESTORE_DIR/new/${BACKUP_DIR#/}/manifest") checked"
+
+  info "The rest runs as the systemd unit optes-restore and goes on if this session ends."
+  info "It restarts Tor with the backup's onions: an SSH session over this core's"
+  info "current admin onion will drop. Log: $RESTORE_DIR/log"
+  : > "$RESTORE_DIR/log"
+  local rc=0
+  systemd-run --unit=optes-restore --collect --wait --quiet \
+    -p StandardOutput="append:$RESTORE_DIR/log" -p StandardError="append:$RESTORE_DIR/log" \
+    /bin/bash "$(realpath "$0")" restore-apply &
+  local pid=$!
+  tail --pid="$pid" -n +1 -f "$RESTORE_DIR/log" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
+RESTORE_STAGE=none
+restore_apply() {
+  touch "$RESTORE_DIR/in-progress"
+  trap 'restore_rollback' EXIT
+  install -d -m 0700 "$RESTORE_DIR/old"
+  RESTORE_STAGE=stopping
+  info "Stopping gateway, server and Tor"
+  stop_services
+  systemctl stop tor@default.service
+
+  RESTORE_STAGE=swapping
+  local p
+  for p in "${BACKUP_PATHS[@]}"; do
+    mkdir -p "$RESTORE_DIR/old/$(dirname "$p")" "/$(dirname "$p")"
+    [[ -e /$p ]] && mv "/$p" "$RESTORE_DIR/old/$p"
+    mv "$RESTORE_DIR/new/$p" "/$p"
+  done
+  info "Files of the backup in place"
+
+  # Settings derived from the restored state.
+  write_torrc
+  write_apparmor
+  write_sock_group
+  config_add_missing
+  systemctl daemon-reload
+
+  RESTORE_STAGE=started
+  info "Starting and checking"
+  systemctl start continuwuity.service
+  services_ok || exit 1
+  systemctl start tor@default.service
+  wait_for_file "$HS_INGRESS/hostname" 60 || exit 1
+
+  rm -rf "$RESTORE_DIR/old" "$RESTORE_DIR/new" "$RESTORE_DIR/in-progress"
+  RESTORE_STAGE=finished
+  info "restore done. Onions now:"
+  info "  ingress $(cat "$HS_INGRESS/hostname")"
+  info "  admin   $(cat "$HS_ADMIN/hostname") (use the admin key of the old core)"
+}
+
+restore_rollback() {
+  [[ $RESTORE_STAGE == finished ]] && return 0
+  trap - EXIT
+  set +e
+  warn "restore stopped at stage '$RESTORE_STAGE'; putting this core's own files back"
+  journalctl -u continuwuity -u optes-gateway -u tor@default -n 20 --no-pager >&2
+  stop_services
+  systemctl stop tor@default.service
+  local p
+  for p in "${BACKUP_PATHS[@]}"; do
+    if [[ -e $RESTORE_DIR/old/$p ]]; then
+      rm -rf "/${p:?}"
+      mv "$RESTORE_DIR/old/$p" "/$p"
+    fi
+  done
+  write_torrc
+  write_apparmor
+  write_sock_group
+  systemctl daemon-reload
+  systemctl start continuwuity.service
+  services_ok
+  systemctl start tor@default.service
+  rm -rf "$RESTORE_DIR/new" "$RESTORE_DIR/old" "$RESTORE_DIR/in-progress"
+  echo "ERROR: restore failed; this core runs with its own data from before the restore. Log: $RESTORE_DIR/log" >&2
+  exit 1
+}
+
 cmd_lockdown() {
   [[ ${1:-} == --i-tested-onion-ssh ]] || die "first confirm SSH works through the admin onion, then pass --i-tested-onion-ssh"
   write_nft no
@@ -1350,6 +1558,7 @@ cmd_status() {
   fi
   clock_status 32
   auto_update_status 32
+  printf '%-32s %s\n' "backup key" "$([[ -s $BACKUP_RECIPIENTS ]] && echo set || echo "none (setup-core.sh backup-key <age public key>)")"
 }
 
 main() {
@@ -1365,13 +1574,17 @@ main() {
     status)        need_root; cmd_status ;;
     update)        need_root; cmd_update "$@" ;;
     update-apply)  need_root; update_apply "$@" ;;
+    backup-key)    need_root; cmd_backup_key "$@" ;;
+    backup)        need_root; cmd_backup "$@" ;;
+    restore)       need_root; cmd_restore "$@" ;;
+    restore-apply) need_root; restore_apply ;;
     add-device)    need_root; cmd_add_device "$@" ;;
     remove-device) need_root; cmd_remove_device "$@" ;;
     add-front)     need_root; cmd_add_front "$@" ;;
     renew-front-list) need_root; cmd_renew_front_list ;;
     remove-front)  need_root; cmd_remove_front "$@" ;;
     direct-ingress) need_root; cmd_direct_ingress "$@" ;;
-    *) sed -n '2,34p' "$0"; exit 1 ;;
+    *) sed -n '2,38p' "$0"; exit 1 ;;
   esac
 }
 

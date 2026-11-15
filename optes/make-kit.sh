@@ -227,6 +227,17 @@ server, then as root, from that directory:
 It keeps config, database and keys, and rolls back if the new server does not
 come up. Fronts are not updated: replace them with new ones from this kit.
 
+Backups (do this as soon as the core runs; details: HANDOFF.md section 4h).
+On your own machine: age-keygen -o core-backup.key  (keep it offline), then
+on the core: ./setup-core.sh backup-key <the age1... public key>. A backup:
+
+    torsocks ssh root@<admin>.onion 'optes-setup-core backup --out -' > core.age
+
+Restore onto a new server installed with the same --server-name:
+
+    age -d -i core-backup.key core.age | torsocks ssh root@<admin>.onion \\
+      'cd <kit>/core && ./setup-core.sh restore -'
+
 If a step fails on the core, collect this before any reboot (logs are kept in
 memory only):
 
