@@ -1,10 +1,16 @@
 #!/usr/bin/env bash
-# setup-relay.sh — run optes-relay for your own user (Fedora or Debian).
+# setup-relay.sh — run optes-relay for your own user (Debian; Ubuntu untested).
 # 2026-11-09: install dry-run on Debian 13 without a working Tor network.
 # 2026-11-14: on Debian 13 in a VM over real Tor, straight to a core and through
-# a front (HANDOFF.md §4e). Never run on Fedora. Read before running.
+# a front (HANDOFF.md §4e). 2026-11-15: Tor control port for the relay, tested
+# with sleep and core restarts (HANDOFF.md §4i). Read before running.
 #
-# Usage (as your normal user; uses sudo only to install tor):
+# The relay gets Tor's control port (127.0.0.1:9051, with a random password
+# that only this user can read) for one command: after two failed connects in
+# a row it tells Tor to forget circuits and cached onion descriptors, so the
+# next try does not wait for Tor's own retry (up to 15 minutes).
+#
+# Usage (as your normal user; uses sudo only to install and configure tor):
 #   setup-relay.sh install --relay-bin <path/to/optes-relay> \
 #       --front-list <frontlist.signed> --list-key <base64> [--level 1|2|3] [--i2p]
 #   (--i2p also installs i2pd so the relay can use I2P fronts)
@@ -27,14 +33,32 @@ UNIT_DIR=${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user
 die()  { echo "ERROR: $*" >&2; exit 1; }
 info() { echo "==> $*"; }
 
-tor_auth_dir() {
-  # Fedora and Debian both read /etc/tor/torrc; Debian runs tor as debian-tor,
-  # Fedora as toranon.
-  echo /var/lib/tor/onion_auth
-}
+tor_auth_dir() { echo /var/lib/tor/onion_auth; }
 
-tor_user() {
-  if id debian-tor &>/dev/null; then echo debian-tor; else echo toranon; fi
+tor_user() { echo debian-tor; }
+
+CONTROL_BEGIN="# optes-relay: control port (begin)"
+CONTROL_END="# optes-relay: control port (end)"
+
+# Adds a control port with a password hash to /etc/tor/torrc (once) and keeps
+# the password in $CONF_DIR/tor-control.pass. Prints the relay's arguments, or
+# nothing if the torrc already has a control port of its own.
+setup_control_port() {
+  if sudo sed "/^$CONTROL_BEGIN\$/,/^$CONTROL_END\$/d" /etc/tor/torrc | grep -q '^ControlPort'; then
+    echo "WARNING: /etc/tor/torrc has its own ControlPort; the relay will not use one" >&2
+    return 0
+  fi
+  if [[ ! -s $CONF_DIR/tor-control.pass ]]; then
+    head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$CONF_DIR/tor-control.pass"
+    chmod 600 "$CONF_DIR/tor-control.pass"
+  fi
+  local hash
+  hash=$(tor --hash-password "$(cat "$CONF_DIR/tor-control.pass")" | grep -E '^16:[0-9A-F]+$' | tail -n 1)
+  [[ -n $hash ]] || die "tor --hash-password gave no hash"
+  sudo sed -i "/^$CONTROL_BEGIN\$/,/^$CONTROL_END\$/d" /etc/tor/torrc
+  printf '%s\nControlPort 127.0.0.1:9051\nHashedControlPassword %s\n%s\n' \
+    "$CONTROL_BEGIN" "$hash" "$CONTROL_END" | sudo tee -a /etc/tor/torrc >/dev/null
+  echo " --tor-control 127.0.0.1:9051 --tor-control-password-file $CONF_DIR/tor-control.pass"
 }
 
 cmd_install() {
@@ -58,30 +82,30 @@ cmd_install() {
     die "optes-keys must sit next to optes-relay to create the device key"
   fi
 
-  info "Tor (system package; the relay uses its SOCKS port)"
-  if ! command -v tor >/dev/null; then
-    if command -v dnf >/dev/null; then sudo dnf install -y tor; else sudo apt-get install -y tor; fi
-  fi
+  info "Tor (system package; the relay uses its SOCKS and control ports)"
+  command -v tor >/dev/null || sudo apt-get install -y tor
   if ! sudo grep -q '^ClientOnionAuthDir' /etc/tor/torrc; then
     echo "ClientOnionAuthDir $(tor_auth_dir)" | sudo tee -a /etc/tor/torrc >/dev/null
   fi
   sudo install -d -o "$(tor_user)" -g "$(tor_user)" -m 0700 "$(tor_auth_dir)"
+  mkdir -p "$CONF_DIR"
+  local control_arg
+  control_arg=$(setup_control_port)
   sudo systemctl enable --now tor
   sudo systemctl restart tor
 
   local i2p_arg=""
   if [[ $i2p == yes ]]; then
     info "i2pd (its SOCKS proxy on 127.0.0.1:4447 reaches .i2p fronts)"
-    if ! command -v i2pd >/dev/null; then
-      if command -v dnf >/dev/null; then sudo dnf install -y i2pd; else sudo apt-get install -y i2pd; fi
-    fi
+    command -v i2pd >/dev/null || sudo apt-get install -y i2pd
     sudo systemctl enable --now i2pd
     i2p_arg=" --socks-i2p 127.0.0.1:4447"
   fi
 
   mkdir -p "$CONF_DIR" "$STATE_DIR" "$BIN_DIR" "$UNIT_DIR"
   install -m 0755 "$bin" "$BIN_DIR/optes-relay"
-  cp "$list" "$CONF_DIR/frontlist.signed"
+  # The same file on a reinstall: nothing to copy.
+  [[ $(realpath "$list") == "$(realpath -m "$CONF_DIR/frontlist.signed")" ]] || cp "$list" "$CONF_DIR/frontlist.signed"
   echo "$key" > "$CONF_DIR/list.pub"
 
   if [[ ! -f $CONF_DIR/device.key ]]; then
@@ -101,7 +125,7 @@ After=network-online.target
 # this machine was online. For troubleshooting: RUST_LOG=info (debug also
 # shows front addresses).
 Environment=RUST_LOG=warn
-ExecStart=$BIN_DIR/optes-relay --listen 127.0.0.1:8008 --socks 127.0.0.1:9050$i2p_arg \\
+ExecStart=$BIN_DIR/optes-relay --listen 127.0.0.1:8008 --socks 127.0.0.1:9050$i2p_arg$control_arg \\
   --front-list $CONF_DIR/frontlist.signed --list-key $CONF_DIR/list.pub \\
   --device-key $CONF_DIR/device.key --level $level --state-dir $STATE_DIR
 Restart=always
@@ -163,5 +187,5 @@ case "${1:-}" in
   install)    shift; cmd_install "$@" ;;
   front-auth) shift; cmd_front_auth "$@" ;;
   status)     cmd_status ;;
-  *) sed -n '2,15p' "$0"; exit 1 ;;
+  *) sed -n '2,23p' "$0"; exit 1 ;;
 esac

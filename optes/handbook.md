@@ -241,7 +241,8 @@ the wire, signed front list. The core end is a separate process,
 | A front                    | someone connected, when, how much. No accounts, no content. It also holds a key to the core's ingress onion: see below. |
 | Observer at the core       | constant-rate Tor traffic.                                  |
 | Another member of the server | what Matrix shares with room members: membership, profile, devices (IDs, how many, when a new one appears). Not the device names (client and OS): `show_device_names_to_others = false`. |
-| Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). |
+| Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). Also when the user's machine wakes: the relay reconnects at once after a sleep. |
+| Another program on a relay user's machine | with that user's rights it can read the relay's Tor control password and control the user's Tor (circuits, cached descriptors). It could already read the relay's device key; nothing new across users (the file is mode 600). |
 | The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes, per check; forward moves add up over checks. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
 | Debian's mirrors (reached through Tor exits) | that a Tor client fetches Debian's package lists daily and some packages (unattended-upgrades on core and fronts, Debian's apt-daily timers); not who or where. The exit sees the same over HTTPS. |
 | Whoever holds a backup and its age key | everything the core holds (accounts, rooms, metadata, all keys); with the backup alone, nothing (age encryption). The host sees that a backup was taken (the server stops for a second) and an encrypted file while it is sent. |
@@ -403,7 +404,7 @@ receipts/typing/auto-download off, constant-rate mode, optional home-relay for L
 
 ## 8. Setup scripts (spec)
 
-Two scripts. Idempotent. Debian or Fedora. Each prints exactly what the operator
+Two scripts. Idempotent. Debian (the relay script: Debian, Ubuntu untested). Each prints exactly what the operator
 needs next (addresses, keys to back up).
 
 ### 8.1 `setup-front.sh`
@@ -563,7 +564,7 @@ thin.
 | Bouncer | **dropped** (covered by the above + relay) | `bouncer-decision.md` |
 | Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor); 2026-11-14 over real Tor between VMs at levels 1–3, straight and through a front. Level 2 and 3 traffic shape checked on the relay's link to its Tor guard; level 1 not | `tunnel/`, `phase2-protocol-spec.md` |
 | Tor front setup | install dry-run in a Debian 13 VM without Tor (2026-11-09); 2026-11-14 in a Debian 13 VM over real Tor: install, a relay through it to the core, `add-client`/`remove-client`. Not tested: its `lockdown` | `setup-front.sh --type tor` |
-| Relay setup (user machine) | install dry-run on Debian 13 without Tor (2026-11-09); 2026-11-14 on Debian 13 in a VM over real Tor (two fixes: `front-auth` restarts Tor, a second `install` restarts the relay); not run on Fedora | `setup-relay.sh` |
+| Relay setup (user machine) | install dry-run on Debian 13 without Tor (2026-11-09); 2026-11-14 on Debian 13 in a VM over real Tor (two fixes: `front-auth` restarts Tor, a second `install` restarts the relay). 2026-11-15: Debian only; Tor control port for the relay; dead-tunnel and sleep detection (`HANDOFF.md` §4i) | `setup-relay.sh` |
 | Space auto-join, creation limits, template tool | built, e2e tested. 2026-11-14: a room is a space's channel only if it names the space (audit findings 14, 15); e2e tested, not with real clients | `spaces.md` |
 | `require_encryption` (plaintext messages refused, rooms encrypted by default) | built, e2e tested | `hardening.md` |
 | `hide_server_identity` | built, e2e tested | `hardening.md` |

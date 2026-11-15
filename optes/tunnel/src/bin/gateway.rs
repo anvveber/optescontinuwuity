@@ -225,7 +225,7 @@ where
 	};
 	drop(out_tx);
 
-	if let Err(e) = session::run(conn, crypto, policy, out_rx, in_tx).await {
+	if let Err(e) = session::run(conn, crypto, policy, out_rx, in_tx, None).await {
 		debug!("tunnel closed: {e:#}");
 	}
 	dispatcher.abort();

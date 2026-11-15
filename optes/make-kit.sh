@@ -182,7 +182,7 @@ front/   for a front server (Debian 13): setup-front.sh, optes-clock.sh
          (no binary)
          optes-clock.sh sets the clock over Tor; the setup scripts install
          it. Keep it in the same directory as the setup script.
-relay/   for your own machine (Fedora or Debian): optes-relay, optes-keys,
+relay/   for your own machine (Debian): optes-relay, optes-keys,
          setup-relay.sh
 tools/   make-space.py and an example server layout
 

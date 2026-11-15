@@ -11,6 +11,7 @@ use anyhow::{bail, Result};
 use tokio::{
 	io::{AsyncRead, AsyncReadExt, AsyncWrite, AsyncWriteExt, WriteHalf},
 	sync::mpsc::{self, error::TryRecvError},
+	task::JoinHandle,
 	time::{interval, sleep, MissedTickBehavior},
 };
 
@@ -34,12 +35,19 @@ pub fn new_table() -> StreamTable { Arc::new(Mutex::new(HashMap::new())) }
 
 /// Runs until the connection fails or `out_rx` is closed. Decrypted non-pad
 /// cells go to `in_tx`.
+///
+/// `idle_limit`: fail if no frame at all (padding included) arrives for that
+/// long. Only for a side whose peer sends regularly (levels 2 and 3): it
+/// notices a dead connection that never reports an error.
+///
+/// Dropping the returned future stops both halves of the session.
 pub async fn run<S>(
 	io: S,
 	crypto: Crypto,
 	policy: Policy,
 	out_rx: mpsc::Receiver<Cell>,
 	in_tx: mpsc::Sender<Cell>,
+	idle_limit: Option<Duration>,
 ) -> Result<()>
 where
 	S: AsyncRead + AsyncWrite + Send + 'static,
@@ -47,12 +55,15 @@ where
 	let (reader, writer) = tokio::io::split(io);
 	let crypto = Arc::new(Mutex::new(crypto));
 
-	let mut read_task = tokio::spawn(read_loop(reader, crypto.clone(), in_tx));
-	let mut write_task = tokio::spawn(write_loop(writer, crypto, policy, out_rx));
+	let mut tasks = AbortOnDrop(
+		tokio::spawn(read_loop(reader, crypto.clone(), in_tx, idle_limit)),
+		tokio::spawn(write_loop(writer, crypto, policy, out_rx)),
+	);
+	let AbortOnDrop(read_task, write_task) = &mut tasks;
 
 	let result = tokio::select! {
-		r = &mut read_task => { write_task.abort(); r }
-		w = &mut write_task => { read_task.abort(); w }
+		r = read_task => r,
+		w = write_task => w,
 	};
 
 	match result {
@@ -62,13 +73,37 @@ where
 	}
 }
 
-async fn read_loop<R>(mut reader: R, crypto: Arc<Mutex<Crypto>>, in_tx: mpsc::Sender<Cell>) -> Result<()>
+/// Both halves of a session; aborted together when this is dropped.
+struct AbortOnDrop(JoinHandle<Result<()>>, JoinHandle<Result<()>>);
+
+impl Drop for AbortOnDrop {
+	fn drop(&mut self) {
+		self.0.abort();
+		self.1.abort();
+	}
+}
+
+async fn read_loop<R>(
+	mut reader: R,
+	crypto: Arc<Mutex<Crypto>>,
+	in_tx: mpsc::Sender<Cell>,
+	idle_limit: Option<Duration>,
+) -> Result<()>
 where
 	R: AsyncRead + Unpin,
 {
 	let mut frame = [0_u8; FRAME];
 	loop {
-		reader.read_exact(&mut frame).await?;
+		match idle_limit {
+			| Some(limit) => {
+				tokio::time::timeout(limit, reader.read_exact(&mut frame))
+					.await
+					.map_err(|_| anyhow::anyhow!("no frame from the peer for {} s", limit.as_secs()))??;
+			},
+			| None => {
+				reader.read_exact(&mut frame).await?;
+			},
+		}
 		let cell = crypto.lock().expect("crypto lock").open(&frame)?;
 		if cell.is_pad() {
 			continue;
@@ -233,5 +268,82 @@ pub async fn deliver(table: &StreamTable, cell: Cell) -> Option<Cell> {
 			None
 		},
 		| _ => Some(cell),
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::time::Instant;
+
+	use tokio::io::AsyncReadExt;
+
+	use super::*;
+	use crate::{keys::generate_x25519, noise};
+
+	/// Two ends of an established tunnel over an in-memory pipe.
+	async fn tunnel() -> (Crypto, tokio::io::DuplexStream, Crypto, tokio::io::DuplexStream) {
+		let (gw_priv, gw_pub) = generate_x25519().unwrap();
+		let (dev_priv, _) = generate_x25519().unwrap();
+		let (mut a, mut b) = tokio::io::duplex(1 << 16);
+		let server = tokio::spawn(async move {
+			let (c, _, _) = noise::respond(&mut b, &gw_priv, |_, _| true, |h| noise::Welcome {
+				level: h.level,
+				tick_ms: 200,
+				window_secs: 15,
+				list_version: 0,
+				gateway_time_ms: 0,
+			})
+			.await
+			.unwrap();
+			(c, b)
+		});
+		let hello = noise::Hello { level: 1, list_version: 0, counter: 1 };
+		let (client, _) = noise::initiate(&mut a, &dev_priv, &gw_pub, hello).await.unwrap();
+		let (server, b) = server.await.unwrap();
+		(client, a, server, b)
+	}
+
+	fn burst_policy() -> Policy {
+		Policy {
+			level: Level::Burst,
+			tick: Duration::from_millis(200),
+			window: Duration::from_secs(15),
+			window_offset: Duration::ZERO,
+			clock_offset_ms: 0,
+		}
+	}
+
+	#[tokio::test]
+	async fn silent_peer_ends_the_session_after_the_idle_limit() {
+		let (client, a, _server, _b) = tunnel().await;
+		let (_out_tx, out_rx) = mpsc::channel(8);
+		let (in_tx, _in_rx) = mpsc::channel(8);
+		let started = Instant::now();
+		let result = tokio::time::timeout(
+			Duration::from_secs(10),
+			run(a, client, burst_policy(), out_rx, in_tx, Some(Duration::from_secs(1))),
+		)
+		.await
+		.expect("the session must end by itself");
+		assert!(result.is_err(), "a silent peer is an error");
+		assert!(started.elapsed() < Duration::from_secs(3));
+	}
+
+	#[tokio::test]
+	async fn dropping_the_session_closes_the_connection() {
+		let (client, a, _server, mut b) = tunnel().await;
+		let (_out_tx, out_rx) = mpsc::channel(8);
+		let (in_tx, _in_rx) = mpsc::channel(8);
+		tokio::select! {
+			_ = run(a, client, burst_policy(), out_rx, in_tx, None) => panic!("ended early"),
+			() = sleep(Duration::from_millis(200)) => {},
+		}
+		// Both halves are gone, so the peer sees the end of the stream.
+		let mut buf = [0_u8; 1];
+		let n = tokio::time::timeout(Duration::from_secs(2), b.read(&mut buf))
+			.await
+			.expect("the connection must be closed")
+			.unwrap();
+		assert_eq!(n, 0);
 	}
 }

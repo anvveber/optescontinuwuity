@@ -13,6 +13,9 @@ Usage:
   vm.py stop              power off
   vm.py ssh [command...]  SSH in as root
   vm.py copy <file...>    copy files to /root in the VM
+  vm.py wake              wake the VM from suspend (after
+                          "vm.py ssh systemctl suspend"), like opening a
+                          laptop's lid
   vm.py status
 
 Options (before the command):
@@ -68,6 +71,7 @@ class VM:
         self.work = os.path.join(self.dir, f"work{sfx}.qcow2")
         self.serial = os.path.join(self.dir, f"serial{sfx}.sock")
         self.pidfile = os.path.join(self.dir, f"qemu{sfx}.pid")
+        self.monitor = os.path.join(self.dir, f"monitor{sfx}.sock")
         self.log = os.path.join(self.dir, f"qemu{sfx}.log")
 
     # ---- process ---------------------------------------------------------
@@ -82,7 +86,7 @@ class VM:
     def boot(self, disk):
         if self.pid():
             die("the VM is already running (vm.py stop)")
-        for f in (self.serial, self.pidfile):
+        for f in (self.serial, self.pidfile, self.monitor):
             if os.path.exists(f):
                 os.remove(f)
         kvm = os.access("/dev/kvm", os.R_OK | os.W_OK)
@@ -92,6 +96,7 @@ class VM:
                "-netdev", f"user,id=n0,hostfwd=tcp:127.0.0.1:{self.port}-:22",
                "-device", "virtio-net-pci,netdev=n0",
                "-display", "none", "-serial", f"unix:{self.serial},server=on,wait=off",
+               "-monitor", f"unix:{self.monitor},server=on,wait=off",
                "-pidfile", self.pidfile, "-daemonize"]
         log = open(self.log, "w")
         subprocess.run(cmd, check=True, stdout=log, stderr=log)
@@ -288,6 +293,21 @@ class VM:
             die("SSH does not answer; see " + self.log)
         info("up: vm.py ssh")
 
+    def wake(self):
+        if not self.pid():
+            die("the VM is not running")
+        s = socket.socket(socket.AF_UNIX)
+        s.connect(self.monitor)
+        s.settimeout(5)
+        time.sleep(0.5)
+        s.recv(4096)  # banner
+        s.sendall(b"system_wakeup\n")
+        time.sleep(0.5)
+        s.close()
+        if not self.wait_ssh(120):
+            die("SSH does not answer after wakeup")
+        info("awake")
+
     def status(self):
         print(f"state dir:  {self.dir}")
         print(f"clean disk: {'yes' if os.path.exists(self.clean) else 'no (vm.py create)'}")
@@ -302,7 +322,7 @@ def main():
     ap.add_argument("--memory", type=int, default=2048)
     ap.add_argument("--cpus", type=int, default=2)
     ap.add_argument("--name", default="main")
-    ap.add_argument("command", choices=["create", "start", "stop", "ssh", "copy", "status"])
+    ap.add_argument("command", choices=["create", "start", "stop", "ssh", "copy", "wake", "status"])
     ap.add_argument("rest", nargs=argparse.REMAINDER)
     args = ap.parse_args()
     if not re.fullmatch(r"[a-z0-9-]{1,20}", args.name):
@@ -324,6 +344,8 @@ def main():
                "-o", "UserKnownHostsFile=/dev/null", "-o", "LogLevel=ERROR", *args.rest,
                "root@127.0.0.1:/root/"]
         sys.exit(subprocess.run(cmd).returncode)
+    elif args.command == "wake":
+        vm.wake()
     else:
         vm.status()
 

@@ -3,7 +3,8 @@
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
-fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g; backups: §4h). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g; backups: §4h;
+relay after sleep and slow connects: §4i). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -46,7 +47,7 @@ Matrix client (any: Cinny, FluffyChat, Element)
 | Server name | A v3 onion address made with mkp224o. Its key stays offline and is never served; only the name is used. |
 | Federation | Off |
 | Nym | Ignored for now |
-| OS | Debian 13 (trixie) on servers. Relays: Fedora or Debian. |
+| OS | Debian 13 (trixie) on servers. Relays: Debian (Ubuntu untested). Fedora dropped 2026-11-15: never run, not needed now. |
 | Client | No client fork. The local relay makes any Matrix client work. |
 | Delayed release | 15 s tick |
 | Bouncer | Dropped, replaced by `record_device_activity = false` plus the relay (`bouncer-decision.md`) |
@@ -113,7 +114,6 @@ Design notes for each feature: `delayed-release-spec.md`, `bouncer-decision.md`,
 - Still never exercised:
   - `setup-front.sh lockdown`; a front or core in daily use (T7)
   - level 1 padding on the wire
-  - `setup-relay.sh` on Fedora (ran on Debian 13 only)
   - an I2P front on the real I2P network
   - a relay machine that sleeps and wakes (recovery of the relay not shown)
 - **One audit (`audit-2026-11-10.md`), not independent. No outside review yet.**
@@ -550,6 +550,67 @@ gateway at its next start.
 Not tested: backup and restore after `lockdown` (over the admin onions; the
 commands are the same), on a VPS, a large database, restore with fronts in
 use.
+
+## 4i. Relay after sleep, and slow connects (2026-11-15)
+
+Two problems from the VM runs: a relay that seemed stuck after its machine
+slept, and connects that took 20–36 minutes.
+
+What changed in the relay (no protocol change; gateway unchanged):
+- **Dead tunnel noticed.** At levels 2 and 3 the gateway sends something every
+  window or tick; a tunnel silent for 3 windows + 30 s (level 2) or 30 s
+  (level 3) is closed and rebuilt. On every level, if the wall clock runs more
+  than 30 s ahead of the monotonic clock (which stops during suspend), the
+  machine slept or its clock was set forward: the tunnel is rebuilt at once.
+  Level 1 has no silence limit (an idle level-1 tunnel carries nothing).
+- **Quicker retry** after a tunnel that was up ends (2 s, then backing off to a
+  minute as before for failed attempts).
+- **Tor told to forget, after two failed attempts in a row.** `setup-relay.sh`
+  gives Tor a control port (127.0.0.1:9051) with a random password, stored in
+  the relay's config directory (mode 600); the relay uses it for one command,
+  `SIGNAL NEWNYM`, which drops Tor's circuits and its cache of onion
+  descriptors. Not after the first failure: if the cached descriptor was still
+  right, clearing it makes the next try slower (seen in the VM).
+- A session that is dropped now also stops its reader and writer
+  (`session::run`; before, they kept running with the socket).
+- `setup-relay.sh` is Debian only (Fedora branches removed), and a reinstall
+  with the installed front list no longer fails.
+
+What the VM runs showed about Tor (Debian 13 VMs on this machine, real Tor):
+- A real suspend (S3) of the relay VM for 5 minutes with the old relay: it
+  answered 7 s after waking. Tor logged "clock just jumped … assuming
+  established circuits no longer work". Longer real suspends could not be
+  tested: after the first suspend and wake, QEMU woke the VM again at once
+  (`vm.py wake`, new, sends the wake-up).
+- The long waits for a connection come from Tor's onion descriptors, not from
+  the relay:
+  - After the core's Tor restarted, the relay's Tor kept the old descriptor
+    (revision 2148142102, the core published 4984990535) and a directory
+    server still handed it out. Tor asks one directory server for the same
+    onion at most every 15 minutes. `SIGNAL NEWNYM` emptied the cache; the
+    relay connected a few minutes later.
+  - Twice the directory servers for the core's onion did not answer at all,
+    for 20–30 minutes, to the relay's Tor and to the core's own `HSFETCH`;
+    meanwhile Debian's onions answered in about 50 s. Nothing on either side
+    helps then. More fronts help: each has its own onion address and so its
+    own directory servers.
+- The sleep detector in the VM: the relay VM's clock set 90 s forward (time
+  sync stopped): within 3 s the relay logged "this machine slept or its clock
+  jumped; reconnecting".
+  - With a first version that sent `NEWNYM` after every failure: no tunnel
+    within 5 minutes (the cached descriptor was gone, the directory servers
+    were slow).
+  - With the final rule (`NEWNYM` only after two failures in a row): the
+    tunnel was back 8 s after the jump, with no `NEWNYM`.
+
+Tests: tunnel unit tests (28, among them: a silent peer ends a session after
+the limit; a dropped session closes the connection; a wall-clock jump counts
+as sleep, a steady clock not), e2e tunnel suites levels 1–3 and SOCKS tor/i2p.
+
+Not shown: that `NEWNYM` shortens outages in general (once it was followed by
+a connect a few minutes later; the network's own delays made a clean
+comparison impossible); a long real sleep with the new relay; level 2 and 3
+silence limits on real Tor.
 
 ## 5. Building and testing
 

@@ -60,6 +60,15 @@ struct Args {
 	/// How often to ask the gateway for a newer front list while connected, s
 	#[arg(long, default_value_t = 6 * 3600)]
 	list_refresh_secs: u64,
+	/// Tor's control port (e.g. 127.0.0.1:9051). With it, the relay tells
+	/// Tor to drop its circuits and cached onion descriptors (SIGNAL NEWNYM)
+	/// after two failed connects in a row, so the next try fetches a fresh
+	/// descriptor instead of waiting for Tor's own retry (up to 15 minutes).
+	#[arg(long)]
+	tor_control: Option<String>,
+	/// File holding the control port's password
+	#[arg(long)]
+	tor_control_password_file: Option<PathBuf>,
 }
 
 trait Io: AsyncRead + AsyncWrite + Unpin + Send {}
@@ -77,6 +86,10 @@ struct Relay {
 	device_key: [u8; 32],
 	level: Level,
 	current: Mutex<Option<Arc<Handle>>>,
+	/// Set when a handshake succeeds; the supervisor then retries quickly
+	/// after the tunnel ends.
+	established: std::sync::atomic::AtomicBool,
+	last_newnym: Mutex<Option<Instant>>,
 }
 
 #[tokio::main]
@@ -94,6 +107,8 @@ async fn main() -> Result<()> {
 		device_key: keys::read32(&args.device_key)?,
 		level: Level::from_u8(args.level)?,
 		current: Mutex::new(None),
+		established: std::sync::atomic::AtomicBool::new(false),
+		last_newnym: Mutex::new(None),
 		args,
 	});
 
@@ -107,14 +122,85 @@ async fn main() -> Result<()> {
 	tokio::spawn(accept_loop(relay.clone(), listener));
 
 	let mut backoff = Duration::from_secs(2);
+	let mut failed_in_a_row: u32 = 0;
 	loop {
-		match relay.clone().connect_once().await {
-			| Ok(()) => backoff = Duration::from_secs(2),
-			| Err(e) => warn!("tunnel: {e:#}"),
-		}
+		let result = relay.clone().connect_once().await;
 		*relay.current.lock().expect("lock") = None;
+		// A tunnel that was up and ended: retry soon, first with what Tor has
+		// cached (still right unless the front or core restarted). A failed
+		// attempt: back off, up to a minute.
+		if relay.established.swap(false, Ordering::Relaxed) {
+			backoff = Duration::from_secs(2);
+			failed_in_a_row = 0;
+		} else if result.is_err() {
+			failed_in_a_row = failed_in_a_row.saturating_add(1);
+		}
+		if let Err(e) = result {
+			warn!("tunnel: {e:#}");
+		}
+		// Two failed attempts in a row: Tor may hold a stale descriptor of the
+		// front (after a restart of the front or core) and would not ask
+		// again for up to 15 minutes. Not after the first: clearing a cache
+		// that was still right makes the next try slower.
+		if failed_in_a_row >= 2 {
+			relay.newnym().await;
+		}
 		tokio::time::sleep(backoff).await;
 		backoff = (backoff * 2).min(Duration::from_secs(60));
+	}
+}
+
+/// Returns when the wall clock has run ahead of the monotonic clock by more
+/// than 30 s: the machine was suspended (the monotonic clock stops during
+/// sleep) or its clock was set forward. Either way the tunnel is likely
+/// dead; reconnecting costs little.
+async fn slept() { slept_with(std::time::SystemTime::now, Duration::from_secs(5)).await }
+
+async fn slept_with(wall_now: impl Fn() -> std::time::SystemTime, every: Duration) {
+	let limit = Duration::from_secs(30);
+	loop {
+		let mono = Instant::now();
+		let wall = wall_now();
+		tokio::time::sleep(every).await;
+		let wall_elapsed = wall_now().duration_since(wall).unwrap_or_default();
+		if wall_elapsed > mono.elapsed() + limit {
+			return;
+		}
+	}
+}
+
+#[cfg(test)]
+mod tests {
+	use std::{
+		sync::atomic::{AtomicU64, Ordering},
+		time::{Duration, SystemTime},
+	};
+
+	use super::slept_with;
+
+	#[tokio::test]
+	async fn a_jump_of_the_wall_clock_counts_as_sleep() {
+		// The wall clock runs 60 s ahead after the first reading, as after a
+		// suspend: the monotonic clock did not move meanwhile.
+		let calls = AtomicU64::new(0);
+		let start = SystemTime::now();
+		let wall = || {
+			let n = calls.fetch_add(1, Ordering::Relaxed);
+			start + Duration::from_secs(if n == 0 { 0 } else { 60 })
+		};
+		tokio::time::timeout(Duration::from_secs(2), slept_with(wall, Duration::from_millis(50)))
+			.await
+			.expect("a 60 s jump must be noticed");
+	}
+
+	#[tokio::test]
+	async fn a_steady_clock_does_not() {
+		let result = tokio::time::timeout(
+			Duration::from_millis(400),
+			slept_with(SystemTime::now, Duration::from_millis(50)),
+		)
+		.await;
+		assert!(result.is_err(), "no jump, no sleep");
 	}
 }
 
@@ -208,6 +294,47 @@ impl Relay {
 		Ok(())
 	}
 
+	/// SIGNAL NEWNYM on Tor's control port, at most once a minute. Without a
+	/// control port configured this does nothing.
+	async fn newnym(&self) {
+		let (Some(addr), Some(pass_file)) = (&self.args.tor_control, &self.args.tor_control_password_file) else {
+			return;
+		};
+		{
+			let mut last = self.last_newnym.lock().expect("lock");
+			if last.is_some_and(|t| t.elapsed() < Duration::from_secs(60)) {
+				return;
+			}
+			*last = Some(Instant::now());
+		}
+		let result = tokio::time::timeout(Duration::from_secs(10), async {
+			use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
+			let password = fs::read_to_string(pass_file).context("reading the control password")?;
+			let password = password.trim();
+			if !password.chars().all(|c| c.is_ascii_alphanumeric()) {
+				bail!("the control password must be letters and digits only");
+			}
+			let stream = tokio::net::TcpStream::connect(addr).await?;
+			let (read, mut write) = stream.into_split();
+			let mut lines = BufReader::new(read).lines();
+			for command in [format!("AUTHENTICATE \"{password}\""), "SIGNAL NEWNYM".to_owned()] {
+				write.write_all(format!("{command}\r\n").as_bytes()).await?;
+				let reply = lines.next_line().await?.unwrap_or_default();
+				if !reply.starts_with("250") {
+					bail!("Tor answered {:?} to {}", reply, command.split(' ').next().unwrap_or(""));
+				}
+			}
+			write.write_all(b"QUIT\r\n").await?;
+			Ok(())
+		})
+		.await;
+		match result {
+			| Ok(Ok(())) => info!("asked Tor for fresh circuits and descriptors (NEWNYM)"),
+			| Ok(Err(e)) => warn!("tor control: {e:#}"),
+			| Err(_) => warn!("tor control: no answer within 10 s"),
+		}
+	}
+
 	async fn connect_once(self: Arc<Self>) -> Result<()> {
 		let list = self.load_list()?;
 		let gateway_key = list.gateway_key()?;
@@ -236,6 +363,7 @@ impl Relay {
 		)
 		.await
 		.context("handshake timed out")??;
+		self.established.store(true, Ordering::Relaxed);
 		// Gateway clock minus ours. The welcome was stamped about half a round
 		// trip ago.
 		let half_trip = i64::try_from(sent_at.elapsed().as_millis() / 2).unwrap_or(0);
@@ -314,8 +442,19 @@ impl Relay {
 				}
 			})
 		};
+		// The gateway sends at levels 2 and 3 even when idle: every window, or
+		// every tick. A tunnel silent for much longer than that is dead (a
+		// sleep, a front gone without a word). Level 1 sends only on demand.
+		let idle_limit = match policy.level {
+			| Level::Burst => None,
+			| Level::Window => Some(policy.window * 3 + Duration::from_secs(30)),
+			| Level::Constant => Some(Duration::from_secs(30)),
+		};
 		// The session's queue stays open while `handle` lives.
-		let result = session::run(io, crypto, policy, out_rx, in_tx).await;
+		let result = tokio::select! {
+			r = session::run(io, crypto, policy, out_rx, in_tx, idle_limit) => r,
+			() = slept() => Err(anyhow::anyhow!("this machine slept or its clock jumped; reconnecting")),
+		};
 		dispatcher.abort();
 		refresher.abort();
 		*self.current.lock().expect("lock") = None;
