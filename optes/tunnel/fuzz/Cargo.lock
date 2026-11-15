@@ -602,6 +602,7 @@ dependencies = [
  "ed25519-dalek",
  "libfuzzer-sys",
  "optes-tunnel",
+ "snow",
  "tokio",
 ]
 

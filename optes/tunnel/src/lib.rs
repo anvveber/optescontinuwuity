@@ -6,6 +6,7 @@ pub mod frontlist;
 pub mod keys;
 pub mod noise;
 pub mod policy;
+pub mod replay;
 pub mod session;
 
 /// Size of every frame on the wire, handshake messages included.

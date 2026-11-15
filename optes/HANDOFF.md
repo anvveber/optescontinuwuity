@@ -2,7 +2,8 @@
 
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
-§4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+§4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
+fuzzing on protocol v2: §3). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -82,7 +83,9 @@ Everything else:
   - Front-list renewal: the core re-signs weekly; the relay checks every 6 h.
   - A relay whose lists have all expired can still reach the gateway, but only to fetch a
     new list.
-  - Fuzzing: 5 cargo-fuzz targets in `tunnel/fuzz/`, ~19M runs, no crashes.
+  - Fuzzing: 6 cargo-fuzz targets in `tunnel/fuzz/`. On protocol v2 (2026-11-15):
+    15 minutes each, ~137M runs, no crashes (`tunnel/fuzz/README.md`). The
+    gateway's replay check is in `src/replay.rs`, so a target can reach it.
 - **Setup scripts:**
   - `setup-core.sh` (install, add-client, add-device, add-front, remove-front,
     renew-front-list, direct-ingress, allow-origin, remove-origin, lockdown, status)
@@ -197,7 +200,8 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
   - front install (default and `--open`), `add-client`, `remove-client`.
   - relay install as a normal user.
 - Not tested: real Matrix clients against `allowed_origins`; a real browser; the I2P
-  front after these changes; Fedora; the fuzz targets were only compiled.
+  front after these changes; Fedora. The fuzz targets were only compiled then;
+  they ran on 2026-11-15 (`tunnel/fuzz/README.md`).
 
 Open after the audit (not fixed): device names visible
 to other members (12), low items L1 and L4–L7 (L7 partly done, §4c).

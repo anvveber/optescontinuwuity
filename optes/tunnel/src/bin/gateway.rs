@@ -4,7 +4,7 @@
 use std::{
 	fs,
 	path::{Path, PathBuf},
-	sync::{Arc, Mutex},
+	sync::Arc,
 	time::Duration,
 };
 
@@ -15,6 +15,7 @@ use optes_tunnel::{
 	frontlist, keys,
 	noise::{self, Welcome},
 	policy::{Level, Policy},
+	replay::Replay,
 	session::{self, now_ms},
 	MAX_PAYLOAD,
 };
@@ -77,59 +78,6 @@ impl Endpoint {
 	}
 }
 
-/// Replay protection for handshake message 1.
-///
-/// Message 1 of Noise IK can be recorded (by a front) and sent again. Each
-/// hello therefore carries a counter, and the gateway accepts a hello only if
-/// its counter is higher than the highest one it accepted from that device.
-/// The highest value is kept in `<state-dir>/<device key in hex>.ctr`. A
-/// relay starts its counter at the time of its first run and then adds one
-/// per handshake, so the file shows when a device was set up and how often it
-/// has connected since, not when it connected.
-struct Replay {
-	dir: PathBuf,
-	lock: Mutex<()>,
-}
-
-impl Replay {
-	fn path(&self, device: &[u8; 32]) -> PathBuf {
-		let name: String = device.iter().map(|b| format!("{b:02x}")).collect();
-		self.dir.join(format!("{name}.ctr"))
-	}
-
-	/// True if `counter` is higher than every counter accepted from `device`
-	/// before; records it. Fails closed: if the new value can't be stored,
-	/// the handshake is refused.
-	fn accept(&self, device: &[u8; 32], counter: u64) -> bool {
-		let _guard = self.lock.lock().expect("replay lock");
-		let path = self.path(device);
-		let last = match fs::read_to_string(&path) {
-			| Ok(text) => match text.trim().parse::<u64>() {
-				| Ok(last) => last,
-				| Err(_) => {
-					warn!(file = %path.display(), "unreadable replay counter; refusing handshake");
-					return false;
-				},
-			},
-			| Err(e) if e.kind() == std::io::ErrorKind::NotFound => 0,
-			| Err(e) => {
-				warn!(file = %path.display(), "cannot read replay counter: {e}");
-				return false;
-			},
-		};
-		if counter <= last {
-			return false;
-		}
-
-		let tmp = path.with_extension("tmp");
-		if let Err(e) = fs::write(&tmp, counter.to_string()).and_then(|()| fs::rename(&tmp, &path)) {
-			warn!(file = %path.display(), "cannot store replay counter: {e}");
-			return false;
-		}
-		true
-	}
-}
-
 struct Gateway {
 	key: [u8; 32],
 	devices: PathBuf,
@@ -161,7 +109,7 @@ async fn main() -> Result<()> {
 	let gateway = Arc::new(Gateway {
 		key: keys::read32(&args.key)?,
 		devices: args.devices,
-		replay: Replay { dir: args.state_dir, lock: Mutex::new(()) },
+		replay: Replay::new(args.state_dir),
 		front_list: args.front_list,
 		upstream: Endpoint::parse(&args.upstream)?,
 		tick_ms: args.tick_ms,
