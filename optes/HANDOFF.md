@@ -1,8 +1,8 @@
 # optes — project state
 
-Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b) and 2026-11-14 (kit
+Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
-§4e). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+§4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -218,8 +218,10 @@ options: the header of the script. What it does besides copying files:
   - The server's web pages are embedded by the crate `memory-serve`, which
     also wrote each file's absolute source path into the binary (10 paths).
     Since 2026-11-15, `src/web/build.rs` replaces them with paths relative to
-    the crate when the files are embedded. The build fails if `memory-serve`
-    changes its generated code so that the replacement no longer applies.
+    the crate when the files are embedded. If a new `memory-serve` writes
+    the paths in another form, the build fails. If it marks embedded files
+    differently, `build.rs` leaves the paths as they are without an error;
+    then only the warning of `make-kit.sh` below shows them.
     The script still checks every binary and warns about any build path left.
     Tested: a kit build gives no warning, and the binaries contain neither the
     home directory nor the checkout path. A release server and a debug server

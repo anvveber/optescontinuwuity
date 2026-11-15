@@ -239,9 +239,11 @@ checkout path, the git remote or the commit (`HANDOFF.md` §4c).
 client key, so it can connect to the core's onion as often as it likes, with a
 Tor client it controls and rendezvous points it picks. That is the starting
 point of a guard-discovery attack on the core. What limits it:
-- Tor's vanguards-lite pins the second hop. It is built into Tor and on by
-  default (`VanguardsLiteEnabled auto`; checked in Debian 13's Tor 0.4.9.15,
-  2026-11-15); `setup-core.sh` does not change it.
+- Tor's vanguards-lite pins the second hop. It is built into Tor. Its option
+  `VanguardsLiteEnabled` defaults to `auto`: Tor follows the network's
+  consensus parameter `vanguards-lite-enabled`, and turns it on when the
+  parameter is not set (Debian 13's Tor 0.4.9.15, its manual, 2026-11-15).
+  `setup-core.sh` does not change the option. Not checked on a running core.
 - The full vanguards add-on (also pins the third hop) is stronger and is
   **not used**. Debian 13 does not package it. Installing it from elsewhere
   would put third-party code with access to Tor's control port on the core,
