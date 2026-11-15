@@ -18,6 +18,10 @@
 #   setup-core.sh allow-origin <origin>      (a web-based client's origin, e.g. vector://vector)
 #   setup-core.sh remove-origin <origin>
 #   setup-core.sh status
+#   setup-core.sh update --binary <path> --sha256 <hex> [--tunnel-bin-dir <dir>]
+#                         (from a new kit's core/: swap the programs, keep config,
+#                         database and keys; rolls back if the server does not
+#                         come up)
 #
 # Phase 2 (tunnel; needs --tunnel-bin-dir at install):
 #   setup-core.sh add-device <name> <device-public-key>    (relay allowed in)
@@ -49,7 +53,8 @@
 #     logs warnings only; no core dumps.
 #   - nftables: outbound allowed only for the Tor user (plus loopback, DHCP,
 #     IPv6 neighbour discovery). Everything else fails closed, including DNS.
-#   - apt goes through Tor (tor+https) after install.
+#   - apt goes through Tor (tor+https) after install. Security updates are
+#     installed daily by unattended-upgrades; no automatic reboot.
 #   - Clock: optes-clock (optes-clock.sh, must be next to this script) asks
 #     onion services for the time every 6 hours and steps the clock if needed.
 
@@ -217,6 +222,38 @@ clock_status() {
   return 0
 }
 
+# ---- security updates over Tor ----------------------------------------------
+# unattended-upgrades with Debian's own defaults (security updates and stable
+# point releases of Debian's packages), through apt's tor+https sources, once a
+# day by Debian's apt-daily timers. No automatic reboot: `status` says when one
+# is needed.
+install_auto_updates() {
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APT'
+// Written by the optes setup script: daily package lists and upgrades.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT
+  cat > /etc/apt/apt.conf.d/52optes-unattended <<'APT'
+// Written by the optes setup script.
+Unattended-Upgrade::Automatic-Reboot "false";
+APT
+  chmod 644 /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/52optes-unattended
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+}
+
+# Prints the update lines of `status`.
+auto_update_status() {
+  local width=$1 last
+  printf "%-${width}s %s\n" "security updates timer" "$(systemctl is-active apt-daily-upgrade.timer 2>/dev/null || true)"
+  last=$(grep -h -E 'Packages that will be upgraded|No packages found that can be upgraded' \
+    /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null | tail -n 1 | cut -c1-19 || true)
+  printf "%-${width}s %s\n" "last security update run" "${last:-none yet}"
+  if [[ -f /run/reboot-required ]]; then
+    warn "an update needs a reboot ($(tr '\n' ' ' < /run/reboot-required.pkgs 2>/dev/null))"
+  fi
+  return 0
+}
+
 # ---- nftables --------------------------------------------------------------
 write_nft() {
   local keep_ssh=$1 ssh_rule="" ssh_out_rule=""
@@ -308,7 +345,7 @@ cmd_install() {
   info "Installing packages (clearnet apt, first and only time)"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl
+  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades
 
   info "Kernel hardening sysctls"
   {
@@ -597,6 +634,9 @@ EOF
 
   info "Switching apt to Tor"
   apt_via_tor
+
+  info "Security updates over Tor (unattended-upgrades, daily)"
+  install_auto_updates
 
   info "Disabling clearnet time sync (it would be blocked anyway)"
   systemctl disable --now systemd-timesyncd.service 2>/dev/null || true
@@ -1069,6 +1109,127 @@ cmd_remove_client() {
   return 0
 }
 
+# ---- update ------------------------------------------------------------------
+UPDATE_DIR=/var/lib/optes-update
+
+# True when continuwuity answers on its socket.
+server_answers() {
+  local i
+  for i in $(seq 1 "$1"); do
+    if [[ -S $SOCK ]] && [[ $(curl -s -o /dev/null -w '%{http_code}' --max-time 5 \
+        --unix-socket "$SOCK" http://localhost/_matrix/client/versions) == 200 ]]; then
+      return 0
+    fi
+    sleep 1
+  done
+  return 1
+}
+
+# True when the new set of services runs: continuwuity answers, and the
+# gateway (if installed) is still active a few seconds after its start.
+services_ok() {
+  server_answers 120 || return 1
+  if [[ -f $GW_UNIT ]]; then
+    systemctl start optes-gateway.service || return 1
+    sleep 5
+    systemctl is-active --quiet optes-gateway.service || return 1
+  fi
+  return 0
+}
+
+stop_services() {
+  [[ -f $GW_UNIT ]] && systemctl stop optes-gateway.service
+  systemctl stop continuwuity.service
+}
+
+cmd_update() {
+  local binary="" sha="" tunnel_dir=""
+  while [[ $# -gt 0 ]]; do
+    case "$1" in
+      --binary)         binary=${2:-}; shift 2 ;;
+      --sha256)         sha=${2:-}; shift 2 ;;
+      --tunnel-bin-dir) tunnel_dir=${2:-}; shift 2 ;;
+      *) die "unknown option: $1" ;;
+    esac
+  done
+  [[ -f $CONF && -x $BIN ]] || die "no core installed here (run install first)"
+  [[ -f $binary ]] || die "--binary: file not found"
+  [[ $sha =~ ^[0-9a-f]{64}$ ]] || die "--sha256 must be 64 lowercase hex chars"
+  local actual
+  actual=$(sha256sum "$binary" | cut -d' ' -f1)
+  [[ $actual == "$sha" ]] || die "sha256 mismatch: got $actual"
+  if [[ -f $GW_UNIT ]]; then
+    [[ -n $tunnel_dir ]] || die "the tunnel is installed: pass --tunnel-bin-dir (the kit's core/ directory)"
+    [[ -x $tunnel_dir/optes-gateway && -x $tunnel_dir/optes-keys ]] \
+      || die "--tunnel-bin-dir must contain executable optes-gateway and optes-keys"
+  fi
+  [[ -f $CLOCK_SRC ]] || die "optes-clock.sh must be in the same directory as this script"
+
+  # Do the new programs run at all on this machine? Before anything stops.
+  "$binary" --version > /dev/null 2>&1 || die "the new continuwuity does not run here ($binary --version failed)"
+  if [[ -n $tunnel_dir ]]; then
+    "$tunnel_dir/optes-gateway" --help > /dev/null 2>&1 || die "the new optes-gateway does not run here"
+    "$tunnel_dir/optes-keys" --help > /dev/null 2>&1 || die "the new optes-keys does not run here"
+  fi
+
+  # Room for a copy of the database.
+  local db=/var/lib/continuwuity need have
+  need=$(du -sk "$db" | cut -f1)
+  have=$(df -Pk "$(dirname "$UPDATE_DIR")" | awk 'NR == 2 {print $4}')
+  (( have > need + need / 5 + 102400 )) || die "not enough disk space for a copy of the database (${need} KiB needed)"
+
+  info "Packages (over Tor)"
+  export DEBIAN_FRONTEND=noninteractive
+  apt-get update || die "apt-get update failed (is Tor up?); nothing was changed"
+  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades \
+    || die "package install failed; nothing else was changed"
+
+  info "Keeping the current programs in $UPDATE_DIR/previous"
+  rm -rf "$UPDATE_DIR"
+  install -d -m 0700 "$UPDATE_DIR/previous"
+  local f
+  for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
+    [[ -e $f ]] && cp -a "$f" "$UPDATE_DIR/previous/$(basename "$f")"
+  done
+
+  info "Stopping the server; copying the database"
+  stop_services
+  cp -a --reflink=auto "$db" "$UPDATE_DIR/db"
+
+  info "Installing the new programs"
+  install -o root -g root -m 0755 "$binary" "$BIN"
+  if [[ -n $tunnel_dir ]]; then
+    install -o root -g root -m 0755 "$tunnel_dir/optes-gateway" "$GW_BIN"
+    install -o root -g root -m 0755 "$tunnel_dir/optes-keys" "$KEYS_BIN"
+    install -o root -g root -m 0700 "$(realpath "$0")" "$SELF_COPY"
+  fi
+  install_clock
+  install_auto_updates
+  systemctl daemon-reload
+
+  info "Starting and checking"
+  systemctl start continuwuity.service
+  if services_ok; then
+    rm -rf "$UPDATE_DIR/db"
+    info "update done. The old programs stay in $UPDATE_DIR/previous until the next update."
+    return 0
+  fi
+
+  warn "the new programs did not come up; rolling back"
+  journalctl -u continuwuity -u optes-gateway -n 20 --no-pager >&2 || true
+  stop_services
+  for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
+    [[ -e $UPDATE_DIR/previous/$(basename "$f") ]] && cp -a "$UPDATE_DIR/previous/$(basename "$f")" "$f"
+  done
+  rm -rf "$db"
+  mv "$UPDATE_DIR/db" "$db"
+  systemctl start continuwuity.service
+  if services_ok; then
+    die "update failed and was rolled back: the old programs and the database from before the update are running again"
+  fi
+  die "update failed AND the rollback did not come up. Old programs: $UPDATE_DIR/previous. Collect: journalctl -u continuwuity -u optes-gateway"
+}
+
 cmd_lockdown() {
   [[ ${1:-} == --i-tested-onion-ssh ]] || die "first confirm SSH works through the admin onion, then pass --i-tested-onion-ssh"
   write_nft no
@@ -1100,6 +1261,7 @@ cmd_status() {
     printf '%-32s %s\n' "fronts" "$(tr '\n' ' ' < "$FRONTS")"
   fi
   clock_status 32
+  auto_update_status 32
 }
 
 main() {
@@ -1113,13 +1275,14 @@ main() {
     allow-origin)  need_root; cmd_allow_origin "$@" ;;
     remove-origin) need_root; cmd_remove_origin "$@" ;;
     status)        need_root; cmd_status ;;
+    update)        need_root; cmd_update "$@" ;;
     add-device)    need_root; cmd_add_device "$@" ;;
     remove-device) need_root; cmd_remove_device "$@" ;;
     add-front)     need_root; cmd_add_front "$@" ;;
     renew-front-list) need_root; cmd_renew_front_list ;;
     remove-front)  need_root; cmd_remove_front "$@" ;;
     direct-ingress) need_root; cmd_direct_ingress "$@" ;;
-    *) sed -n '2,29p' "$0"; exit 1 ;;
+    *) sed -n '2,34p' "$0"; exit 1 ;;
   esac
 }
 

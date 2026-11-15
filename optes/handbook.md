@@ -241,6 +241,7 @@ the wire, signed front list. The core end is a separate process,
 | Observer at the core       | constant-rate Tor traffic.                                  |
 | Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). |
 | The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes, per check; forward moves add up over checks. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
+| Debian's mirrors (reached through Tor exits) | that a Tor client fetches Debian's package lists daily and some packages (unattended-upgrades on core and fronts, Debian's apt-daily timers); not who or where. The exit sees the same over HTTPS. |
 | Core's VPS host            | accounts, rooms, metadata. Content stays E2E-encrypted only against a host that just reads (limitation 7). The front-list signing key and gateway key are on its disk, so it can publish its own fronts; relays still only dial onion / b32.i2p addresses, so this gives it no user IP. |
 
 Last row is the residual weak point (limitations 3 and 7).
@@ -436,6 +437,7 @@ key to back up.
 - Apply all section-6 privacy settings.
 - Time sync over Tor (built: `optes-clock.sh`, 4.1); updates over Tor; no clearnet DNS.
 - Subcommands: `add-front`, `remove-front` (edit + re-sign the front list),
+  `update` (built: swap programs, roll back on failure; `HANDOFF.md` §4g),
   `update`, `backup`, `restore`, `uninstall`.
 - Print: core ingress onion(s), the pinned core key for clients, the registration
   token, initial front list.
@@ -571,6 +573,7 @@ thin.
 | Memory-only logs, no core dumps, front client auth by default, socket group by ingress mode | in the setup scripts; dry-run in a Debian 13 VM without Tor (2026-11-10) | `setup-core.sh`, `setup-front.sh` |
 | I2P front | install dry-run in a Debian 13 VM without I2P (2026-11-09): i2pd starts with the config. Open: DNS for reseeding is blocked by the firewall on systemd-resolved images (`HANDOFF.md` §4a). i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
 | Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c), and in VMs over real Tor (§4e). Since 2026-11-15 no build path in any binary; same binaries on two machines not checked | `make-kit.sh` |
+| Updates: `setup-core.sh update` (programs, rollback) and unattended-upgrades over Tor (core and fronts) | built 2026-11-15; in Debian 13 VMs over real Tor: update between two kits keeps keys, onions, config and data; rollback after a failing server restores programs and database; security updates installed over Tor, reboot warning. Not tested: a real new server version, after `lockdown`, on a VPS | `setup-core.sh`, `HANDOFF.md` §4g |
 | Clock over Tor (core and fronts) | built 2026-11-15; decision rule tested offline; in Debian 13 VMs over real Tor: corrections from 5 min to 1 day both ways on a core (relay through a front still answered after each; before the 30-minute limit was added), a front, the 30-minute limit and `--allow-back`, the 3-days-ahead case (warning, clock untouched), the timer after a reboot. Not tested: after `lockdown`, on a VPS | `optes-clock.sh` |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |

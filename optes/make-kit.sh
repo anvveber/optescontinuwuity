@@ -217,6 +217,16 @@ Every script prints its usage at the top of the file. Read it before running.
    Then on the core: setup-core.sh add-device <name> <device key>
    Point the Matrix client at http://127.0.0.1:8008
 
+Update a core installed from an older kit: copy this kit's core/ to the
+server, then as root, from that directory:
+
+    ./setup-core.sh update --binary ./continuwuity \\
+      --sha256 $server_sha \\
+      --tunnel-bin-dir .
+
+It keeps config, database and keys, and rolls back if the new server does not
+come up. Fronts are not updated: replace them with new ones from this kit.
+
 If a step fails on the core, collect this before any reboot (logs are kept in
 memory only):
 

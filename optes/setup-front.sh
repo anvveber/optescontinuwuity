@@ -31,6 +31,7 @@
 #
 # Clock: optes-clock (optes-clock.sh, must be next to this script) asks onion
 # services for the time every 6 hours and steps the clock if needed.
+# Security updates: unattended-upgrades over Tor, daily; no automatic reboot.
 #
 # I2P front: i2pd in hidden mode (no published router address, no transit
 # traffic) hosts a server tunnel; the front still reaches the core over Tor.
@@ -146,6 +147,38 @@ clock_status() {
   return 0
 }
 
+# ---- security updates over Tor ----------------------------------------------
+# unattended-upgrades with Debian's own defaults (security updates and stable
+# point releases of Debian's packages), through apt's tor+https sources, once a
+# day by Debian's apt-daily timers. No automatic reboot: `status` says when one
+# is needed.
+install_auto_updates() {
+  cat > /etc/apt/apt.conf.d/20auto-upgrades <<'APT'
+// Written by the optes setup script: daily package lists and upgrades.
+APT::Periodic::Update-Package-Lists "1";
+APT::Periodic::Unattended-Upgrade "1";
+APT
+  cat > /etc/apt/apt.conf.d/52optes-unattended <<'APT'
+// Written by the optes setup script.
+Unattended-Upgrade::Automatic-Reboot "false";
+APT
+  chmod 644 /etc/apt/apt.conf.d/20auto-upgrades /etc/apt/apt.conf.d/52optes-unattended
+  systemctl enable --now apt-daily.timer apt-daily-upgrade.timer
+}
+
+# Prints the update lines of `status`.
+auto_update_status() {
+  local width=$1 last
+  printf "%-${width}s %s\n" "security updates timer" "$(systemctl is-active apt-daily-upgrade.timer 2>/dev/null || true)"
+  last=$(grep -h -E 'Packages that will be upgraded|No packages found that can be upgraded' \
+    /var/log/unattended-upgrades/unattended-upgrades.log 2>/dev/null | tail -n 1 | cut -c1-19 || true)
+  printf "%-${width}s %s\n" "last security update run" "${last:-none yet}"
+  if [[ -f /run/reboot-required ]]; then
+    warn "an update needs a reboot ($(tr '\n' ' ' < /run/reboot-required.pkgs 2>/dev/null))"
+  fi
+  return 0
+}
+
 write_nft() {
   local keep_ssh=$1 ssh_rule="" ssh_out_rule="" i2p_rule=""
   [[ $keep_ssh == yes ]] && ssh_rule="    tcp dport 22 accept"
@@ -213,7 +246,7 @@ cmd_install() {
   info "Packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends tor apt-transport-tor socat nftables openssl coreutils apparmor-utils python3 curl
+  apt-get install -y --no-install-recommends tor apt-transport-tor socat nftables openssl coreutils apparmor-utils python3 curl unattended-upgrades
   [[ $type == i2p ]] && apt-get install -y --no-install-recommends i2pd
 
   if ! id "$FWD_USER" &>/dev/null; then
@@ -358,6 +391,8 @@ EOF
     [[ -f $f ]] || continue
     sed -i -E 's#^(https?://)#tor+\1#' "$f"
   done
+  info "Security updates over Tor (unattended-upgrades, daily)"
+  install_auto_updates
   systemctl disable --now systemd-timesyncd.service 2>/dev/null || true
 
   info "Firewall (clearnet SSH still open)"
@@ -558,6 +593,7 @@ cmd_status() {
   [[ -z $clients && $(cat "$STATE_DIR/type" 2>/dev/null) == tor ]] \
     && warn "this front is open: anyone who knows the address can connect ('add-client <name>' closes it)"
   clock_status 24
+  auto_update_status 24
   return 0
 }
 
@@ -570,7 +606,7 @@ main() {
     remove-client) need_root; cmd_remove_client "$@" ;;
     lockdown)      need_root; cmd_lockdown "$@" ;;
     status)        need_root; cmd_status ;;
-    *) sed -n '2,38p' "$0"; exit 1 ;;
+    *) sed -n '2,39p' "$0"; exit 1 ;;
   esac
 }
 

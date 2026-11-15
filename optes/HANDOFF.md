@@ -3,7 +3,7 @@
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
-fuzzing on protocol v2: §3; clock over Tor: §4f). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -88,7 +88,8 @@ Everything else:
     gateway's replay check is in `src/replay.rs`, so a target can reach it.
 - **Setup scripts:**
   - `setup-core.sh` (install, add-client, add-device, add-front, remove-front,
-    renew-front-list, direct-ingress, allow-origin, remove-origin, lockdown, status)
+    renew-front-list, direct-ingress, allow-origin, remove-origin, lockdown, status,
+    update)
   - `setup-front.sh`
   - `optes-clock.sh`: the clock of core and fronts over Tor (§4f); installed by
     both setup scripts, so it must be next to them
@@ -410,6 +411,57 @@ change):
   anything in these runs.
 - Not tested: after `lockdown`; on a VPS; a VPS's own clock behaviour (drift,
   wrong time at boot).
+
+## 4g. Updates (2026-11-15)
+
+- **Programs:** from a new kit's `core/`, as root:
+  `./setup-core.sh update --binary ./continuwuity --sha256 <hex from the kit README> --tunnel-bin-dir .`
+  - Before anything stops: checksum, `--version` / `--help` of the new
+    programs, room for a copy of the database, packages (over Tor).
+  - Then: stop gateway and server, copy the database to
+    `/var/lib/optes-update/db`, install continuwuity, optes-gateway,
+    optes-keys, the script copy (for the renewal timer) and optes-clock,
+    start, and wait up to 2 minutes for the server to answer on its socket;
+    then the gateway must stay up.
+  - If that fails: the old programs (kept in `/var/lib/optes-update/previous`)
+    and the database copy go back and start again.
+  - If it works: the database copy is deleted at once. It would keep events
+    that retention has deleted since (audit L1).
+  - Not changed: config, units of continuwuity and the gateway, keys, onions,
+    Tor. A kit that needs a config change says so in its README.
+  - Every tunnel drops and reconnects (the gateway restarts).
+- **Fronts** have no `update`: they hold no data. Replace a front with one
+  built from the new kit.
+- **OS security updates:** unattended-upgrades on core and fronts, with
+  Debian's default origins (security updates and stable point releases), once
+  a day by Debian's apt-daily timers, over apt's `tor+https` sources. No
+  automatic reboot: `status` warns when one is needed. It brings Python 3 onto
+  the core (unattended-upgrades is written in it). Its logs are on disk
+  (`/var/log/unattended-upgrades/`): package names and times, nothing about
+  users.
+
+How it was tested (Debian 13 VMs over real Tor, 2026-11-15):
+- Core installed from the kit of `0159f38`, relay straight to the core at
+  level 1, first account, `make-space.py example-server.toml` (14 rooms).
+  Then `update` from a kit of this change: done in 8 s; all 17 fingerprinted
+  files (onion keys and names, client keys, gateway and list keys, device
+  keys, front list, registration token, config) unchanged; the gateway's
+  replay counter for the relay went up, as it should after a reconnect; the
+  relay reconnected; the account still has the same 14 rooms. The two kits
+  carry the same server binary (its code did not change), so a real version
+  change, with a database migration, was not tested.
+- Rollback: a "new" server that answers `--version`, writes a file into the
+  database directory and then fails. `update` waited 2 minutes, rolled back,
+  exit 1: the old binary is back, the file is gone (the database copy was
+  restored), all fingerprints unchanged, the relay reconnected, 14 rooms.
+- Security updates: apt-daily and apt-daily-upgrade by hand on the core: 9
+  packages upgraded over Tor, among them the kernel; `status` asked for a
+  reboot. After the reboot: the new kernel, all services active, the relay
+  reconnected. On a front: install from the new kit, upgrades over Tor.
+- Not tested: `update` after `lockdown` (over the admin onion), on a VPS, with a
+  real new server version; the server's own signing key was not compared
+  (its endpoint is off without federation; it lives in the database, which is
+  kept).
 
 ## 5. Building and testing
 
