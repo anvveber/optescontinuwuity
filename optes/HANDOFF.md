@@ -93,7 +93,6 @@ Everything else:
   - `update-upstream.sh`: rebases onto a new upstream tag and runs every test
   - `make-kit.sh`: builds the release binaries and packs the deploy kit (§4c)
 - **Tests:** `optes/test/` (see §5)
-  - `home-test.sh` is a user-level real-Tor trial kit, no longer the plan (see §6).
 
 Design notes for each feature: `delayed-release-spec.md`, `bouncer-decision.md`,
 `phase2-protocol-spec.md`, `spaces.md`, `hardening.md`, `retention-design.md`,
@@ -273,7 +272,8 @@ suite again; `make-space.py` against a recording proxy. All with the release
 binaries. Not tested: real clients ("add existing room", room creation inside a
 space); the server's unit tests.
 
-Open: level-1 padding on the wire, the test gaps in L10, `home-test.sh` (L11).
+Open: level-1 padding on the wire, the test gaps in L10. `home-test.sh` (L11)
+was removed on 2026-11-15.
 
 ## 4e. First run over real Tor (2026-11-14)
 
