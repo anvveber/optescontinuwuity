@@ -25,8 +25,7 @@
 #     front and stops if it agrees.
 #   - Build paths (the home directory of whoever builds, the checkout path)
 #     are mapped to /cargo, /src and /rust, so they do not end up in the
-#     binaries. The script lists what is left and warns. One known rest: the
-#     server binary names the checkout directory (see the check below).
+#     binaries. The script lists what is left and warns.
 #   - The server binary does not record the git remote URL or the commit.
 #
 # Build needs: the Rust toolchain from rust-toolchain.toml, libclang and
@@ -132,10 +131,10 @@ if "$tunnel/optes-keys" sign-list --key "$tmp/list.key" --version 1 --gateway-ke
   die "this tunnel build accepts plain-TCP fronts (feature test-fronts). It must not ship. Run 'cargo clean' in optes/tunnel and build again."
 fi
 
-# Known: continuwuity embeds its web pages together with their full source
-# paths (crate memory-serve), which the flags above do not reach. So the
-# server binary names the checkout directory about ten times. To avoid that,
-# build from a checkout in a directory with a neutral name, as a neutral user.
+# The flags above do not reach paths that a build script writes into
+# generated code. One case was known: the embedded web pages (crate
+# memory-serve); src/web/build.rs now removes those paths. This check
+# catches any new case.
 info "check: build paths in the binaries"
 for f in "$server" "$tunnel/optes-relay" "$tunnel/optes-gateway" "$tunnel/optes-keys"; do
   found=$(grep -a -o -E "($HOME|$repo)/[A-Za-z0-9_./-]{0,60}" "$f" || true)

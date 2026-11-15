@@ -214,10 +214,16 @@ options: the header of the script. What it does besides copying files:
 - **Build paths.** Cargo's directory, the toolchain's directory and the checkout
   are mapped to `/cargo`, `/rust` and `/src`. The tunnel binaries then contain no
   path of the build machine.
-  - Not solved: the server binary still names the checkout directory 10 times.
-    Its web pages are embedded together with their source paths (crate
-    `memory-serve`). The script warns. Build from a checkout in a directory with
-    a neutral name if that matters. This belongs to reproducible builds (audit L7).
+  - The server's web pages are embedded by the crate `memory-serve`, which
+    also wrote each file's absolute source path into the binary (10 paths).
+    Since 2026-11-15, `src/web/build.rs` replaces them with paths relative to
+    the crate when the files are embedded. The build fails if `memory-serve`
+    changes its generated code so that the replacement no longer applies.
+    The script still checks every binary and warns about any build path left.
+    Tested: a kit build gives no warning, and the binaries contain neither the
+    home directory nor the checkout path. A release server and a debug server
+    both serve the files under `/_continuwuity/resources/` with the same bytes
+    as the source; `run-hardening-e2e.sh` passes on the debug build (on, off).
 - **No git remote, no commit in the server binary.** continuwuity's build script
   would record the URL of the remote `origin` and the commit. The kit build sets
   fixed values; the server reports its version as `26.9.1 (kit)`. The kit's name
