@@ -3,7 +3,7 @@
 Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (kit
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
-fuzzing on protocol v2: §3). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+fuzzing on protocol v2: §3; clock over Tor: §4f). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
@@ -90,6 +90,8 @@ Everything else:
   - `setup-core.sh` (install, add-client, add-device, add-front, remove-front,
     renew-front-list, direct-ingress, allow-origin, remove-origin, lockdown, status)
   - `setup-front.sh`
+  - `optes-clock.sh`: the clock of core and fronts over Tor (§4f); installed by
+    both setup scripts, so it must be next to them
   - `setup-relay.sh`
 - **Tools:**
   - `tools/make-space.py`: builds a whole server (space, categories, channels) from a TOML file
@@ -150,7 +152,8 @@ Open points seen during the run:
   the firewall blocks all DNS, so i2pd cannot resolve its reseed hosts once the firewall
   is up. Needs a decision (allow DNS on I2P fronts, or reseed another way).
 - **Clock:** time sync is off and NTP is blocked on core and fronts. Nothing corrects
-  clock drift; Tor needs a roughly correct clock.
+  clock drift; Tor needs a roughly correct clock. Fixed 2026-11-15: `optes-clock.sh`
+  (§4f).
 - **Relay started before `add-device`:** the gateway holds an unknown device about 30 s
   before closing, so the first connection takes that long. Add the device first.
 - `allow_prometheus_metrics` in the generated config is unknown to continuwuity 26.9.1
@@ -346,6 +349,52 @@ pass (the retention suite after its fix).
 
 Still needed: a VPS run (§6), daily use (T7), level 1 on the wire, the front's
 `lockdown`.
+
+## 4f. Clock over Tor (2026-11-15)
+
+`optes-clock.sh` (rules in its header; installed by `setup-core.sh` and
+`setup-front.sh` with `optes-clock.timer`, every 6 hours, first run 5–25 minutes
+after boot). Sources: `/etc/optes-clock/sources`, four onions from
+https://onion.debian.org/. `status` of both setup scripts shows the last result
+and Tor's own clock complaints. What a deployer must know:
+
+- **Forward up to 1 day and back up to 30 minutes happen by themselves.** A
+  larger step back needs `optes-clock check --allow-back`. Reason (measured):
+  an onion service numbers its descriptors by its clock, and Tor's directories
+  refuse a lower number than one they hold. In a VM, with the clock 20 minutes
+  ahead, Tor uploaded; after the step back every upload was refused until real
+  time passed the time of that upload, then accepted again. The old
+  descriptor keeps working, so only a Tor restart (or `remove-client`) in that
+  time makes the onion unreachable. `status` prints until when.
+- **2 or more days ahead, Tor itself fails** and nothing can answer. Set the
+  clock on the provider's console. Measured: Tor works up to at least 1 day
+  behind and 1 day ahead; at 2 and 3 days ahead it does not finish
+  bootstrapping. More than 1 day behind was not measured.
+- **A step moves the gateway's level-2 grid.** A relay connected before the step
+  stays on the old grid until it reconnects. Tor also logs "clock just jumped"
+  and rebuilds its circuits (seen after steps of 15 minutes and more); the
+  relays in the test reconnected by themselves (except below).
+
+How it was tested (Debian 13 VMs, real Tor, kit from `make-kit.sh` with this
+change):
+- Decision rule: `test/run-clock-decide-test.sh` (fixed samples: too few,
+  slow, disagreeing, malformed, each limit).
+- Sources: the four onions answered within 1–12 s once a circuit was warm; the
+  first request after a Tor start often takes much longer, hence a warm-up
+  request per source and all sources at once.
+- Core with a relay connected through a front: offsets 0 and 5 s left alone;
+  5 min behind, 10 min ahead, 2 h and 1 day in both directions corrected to
+  within 1 s; the relay got 200 after each. (This ran before the 30-minute
+  limit existed; with it, 2 h and 1 day ahead need `--allow-back`.)
+- 3 days ahead: no source answered (all at once: 3 minutes), clock untouched,
+  `status` warned. Afterwards the core's onion stayed unreachable: its earlier
+  uploads, made while its clock was up to 3 days ahead, carried higher
+  numbers. This is the case the 30-minute limit avoids. Not waited out.
+- Front: 15 minutes behind corrected; 40 minutes ahead refused, then corrected
+  with `--allow-back`; 10 minutes ahead corrected with the warning; timer
+  active after a reboot and the check ran.
+- Not tested: after `lockdown`; on a VPS; a VPS's own clock behaviour (drift,
+  wrong time at boot).
 
 ## 5. Building and testing
 

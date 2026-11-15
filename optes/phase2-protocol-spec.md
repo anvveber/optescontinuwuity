@@ -155,8 +155,11 @@ its own clock for all window timing. Reasons:
 - With each relay on its own clock, a device whose clock is off by a second
   sends every burst a second off the grid: a stable mark that a front can use
   to recognise the device across connections.
-- The core has no time sync (NTP is blocked), so its clock can drift away from
-  the relays'. The release tick follows the core's clock; the relays must too.
+- The core has no NTP (it is blocked). Since 2026-11-15 `optes-clock.sh` steps
+  its clock over Tor when it is more than 10 s off, so it can still be up to
+  10 s away from the relays'. The release tick follows the core's clock; the
+  relays must too. A step moves the grid; a relay connected before it stays on
+  the old grid until it reconnects.
 
 Limit: the difference is measured once, at the handshake. A level-2 tunnel
 that stays up for weeks drifts off the grid by however much the two clocks

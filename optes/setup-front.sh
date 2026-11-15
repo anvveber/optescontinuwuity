@@ -29,6 +29,9 @@
 #
 # Logs: journald keeps them in memory only (lost at reboot); no core dumps.
 #
+# Clock: optes-clock (optes-clock.sh, must be next to this script) asks onion
+# services for the time every 6 hours and steps the clock if needed.
+#
 # I2P front: i2pd in hidden mode (no published router address, no transit
 # traffic) hosts a server tunnel; the front still reaches the core over Tor.
 # Note: an I2P router talks to other I2P routers directly, so they see this
@@ -76,6 +79,69 @@ gen_x25519() {
   shred -u "$tmp/k.pem" 2>/dev/null || rm -f "$tmp/k.pem"
   rmdir "$tmp"
   [[ ${#CLIENT_PRIV} -eq 52 && ${#CLIENT_PUB} -eq 52 ]] || die "key generation failed"
+}
+
+# ---- clock over Tor (optes-clock.sh, see its header) ------------------------
+CLOCK_SRC=$(dirname "$(realpath "$0")")/optes-clock.sh
+CLOCK_BIN=/usr/local/sbin/optes-clock
+CLOCK_SOURCES=/etc/optes-clock/sources
+
+install_clock() {
+  install -o root -g root -m 0755 "$CLOCK_SRC" "$CLOCK_BIN"
+  if [[ ! -f $CLOCK_SOURCES ]]; then
+    mkdir -p "$(dirname "$CLOCK_SOURCES")"
+    cat > "$CLOCK_SOURCES" <<'SRC'
+# Onion services that optes-clock asks for the time (their HTTP Date header).
+# One address per line; edit if one goes away. Taken from the list at
+# https://onion.debian.org/ on 2026-11-15.
+5ekxbftvqg26oir5wle3p27ax3wksbxcecnm6oemju7bjra2pn26s3qd.onion   # www.debian.org
+5ajw6aqf3ep7sijnscdzw77t7xq4xjpsy335yb2wiwgouo7yfxtjlmid.onion   # security.debian.org
+jvgypgbnfyvfopg5msp6nwr2sl2fd6xmnguq35n7rfkw3yungjn2i4yd.onion   # onion.debian.org
+2s4yqjx5ul6okpp3f2gaunr2syex5jgbfpfvhxxbbjwnrsvbk5v3qbid.onion   # ftp.debian.org
+SRC
+    chmod 644 "$CLOCK_SOURCES"
+  fi
+  cat > /etc/systemd/system/optes-clock.service <<UNIT
+# Written by $(basename "$0")
+[Unit]
+Description=Check the clock against onion services over Tor
+After=tor@default.service
+Wants=tor@default.service
+
+[Service]
+Type=oneshot
+ExecStart=$CLOCK_BIN check
+# No answer yet (Tor still starting) or sources disagree: try again later.
+Restart=on-failure
+RestartSec=20min
+UNIT
+  cat > /etc/systemd/system/optes-clock.timer <<UNIT
+# Written by $(basename "$0")
+[Unit]
+Description=Check the clock over Tor every 6 hours
+
+[Timer]
+OnBootSec=5min
+OnUnitActiveSec=6h
+RandomizedDelaySec=20min
+
+[Install]
+WantedBy=timers.target
+UNIT
+  systemctl daemon-reload
+  systemctl enable --now optes-clock.timer
+}
+
+# Prints the clock lines of `status`.
+clock_status() {
+  local width=$1 skew
+  printf "%-${width}s %s\n" "clock check" "$("$CLOCK_BIN" status 2>/dev/null || echo 'not installed')"
+  printf "%-${width}s %s\n" "clock timer" "$(systemctl is-active optes-clock.timer 2>/dev/null || true)"
+  skew=$(journalctl -u tor@default --since -6h --no-pager -q 2>/dev/null \
+    | grep -o -E 'our clock is (behind|ahead) by [0-9]+ [a-z]+, [0-9]+ [a-z]+|clock just jumped [0-9]+ seconds (forward|backward)' \
+    | tail -n 1 || true)
+  [[ -z $skew ]] || warn "Tor said in the last 6 hours: $skew"
+  return 0
 }
 
 write_nft() {
@@ -135,6 +201,7 @@ cmd_install() {
   [[ $core =~ ^[a-z2-7]{56}\.onion$ ]] || die "--core must be the core's ingress onion address"
   [[ $core_auth =~ ^[A-Z2-7]{52}$ ]] || die "--core-auth must be the 52-char base32 private key from setup-core.sh add-client"
   [[ $type == tor || $type == i2p ]] || die "--type must be tor or i2p"
+  [[ -f $CLOCK_SRC ]] || die "optes-clock.sh must be in the same directory as this script"
 
   mkdir -p "$STATE_DIR"
   chmod 700 "$STATE_DIR"
@@ -144,7 +211,7 @@ cmd_install() {
   info "Packages"
   export DEBIAN_FRONTEND=noninteractive
   apt-get update
-  apt-get install -y --no-install-recommends tor apt-transport-tor socat nftables openssl coreutils apparmor-utils python3
+  apt-get install -y --no-install-recommends tor apt-transport-tor socat nftables openssl coreutils apparmor-utils python3 curl
   [[ $type == i2p ]] && apt-get install -y --no-install-recommends i2pd
 
   if ! id "$FWD_USER" &>/dev/null; then
@@ -295,6 +362,9 @@ EOF
   write_nft yes
   systemctl enable nftables.service
   systemctl restart nftables.service
+
+  info "Clock over Tor (optes-clock.timer, every 6 hours)"
+  install_clock
 
   local front admin
   front=$(front_address)
@@ -485,6 +555,7 @@ cmd_status() {
   printf '%-24s %s\n' "relay clients" "${clients:-none}"
   [[ -z $clients && $(cat "$STATE_DIR/type" 2>/dev/null) == tor ]] \
     && warn "this front is open: anyone who knows the address can connect ('add-client <name>' closes it)"
+  clock_status 24
   return 0
 }
 
@@ -497,7 +568,7 @@ main() {
     remove-client) need_root; cmd_remove_client "$@" ;;
     lockdown)      need_root; cmd_lockdown "$@" ;;
     status)        need_root; cmd_status ;;
-    *) sed -n '2,36p' "$0"; exit 1 ;;
+    *) sed -n '2,38p' "$0"; exit 1 ;;
   esac
 }
 

@@ -12,8 +12,8 @@
 #   <out>/optes-kit-<commit>.tar.gz  the same, packed
 #
 # Kit layout:
-#   core/   continuwuity optes-gateway optes-keys setup-core.sh
-#   front/  setup-front.sh
+#   core/   continuwuity optes-gateway optes-keys setup-core.sh optes-clock.sh
+#   front/  setup-front.sh optes-clock.sh
 #   relay/  optes-relay optes-keys setup-relay.sh
 #   tools/  make-space.py example-server.toml
 #   README  SHA256SUMS
@@ -150,6 +150,8 @@ install -m 0755 "$tunnel/optes-gateway" "$kit/core/optes-gateway"
 install -m 0755 "$tunnel/optes-keys"    "$kit/core/optes-keys"
 install -m 0755 optes/setup-core.sh     "$kit/core/setup-core.sh"
 install -m 0755 optes/setup-front.sh    "$kit/front/setup-front.sh"
+install -m 0755 optes/optes-clock.sh    "$kit/core/optes-clock.sh"
+install -m 0755 optes/optes-clock.sh    "$kit/front/optes-clock.sh"
 install -m 0755 "$tunnel/optes-relay"   "$kit/relay/optes-relay"
 install -m 0755 "$tunnel/optes-keys"    "$kit/relay/optes-keys"
 install -m 0755 optes/setup-relay.sh    "$kit/relay/setup-relay.sh"
@@ -175,8 +177,11 @@ Check the files first, in this directory:
 Contents
 --------
 core/    for the core server (Debian 13): continuwuity, optes-gateway,
-         optes-keys, setup-core.sh
-front/   for a front server (Debian 13): setup-front.sh (needs no binary)
+         optes-keys, setup-core.sh, optes-clock.sh
+front/   for a front server (Debian 13): setup-front.sh, optes-clock.sh
+         (no binary)
+         optes-clock.sh sets the clock over Tor; the setup scripts install
+         it. Keep it in the same directory as the setup script.
 relay/   for your own machine (Fedora or Debian): optes-relay, optes-keys,
          setup-relay.sh
 tools/   make-space.py and an example server layout

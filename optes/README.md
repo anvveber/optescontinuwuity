@@ -16,9 +16,11 @@ Start with `HANDOFF.md` (project state), then `handbook.md` (design, threat mode
 | `tunnel/` | Rust: `optes-relay`, `optes-gateway`, `optes-keys` |
 | `setup-core.sh` | Core VPS (Debian 13) |
 | `setup-front.sh` | Front VPS, Tor or I2P (Debian 13) |
+| `optes-clock.sh` | Sets the clock of core and fronts over Tor (installed by `setup-core.sh` and `setup-front.sh`) |
 | `setup-relay.sh` | Relay on your own machine (Fedora/Debian) |
 | `make-kit.sh` | Build the release binaries and pack a deploy kit (`core/ front/ relay/ tools/`, README, checksums) |
 | `test/` | End-to-end tests (no Tor needed) |
+| `test/run-clock-decide-test.sh` | The clock tool's decision rule with fixed samples (no network) |
 | `test/vm.py` | A throwaway Debian 13 VM (QEMU) for running the setup scripts; never run them on your own machine |
 | `hardening.md` | `require_encryption`, `hide_server_identity`, the browser guard (`restrict_request_hosts`, `allowed_origins`), `allow_pushers`, `allow_openid_tokens`: what they do and don't cover |
 | `audit-2026-11-10.md` | Privacy audit of the fork's own parts: findings and what was done about each |
