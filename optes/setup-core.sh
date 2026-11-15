@@ -1128,7 +1128,7 @@ server_answers() {
 # True when the new set of services runs: continuwuity answers, and the
 # gateway (if installed) is still active a few seconds after its start.
 services_ok() {
-  server_answers 120 || return 1
+  server_answers 300 || return 1
   if [[ -f $GW_UNIT ]]; then
     systemctl start optes-gateway.service || return 1
     sleep 5
@@ -1142,6 +1142,12 @@ stop_services() {
   systemctl stop continuwuity.service
 }
 
+CORE_PKGS=(tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades)
+UPDATE_LOG=$UPDATE_DIR/log
+
+# Part 1, in the operator's session: checks and preparation. Nothing stops
+# here. Part 2 (update_apply) runs as a systemd unit, so a dropped SSH
+# session (the admin onion) cannot leave the server half updated.
 cmd_update() {
   local binary="" sha="" tunnel_dir=""
   while [[ $# -gt 0 ]]; do
@@ -1153,19 +1159,22 @@ cmd_update() {
     esac
   done
   [[ -f $CONF && -x $BIN ]] || die "no core installed here (run install first)"
+  [[ ! -e $UPDATE_DIR/in-progress ]] || die "an earlier update did not finish ($UPDATE_DIR, log: $UPDATE_LOG). Look at it before trying again."
   [[ -f $binary ]] || die "--binary: file not found"
   [[ $sha =~ ^[0-9a-f]{64}$ ]] || die "--sha256 must be 64 lowercase hex chars"
   local actual
   actual=$(sha256sum "$binary" | cut -d' ' -f1)
   [[ $actual == "$sha" ]] || die "sha256 mismatch: got $actual"
+  binary=$(realpath "$binary")
   if [[ -f $GW_UNIT ]]; then
     [[ -n $tunnel_dir ]] || die "the tunnel is installed: pass --tunnel-bin-dir (the kit's core/ directory)"
     [[ -x $tunnel_dir/optes-gateway && -x $tunnel_dir/optes-keys ]] \
       || die "--tunnel-bin-dir must contain executable optes-gateway and optes-keys"
+    tunnel_dir=$(realpath "$tunnel_dir")
   fi
   [[ -f $CLOCK_SRC ]] || die "optes-clock.sh must be in the same directory as this script"
 
-  # Do the new programs run at all on this machine? Before anything stops.
+  # Do the new programs run at all on this machine?
   "$binary" --version > /dev/null 2>&1 || die "the new continuwuity does not run here ($binary --version failed)"
   if [[ -n $tunnel_dir ]]; then
     "$tunnel_dir/optes-gateway" --help > /dev/null 2>&1 || die "the new optes-gateway does not run here"
@@ -1173,29 +1182,59 @@ cmd_update() {
   fi
 
   # Room for a copy of the database.
-  local db=/var/lib/continuwuity need have
-  need=$(du -sk "$db" | cut -f1)
+  local need have
+  need=$(du -sk /var/lib/continuwuity | cut -f1)
   have=$(df -Pk "$(dirname "$UPDATE_DIR")" | awk 'NR == 2 {print $4}')
   (( have > need + need / 5 + 102400 )) || die "not enough disk space for a copy of the database (${need} KiB needed)"
 
-  info "Packages (over Tor)"
-  export DEBIAN_FRONTEND=noninteractive
-  apt-get update || die "apt-get update failed (is Tor up?); nothing was changed"
-  apt-get install -y --no-install-recommends tor apt-transport-tor nftables openssl coreutils apparmor-utils liburing2 curl unattended-upgrades \
-    || die "package install failed; nothing else was changed"
+  # Only packages that are missing (an older install). Upgrades of installed
+  # packages are left to unattended-upgrades: a tor upgrade restarts Tor.
+  local p missing=()
+  for p in "${CORE_PKGS[@]}"; do
+    dpkg-query -W -f='${Status}' "$p" 2>/dev/null | grep -q "install ok installed" || missing+=("$p")
+  done
+  if (( ${#missing[@]} > 0 )); then
+    info "Installing missing packages over Tor: ${missing[*]}"
+    export DEBIAN_FRONTEND=noninteractive
+    apt-get update || die "apt-get update failed (is Tor up?); nothing was changed"
+    apt-get install -y --no-install-recommends "${missing[@]}" || die "package install failed; nothing else was changed"
+  fi
 
   info "Keeping the current programs in $UPDATE_DIR/previous"
   rm -rf "$UPDATE_DIR"
   install -d -m 0700 "$UPDATE_DIR/previous"
   local f
   for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
-    [[ -e $f ]] && cp -a "$f" "$UPDATE_DIR/previous/$(basename "$f")"
+    [[ -e $f ]] && cp -a "$f" "$UPDATE_DIR/previous/"
   done
+  touch "$UPDATE_DIR/previous.complete"
 
+  info "The rest runs as the systemd unit optes-update and goes on if this session ends."
+  info "Log: $UPDATE_LOG"
+  : > "$UPDATE_LOG"
+  local rc=0
+  systemd-run --unit=optes-update --collect --wait --quiet \
+    -p StandardOutput="append:$UPDATE_LOG" -p StandardError="append:$UPDATE_LOG" \
+    /bin/bash "$(realpath "$0")" update-apply "$binary" "$tunnel_dir" &
+  local pid=$!
+  tail --pid="$pid" -n +1 -f "$UPDATE_LOG" 2>/dev/null || true
+  wait "$pid" || rc=$?
+  return "$rc"
+}
+
+# Part 2, in the unit optes-update. Every exit before the end rolls back.
+UPDATE_STAGE=none
+update_apply() {
+  local binary=$1 tunnel_dir=$2 db=/var/lib/continuwuity
+  touch "$UPDATE_DIR/in-progress"
+  trap 'update_rollback' EXIT
+  UPDATE_STAGE=stopping
   info "Stopping the server; copying the database"
   stop_services
   cp -a --reflink=auto "$db" "$UPDATE_DIR/db"
+  touch "$UPDATE_DIR/db.complete"
 
+  UPDATE_STAGE=installing
   info "Installing the new programs"
   install -o root -g root -m 0755 "$binary" "$BIN"
   if [[ -n $tunnel_dir ]]; then
@@ -1207,27 +1246,45 @@ cmd_update() {
   install_auto_updates
   systemctl daemon-reload
 
-  info "Starting and checking"
+  UPDATE_STAGE=started
+  info "Starting and checking (up to 5 minutes for the server to answer)"
   systemctl start continuwuity.service
-  if services_ok; then
-    rm -rf "$UPDATE_DIR/db"
-    info "update done. The old programs stay in $UPDATE_DIR/previous until the next update."
-    return 0
-  fi
+  services_ok || exit 1
 
-  warn "the new programs did not come up; rolling back"
-  journalctl -u continuwuity -u optes-gateway -n 20 --no-pager >&2 || true
+  rm -rf "$UPDATE_DIR/db" "$UPDATE_DIR/db.complete" "$UPDATE_DIR/in-progress"
+  UPDATE_STAGE=finished
+  info "update done. The old programs stay in $UPDATE_DIR/previous until the next update."
+}
+
+update_rollback() {
+  [[ $UPDATE_STAGE == finished ]] && return 0
+  trap - EXIT
+  set +e
+  warn "update stopped at stage '$UPDATE_STAGE'; rolling back"
+  journalctl -u continuwuity -u optes-gateway -n 20 --no-pager >&2
   stop_services
-  for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
-    [[ -e $UPDATE_DIR/previous/$(basename "$f") ]] && cp -a "$UPDATE_DIR/previous/$(basename "$f")" "$f"
-  done
-  rm -rf "$db"
-  mv "$UPDATE_DIR/db" "$db"
+  local f
+  if [[ -e $UPDATE_DIR/previous.complete ]]; then
+    for f in "$BIN" "$GW_BIN" "$KEYS_BIN" "$SELF_COPY" "$CLOCK_BIN"; do
+      [[ -e $UPDATE_DIR/previous/$(basename "$f") ]] && cp -a "$UPDATE_DIR/previous/$(basename "$f")" "$f"
+    done
+  fi
+  # The new server may have changed the database only once it was started.
+  # A copy counts only if it was finished.
+  if [[ $UPDATE_STAGE == started && -e $UPDATE_DIR/db.complete ]]; then
+    rm -rf /var/lib/continuwuity
+    mv "$UPDATE_DIR/db" /var/lib/continuwuity
+  fi
+  rm -rf "$UPDATE_DIR/db" "$UPDATE_DIR/db.complete"
+  systemctl daemon-reload
   systemctl start continuwuity.service
   if services_ok; then
-    die "update failed and was rolled back: the old programs and the database from before the update are running again"
+    rm -f "$UPDATE_DIR/in-progress"
+    echo "ERROR: update failed and was rolled back: the old programs and the database from before the update are running again" >&2
+    exit 1
   fi
-  die "update failed AND the rollback did not come up. Old programs: $UPDATE_DIR/previous. Collect: journalctl -u continuwuity -u optes-gateway"
+  echo "ERROR: update failed AND the rollback did not come up. Old programs: $UPDATE_DIR/previous. Collect: journalctl -u continuwuity -u optes-gateway" >&2
+  exit 2
 }
 
 cmd_lockdown() {
@@ -1276,6 +1333,7 @@ main() {
     remove-origin) need_root; cmd_remove_origin "$@" ;;
     status)        need_root; cmd_status ;;
     update)        need_root; cmd_update "$@" ;;
+    update-apply)  need_root; update_apply "$@" ;;
     add-device)    need_root; cmd_add_device "$@" ;;
     remove-device) need_root; cmd_remove_device "$@" ;;
     add-front)     need_root; cmd_add_front "$@" ;;

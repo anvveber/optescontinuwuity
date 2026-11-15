@@ -416,52 +416,68 @@ change):
 
 - **Programs:** from a new kit's `core/`, as root:
   `./setup-core.sh update --binary ./continuwuity --sha256 <hex from the kit README> --tunnel-bin-dir .`
-  - Before anything stops: checksum, `--version` / `--help` of the new
-    programs, room for a copy of the database, packages (over Tor).
-  - Then: stop gateway and server, copy the database to
-    `/var/lib/optes-update/db`, install continuwuity, optes-gateway,
-    optes-keys, the script copy (for the renewal timer) and optes-clock,
-    start, and wait up to 2 minutes for the server to answer on its socket;
-    then the gateway must stay up.
-  - If that fails: the old programs (kept in `/var/lib/optes-update/previous`)
-    and the database copy go back and start again.
-  - If it works: the database copy is deleted at once. It would keep events
-    that retention has deleted since (audit L1).
-  - Not changed: config, units of continuwuity and the gateway, keys, onions,
-    Tor. A kit that needs a config change says so in its README.
+  - In the session, before anything stops: checksum; `--version` / `--help` of
+    the new programs; room for a copy of the database; packages that are
+    missing (over Tor; installed packages are not upgraded here, since a tor
+    upgrade would restart Tor in the middle); a copy of the current programs
+    in `/var/lib/optes-update/previous`.
+  - The rest runs as the systemd unit `optes-update`, so a dropped SSH session
+    (the admin onion) cannot stop it halfway. Log:
+    `/var/lib/optes-update/log`. It stops gateway and server, copies the
+    database, installs continuwuity, optes-gateway, optes-keys, the script
+    copy and optes-clock, starts, waits up to 5 minutes for the server to
+    answer on its socket, then the gateway must stay up.
+  - Any exit before the end rolls back: the old programs, and the database
+    copy if the new server was started (a copy counts only once finished).
+    Unit files and apt settings that the new kit wrote stay.
+  - A new server version whose database migration takes more than 5 minutes
+    is rolled back.
+  - On success the copy is deleted. `rm` frees the disk blocks but does not
+    erase them: the old copy, with events retention deletes later, stays in
+    free disk space until it is overwritten (threat table, audit L1).
+  - A leftover of an unfinished update (`in-progress`) blocks the next one.
+  - Not changed: config, keys, onions, Tor. A kit that needs a config change
+    says so in its README.
   - Every tunnel drops and reconnects (the gateway restarts).
 - **Fronts** have no `update`: they hold no data. Replace a front with one
   built from the new kit.
 - **OS security updates:** unattended-upgrades on core and fronts, with
   Debian's default origins (security updates and stable point releases), once
   a day by Debian's apt-daily timers, over apt's `tor+https` sources. No
-  automatic reboot: `status` warns when one is needed. It brings Python 3 onto
-  the core (unattended-upgrades is written in it). Its logs are on disk
+  automatic reboot: `status` warns when one is needed. A tor update restarts
+  Tor (tunnels drop and reconnect). It brings Python 3 onto the core
+  (unattended-upgrades is written in it). Its logs are on disk
   (`/var/log/unattended-upgrades/`): package names and times, nothing about
   users.
 
-How it was tested (Debian 13 VMs over real Tor, 2026-11-15):
-- Core installed from the kit of `0159f38`, relay straight to the core at
-  level 1, first account, `make-space.py example-server.toml` (14 rooms).
-  Then `update` from a kit of this change: done in 8 s; all 17 fingerprinted
-  files (onion keys and names, client keys, gateway and list keys, device
-  keys, front list, registration token, config) unchanged; the gateway's
-  replay counter for the relay went up, as it should after a reconnect; the
-  relay reconnected; the account still has the same 14 rooms. The two kits
-  carry the same server binary (its code did not change), so a real version
-  change, with a database migration, was not tested.
-- Rollback: a "new" server that answers `--version`, writes a file into the
-  database directory and then fails. `update` waited 2 minutes, rolled back,
-  exit 1: the old binary is back, the file is gone (the database copy was
-  restored), all fingerprints unchanged, the relay reconnected, 14 rooms.
-- Security updates: apt-daily and apt-daily-upgrade by hand on the core: 9
-  packages upgraded over Tor, among them the kernel; `status` asked for a
-  reboot. After the reboot: the new kernel, all services active, the relay
-  reconnected. On a front: install from the new kit, upgrades over Tor.
-- Not tested: `update` after `lockdown` (over the admin onion), on a VPS, with a
-  real new server version; the server's own signing key was not compared
-  (its endpoint is off without federation; it lives in the database, which is
-  kept).
+How it was tested (Debian 13 VMs over real Tor, 2026-11-15; each time: a
+relay straight to the core at level 1, first account, `make-space.py
+example-server.toml` = 14 rooms; 17 fingerprinted files: onion keys and
+names, client keys, gateway and list keys, device keys, front list,
+registration token, config):
+- Update from a kit without these changes (`0159f38`) to one with them, and
+  update on a core with `unattended-upgrades` removed (missing package
+  installed over Tor). Both: done in 8–18 s; all fingerprints unchanged; the
+  relay reconnected; the same 14 rooms. The gateway's replay counter for the
+  relay went up, as it should after a reconnect.
+- Rollback, broken server (answers `--version`, writes a file into the
+  database directory, exits): the SSH session was killed 40 s in; the unit
+  went on, waited 5 minutes, rolled back: old binary, the file gone (database
+  copy restored), fingerprints unchanged, relay back, 14 rooms.
+- Rollback, broken gateway (answers `--help`, exits): rolled back after 14 s,
+  same checks.
+- A leftover `in-progress` file: `update` refuses.
+- Security updates by hand on the core: 9 packages over Tor, among them the
+  kernel; `status` asked for a reboot; after it the new kernel and all
+  services. `apt-get install --reinstall tor`: torrc and the AppArmor override
+  kept, Tor up, the relay reconnected (after about 5 minutes). On a front:
+  install from the new kit, upgrades over Tor.
+- Not tested: a real new server version (all kits had the same server
+  binary, so no database migration ran); `update` after `lockdown`; on a VPS;
+  a tor package that ships a changed torrc; the server's own signing key
+  (its endpoint is off without federation; it lives in the database).
+- Seen once: a relay needed 36 minutes after the core's install to reach its
+  onion (the core's descriptor uploads were accepted; Tor network delay).
 
 ## 5. Building and testing
 
