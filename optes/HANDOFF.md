@@ -231,6 +231,12 @@ options: the header of the script. What it does besides copying files:
     home directory nor the checkout path. A release server and a debug server
     both serve the files under `/_continuwuity/resources/` with the same bytes
     as the source; `run-hardening-e2e.sh` passes on the debug build (on, off).
+  - Kit of 2026-11-15 (after this change and the replay check's move into the
+    tunnel library) in two Debian 13 VMs over real Tor: core install from the
+    README, relay straight to the core, `/versions` 200 through the relay
+    (first after about 4 minutes, as in §4e), first account at level 2.
+    Not run again: fronts, `lockdown`, levels 1 and 3, `make-space.py`.
+    `update-upstream.sh --test-only` passed on the same commit.
 - **No git remote, no commit in the server binary.** continuwuity's build script
   would record the URL of the remote `origin` and the commit. The kit build sets
   fixed values; the server reports its version as `26.9.1 (kit)`. The kit's name
