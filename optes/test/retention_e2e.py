@@ -2,8 +2,17 @@
 """Per-room retention against a running server with allow_room_retention = true
 and a short retention_purge_interval_secs.
 
-Usage: retention_e2e.py <base_url> <registration_token> <first_run_token> <server_log>
+Usage: retention_e2e.py <base_url> <registration_token> <first_run_token> <server_log> [<db_dir>]
+
+With <db_dir> (and RocksDB compression off in the server config) it also checks
+the database files: the text and IDs of purged messages must be gone from
+every file in it, while a kept message must still be there. Only with delayed
+release off: with it on, this short test's writes can still sit in RocksDB's
+write buffer in memory before the purge, so the files could not show them and
+the check would prove nothing.
 """
+
+import os
 
 import json
 import sys
@@ -14,10 +23,13 @@ import urllib.request
 import uuid
 
 BASE, TOKEN, FIRST, LOG = sys.argv[1:5]
+DB = sys.argv[5] if len(sys.argv) > 5 else None
 FAILURES = []
 q = urllib.parse.quote
 LIFETIME_MS = 20_000
 RELEASE_S = int(__import__("os").environ.get("RELEASE", "0"))
+if RELEASE_S:
+    DB = None
 
 
 def settle():
@@ -102,12 +114,12 @@ perm = room_with(alice, "permanent")
 call("POST", f"/_matrix/client/v3/join/{q(temp)}", {}, bob)
 
 m1 = send(alice, temp, text(f"first {word}"))
-m2 = send(alice, temp, text("second"))
-reply = send(bob, temp, text("reply", **{"m.relates_to": {"m.in_reply_to": {"event_id": m1}}}))
+m2 = send(alice, temp, text(f"second marker{sfx}m2"))
+reply = send(bob, temp, text(f"reply marker{sfx}re", **{"m.relates_to": {"m.in_reply_to": {"event_id": m1}}}))
 reaction = send(bob, temp, {"m.relates_to": {"rel_type": "m.annotation", "event_id": m2, "key": "+1"}},
                 "m.reaction")
-thread = send(bob, temp, text("in thread", **{"m.relates_to": {"rel_type": "m.thread", "event_id": m1}}))
-p1 = send(alice, perm, text("keep me"))
+thread = send(bob, temp, text(f"in thread marker{sfx}th", **{"m.relates_to": {"rel_type": "m.thread", "event_id": m1}}))
+p1 = send(alice, perm, text(f"keep me marker{sfx}p1"))
 old = {m1, m2, reply, reaction, thread}
 settle()
 
@@ -145,8 +157,53 @@ check("expired message not found by search", not hits, f"{len(hits)} hits")
 check("newest message still visible", newest in timeline_ids(bob, temp))
 check("room without retention keeps its messages", readable(alice, perm, p1))
 
+# --- on disk before the purge (control for the disk check below) ----------
+PURGED_MARKERS = [word, f"marker{sfx}m2", f"marker{sfx}re", f"marker{sfx}th"] + sorted(old)
+
+
+def on_disk(marker, allow_prev_events=False):
+    """Files under the database directory whose bytes contain marker. With
+    allow_prev_events, an occurrence inside a kept event's "prev_events" list
+    does not count: the room's history keeps those links."""
+    found = []
+    needle = marker.encode()
+    for root, _, files in os.walk(DB):
+        for name in files:
+            try:
+                with open(os.path.join(root, name), "rb") as f:
+                    raw = f.read()
+            except OSError:
+                continue
+            at = raw.find(needle)
+            while at >= 0:
+                before = raw[max(0, at - 400):at]
+                k = before.rfind(b'"prev_events":[')
+                linked = allow_prev_events and k >= 0 and b"]" not in before[k:]
+                if not linked:
+                    found.append(os.path.relpath(os.path.join(root, name), DB))
+                    break
+                at = raw.find(needle, at + 1)
+    return found
+
+
+if DB:
+    seen = [m for m in PURGED_MARKERS if on_disk(m)]
+    check("control: the expired messages are in the database files before the purge",
+          len(seen) == len(PURGED_MARKERS), f"{len(seen)} of {len(PURGED_MARKERS)} found")
+
 # --- deleted by the purge job ---------------------------------------------
 time.sleep(6)  # purge interval in the test config is 3 s
+if DB:
+    left = {}
+    for _ in range(30):
+        left = {m: on_disk(m, allow_prev_events=m.startswith("$")) for m in PURGED_MARKERS}
+        left = {m: f for m, f in left.items() if f}
+        if not left:
+            break
+        time.sleep(1)
+    check("purged messages are gone from every database file (text; event IDs except in kept events' prev_events)", not left,
+          "; ".join(f"{m[:20]}: {', '.join(f)}" for m, f in list(left.items())[:4]))
+    check("control: the kept message is still in the database files", bool(on_disk(f"marker{sfx}p1")))
 call("PUT", f"/_matrix/client/v3/rooms/{q(temp)}/state/m.room.retention/",
      {"max_lifetime": 10 * 365 * 86400 * 1000}, alice)
 settle()

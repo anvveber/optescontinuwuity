@@ -23,6 +23,10 @@ allow_announcements_check = false
 log = "info"
 allow_room_retention = true
 retention_purge_interval_secs = 3
+# So that the test can find message text in the database files.
+rocksdb_compression_algo = "none"
+rocksdb_wal_compression = "none"
+rocksdb_bottommost_compression = false
 release_interval_secs = ${RELEASE:-0}
 EOF
 
@@ -35,7 +39,7 @@ for _ in $(seq 1 60); do
 done
 first=$(sed 's/\x1b\[[0-9;]*m//g' "$work/server.log" | grep -o 'using the registration token [^ ]*' | awk '{print $NF}' | head -1)
 
-RELEASE=${RELEASE:-0} python3 "$here/retention_e2e.py" "http://127.0.0.1:$port" "$token" "$first" "$work/server.log" || {
+RELEASE=${RELEASE:-0} python3 "$here/retention_e2e.py" "http://127.0.0.1:$port" "$token" "$first" "$work/server.log" "$work/db" || {
   echo "--- server log ---"; grep -iE "warn|error|retention" "$work/server.log" | tail -20; exit 1;
 }
 

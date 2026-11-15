@@ -243,7 +243,7 @@ the wire, signed front list. The core end is a separate process,
 | Observer at a user         | that user's level 0–4 traffic pattern, and that the line runs this software (limitation 6). |
 | The time sources (Debian's onion services) | that a Tor client asks for the time every 6 hours; not who or where. The fixed pattern (four onions, every 6 h) is one more sign that this software is in use (limitation 6). They can move the clock of core and fronts: forward up to 1 day, back up to 30 minutes, per check; forward moves add up over checks. A clock moved forward makes retention delete events early by that much and shifts event timestamps; one moved back delays them. Debian already signs every package these hosts install. |
 | Debian's mirrors (reached through Tor exits) | that a Tor client fetches Debian's package lists daily and some packages (unattended-upgrades on core and fronts, Debian's apt-daily timers); not who or where. The exit sees the same over HTTPS. |
-| Core's VPS host            | accounts, rooms, metadata. Content stays E2E-encrypted only against a host that just reads (limitation 7). The front-list signing key and gateway key are on its disk, so it can publish its own fronts; relays still only dial onion / b32.i2p addresses, so this gives it no user IP. Deleted data stays readable in free disk blocks: events purged by retention until compaction (audit L1), and after each `setup-core.sh update` a whole old copy of the database. |
+| Core's VPS host            | accounts, rooms, metadata. Content stays E2E-encrypted only against a host that just reads (limitation 7). The front-list signing key and gateway key are on its disk, so it can publish its own fronts; relays still only dial onion / b32.i2p addresses, so this gives it no user IP. Deleted data stays readable in free disk blocks: the files retention rewrote (until the blocks are reused), and after each `setup-core.sh update` a whole old copy of the database. |
 
 Last row is the residual weak point (limitations 3 and 7).
 
@@ -565,7 +565,7 @@ thin.
 | `require_encryption` (plaintext messages refused, rooms encrypted by default) | built, e2e tested | `hardening.md` |
 | `hide_server_identity` | built, e2e tested | `hardening.md` |
 | Front-list renewal (weekly re-sign; relay refresh) | built, e2e tested | `phase2-protocol-spec.md` §5 |
-| Per-channel retention (MSC1763; whole events deleted) | built, e2e tested (incl. restart on purged DB) | `retention-design.md` |
+| Per-channel retention (MSC1763; whole events deleted) | built, e2e tested (incl. restart on purged DB). 2026-11-15: purged events are also erased from the database files; e2e checks every file (fails on the binary before) | `retention-design.md` |
 | Fuzzing of tunnel parsers (6 targets) | 2026-11-15 on protocol v2: 15 minutes per target, ~136M runs, no crashes. New target `hello_counter`: real handshakes through the replay check | `tunnel/fuzz/` |
 | Audit of the fork's own parts | done 2026-11-10; `space_autojoin`, `make-space.py` and the tests read on 2026-11-14; findings and fixes listed | `audit-2026-11-10.md` |
 | Tunnel protocol v2: handshake counter (no replay), gateway time for level-2 windows, onion/b32-only fronts | built, unit and e2e tested (no Tor) | `phase2-protocol-spec.md` §3.1, §4, §5 |

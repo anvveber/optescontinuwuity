@@ -73,7 +73,7 @@ Server patches (in `src/`, config keys in `src/core/config/mod.rs` and `conduwui
 | `auto_join_space_children`, `allow_space_creation`, `restrict_room_creation_to_spaces` | Discord-style servers | `src/service/space_autojoin/`, `src/api/client/room/create.rs` |
 | `require_encryption` | New rooms are encrypted; unencrypted messages, stickers and polls are refused. Reactions and redactions are allowed. The admin room is exempt. | `src/api/client/send.rs`, `room/create.rs` |
 | `hide_server_identity` | Removes the version endpoint, landing page, about page and debug pages; uses a neutral cookie name | `src/api/router.rs`, `src/web/mod.rs`, `api/client/unversioned.rs` |
-| `allow_room_retention`, `retention_purge_interval_secs` | MSC1763 `m.room.retention`: expired events are hidden at once and purged from the DB by a background job. State events, forward extremities and the newest event are kept. | `src/service/retention/` |
+| `allow_room_retention`, `retention_purge_interval_secs` | MSC1763 `m.room.retention`: expired events are hidden at once and purged from the DB by a background job, then erased from the database files (flush, full compaction; no WAL archive). State events, forward extremities and the newest event are kept. | `src/service/retention/`, `retention-design.md` |
 | `restrict_request_hosts`, `allowed_hosts`, `allowed_origins` | Browser guard: a website open in a user's browser can't use the server through the local relay (Host must be an IP, localhost or onion/i2p name; requests with an unlisted `Origin` are refused) | `src/router/request.rs` (`guard`), `src/router/layers.rs` |
 | `allow_pushers` | Off: push registrations are answered with success and not stored | `src/api/client/push.rs` |
 | `allow_openid_tokens` | Off: OpenID token requests are refused | `src/api/client/openid.rs` |
@@ -208,8 +208,9 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
   front after these changes; Fedora. The fuzz targets were only compiled then;
   they ran on 2026-11-15 (`tunnel/fuzz/README.md`).
 
-Open after the audit (not fixed): low items L1 and L4–L7 (L7 partly done, §4c;
-L5 done, §4g). Device names (12) are hidden since 2026-11-15
+Open after the audit (not fixed): low items L4–L7 (L7 partly done, §4c;
+L5 done, §4g). L1 done 2026-11-15 except free disk blocks
+(`retention-design.md`). Device names (12) are hidden since 2026-11-15
 (`show_device_names_to_others`, `hardening.md`).
 Finding 6 is accepted: the core uses Tor's built-in vanguards-lite only, not the
 full add-on (handbook §4.6).

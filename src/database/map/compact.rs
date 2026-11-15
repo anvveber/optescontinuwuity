@@ -1,5 +1,5 @@
 use conduwuit::{Err, Result};
-use rocksdb::{BottommostLevelCompaction, CompactOptions};
+use rocksdb::{BottommostLevelCompaction, CompactOptions, FlushOptions};
 
 use crate::keyval::KeyBuf;
 
@@ -59,5 +59,18 @@ impl super::Map {
 			.compact_range_cf_opt(&self.cf(), opts.range.0, opts.range.1, &co);
 
 		Ok(())
+	}
+
+	/// Writes this column family's memtable to a file and waits for it
+	/// (optescontinuwuity: retention). A write-ahead log is retired once
+	/// every column family with data in it has been flushed.
+	#[tracing::instrument(name = "flush", level = "debug", skip(self), fields(%self))]
+	pub fn flush_blocking(&self) -> Result {
+		let mut fo = FlushOptions::default();
+		fo.set_wait(true);
+		self.db
+			.db
+			.flush_cf_opt(&self.cf(), &fo)
+			.map_err(|e| conduwuit::err!(Database("flush failed: {e}")))
 	}
 }

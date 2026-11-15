@@ -8,6 +8,18 @@
 //!   the database: the event itself, its search tokens, relation and thread
 //!   entries, reference marks and short-ID mappings.
 //!
+//! After a purge that removed something, the deleted entries are also erased
+//! from the database files: the memory buffers are written out (which retires
+//! the write-ahead log that holds every write) and every table is compacted,
+//! which drops deleted entries from older files. Client transaction IDs that
+//! point to purged events are deleted first. With retention on, RocksDB keeps
+//! no archive of retired write-ahead logs and rewrites its file index
+//! (MANIFEST) after every change, since it records the first and last key of every file
+//! (see `db_opts.rs`). Purged event IDs stay where kept events name them
+//! (`prev_events`): the room's history needs those links.
+//! What this cannot reach: disk blocks of deleted files (the filesystem frees
+//! them but does not overwrite them), backups and disk snapshots.
+//!
 //! Never removed: state events (names, membership, power levels, the policy
 //! itself), the room's forward extremities and its newest event, which the
 //! room needs to continue its history.
@@ -26,7 +38,7 @@ use conduwuit::{
 	utils::{self, stream::TryIgnore},
 	warn,
 };
-use database::Map;
+use database::{Database, Map, compact};
 use futures::{StreamExt, future::ready};
 use ruma::{EventId, OwnedEventId, RoomId, events::StateEventType};
 use serde::Deserialize;
@@ -38,6 +50,7 @@ use crate::{Dep, rooms};
 pub struct Service {
 	interrupt: Notify,
 	db: Maps,
+	database: Arc<Database>,
 	services: Services,
 }
 
@@ -52,6 +65,7 @@ struct Maps {
 	tofrom_relation: Arc<Map>,
 	referencedevents: Arc<Map>,
 	threadid_userids: Arc<Map>,
+	userdevicetxnid_response: Arc<Map>,
 }
 
 struct Services {
@@ -103,7 +117,9 @@ impl crate::Service for Service {
 				tofrom_relation: db["tofrom_relation"].clone(),
 				referencedevents: db["referencedevents"].clone(),
 				threadid_userids: db["threadid_userids"].clone(),
+				userdevicetxnid_response: db["userdevicetxnid_response"].clone(),
 			},
+			database: Arc::clone(args.db),
 			services: Services {
 				server: args.server.clone(),
 				metadata: args.depend::<rooms::metadata::Service>("rooms::metadata"),
@@ -188,23 +204,78 @@ impl Service {
 			.is_ok_and(|pdu| Self::is_expired(&pdu, Some(cutoff)))
 	}
 
-	/// Purges expired events in every room with a retention policy.
+	/// Purges expired events in every room with a retention policy, then
+	/// erases them from the database files.
 	pub async fn purge_all(&self) -> usize {
 		let rooms: Vec<_> = self.services.metadata.iter_ids().collect().await;
-		let mut total: usize = 0;
+		let mut purged = HashSet::new();
 		for room_id in rooms {
-			total = total.saturating_add(self.purge_room(&room_id).await);
+			purged.extend(self.purge_room(&room_id).await);
 		}
-		total
+		if !purged.is_empty() {
+			self.purge_txnids(&purged).await;
+			let started = std::time::Instant::now();
+			match self.erase_from_files().await {
+				| Ok(()) => info!(
+					elapsed_ms = started.elapsed().as_millis(),
+					"retention: erased purged events from the database files"
+				),
+				| Err(e) => warn!("retention: erasing purged events from the database files failed: {e}"),
+			}
+		}
+		purged.len()
 	}
 
-	/// Purges expired events in one room. Returns how many were removed.
-	pub async fn purge_room(&self, room_id: &RoomId) -> usize {
+	/// Writes every memory buffer out and compacts every table, so deleted
+	/// entries are gone from the files, not just marked. All tables, not only
+	/// those of the purge: older deletions elsewhere (forward extremities,
+	/// transaction IDs) can name purged events too.
+	async fn erase_from_files(&self) -> Result {
+		let database = self.database.clone();
+		tokio::task::spawn_blocking(move || -> Result {
+			let maps: Vec<Arc<Map>> = database.iter().map(|(_, map)| map.clone()).collect();
+			// Memtables to files, so the write-ahead logs (which hold every
+			// write, the purged events too) are retired.
+			for map in &maps {
+				map.flush_blocking()?;
+			}
+			let force = compact::Options { exhaustive: true, ..Default::default() };
+			for map in &maps {
+				map.compact_blocking(force.clone())?;
+			}
+			Ok(())
+		})
+		.await
+		.map_err(|e| conduwuit::err!("retention: erase task failed: {e}"))?
+	}
+
+	/// Removes the client transaction IDs that point to purged events: they
+	/// record which user and device sent an event, and Element's IDs carry
+	/// the time of sending.
+	async fn purge_txnids(&self, purged: &HashSet<OwnedEventId>) {
+		let keys: Vec<Vec<u8>> = self
+			.db
+			.userdevicetxnid_response
+			.raw_stream()
+			.ignore_err()
+			.filter(|(_, val)| {
+				ready(std::str::from_utf8(val).is_ok_and(|v| purged.iter().any(|e| e.as_str() == v)))
+			})
+			.map(|(key, _)| key.to_vec())
+			.collect()
+			.await;
+		for key in keys {
+			self.db.userdevicetxnid_response.remove(&key);
+		}
+	}
+
+	/// Purges expired events in one room. Returns the IDs of those removed.
+	pub async fn purge_room(&self, room_id: &RoomId) -> Vec<OwnedEventId> {
 		let Some(cutoff) = self.cutoff(room_id).await else {
-			return 0;
+			return Vec::new();
 		};
 		let Ok(shortroomid) = self.services.short.get_shortroomid(room_id).await else {
-			return 0;
+			return Vec::new();
 		};
 
 		let _lock = self.services.state.mutex.lock(room_id).await;
@@ -231,16 +302,17 @@ impl Service {
 			.collect()
 			.await;
 
-		let count = expired.len();
+		let mut removed = Vec::with_capacity(expired.len());
 		for (pdu_count, pdu) in expired {
 			if let PduCount::Normal(shorteventid) = pdu_count {
 				self.purge_event(room_id, shortroomid, shorteventid, &pdu).await;
+				removed.push(pdu.event_id().to_owned());
 			}
 		}
-		if count > 0 {
-			debug!(%room_id, count, "retention purge");
+		if !removed.is_empty() {
+			debug!(%room_id, count = removed.len(), "retention purge");
 		}
-		count
+		removed
 	}
 
 	async fn purge_event(

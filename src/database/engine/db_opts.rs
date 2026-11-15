@@ -56,7 +56,14 @@ pub(crate) fn db_options(config: &Config, env: &Env, row_cache: &Cache) -> Resul
 
 	// Files
 	opts.set_table_cache_num_shard_bits(7);
-	opts.set_wal_size_limit_mb(1024);
+	// With room retention on, no archive of retired write-ahead logs: they
+	// hold every write, purged messages included (optescontinuwuity).
+	opts.set_wal_size_limit_mb(if config.allow_room_retention { 0 } else { 1024 });
+	// The MANIFEST logs the first and last key of every file it ever listed;
+	// with retention on, rewrite it (current files only) after every change.
+	if config.allow_room_retention {
+		opts.set_max_manifest_file_size(4 * 1024);
+	}
 	opts.set_max_total_wal_size(1024 * 1024 * 512);
 	opts.set_writable_file_max_buffer_size(1024 * 1024 * 2);
 
