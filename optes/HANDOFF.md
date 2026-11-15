@@ -199,8 +199,10 @@ How the fixes were tested (2026-11-10, no Tor or I2P anywhere):
 - Not tested: real Matrix clients against `allowed_origins`; a real browser; the I2P
   front after these changes; Fedora; the fuzz targets were only compiled.
 
-Open after the audit (not fixed): full vanguards on the core (6), device names visible
+Open after the audit (not fixed): device names visible
 to other members (12), low items L1 and L4–L7 (L7 partly done, §4c).
+Finding 6 is accepted: the core uses Tor's built-in vanguards-lite only, not the
+full add-on (handbook §4.6).
 
 ## 4c. Kit script (2026-11-14)
 
