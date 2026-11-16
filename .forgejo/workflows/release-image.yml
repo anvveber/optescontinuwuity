@@ -31,11 +31,6 @@ jobs:
   build-release:
     name: "Build ${{ matrix.slug }} (release)"
     runs-on: dind
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
     strategy:
       matrix:
         include:
@@ -84,6 +79,7 @@ jobs:
           outputs: |
             ${{ env.BUILTIN_REGISTRY_ENABLED == 'true' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PATH) || format('type=image,"name={0}",push=false', env.IMAGE_PATH) }}
             type=local,dest=/tmp/binaries
+          pull: true # Base images were becoming out of date
         env:
           SOURCE_DATE_EPOCH: ${{ env.TIMESTAMP }}
       - name: Upload Docker artifacts
@@ -117,11 +113,6 @@ jobs:
     name: "Build ${{ matrix.slug }} (max-perf)"
     runs-on: dind
     needs: build-release
-    permissions:
-      contents: read
-      packages: write
-      attestations: write
-      id-token: write
     strategy:
       matrix:
         include:
@@ -172,6 +163,7 @@ jobs:
           outputs: |
             ${{ env.BUILTIN_REGISTRY_ENABLED == 'true' && format('type=image,"name={0}",push-by-digest=true,name-canonical=true,push=true', env.IMAGE_PATH) || format('type=image,"name={0}",push=false', env.IMAGE_PATH) }}
             type=local,dest=/tmp/binaries
+          pull: true # Base images were becoming out of date
         env:
           SOURCE_DATE_EPOCH: ${{ env.TIMESTAMP }}
       - name: Upload max-perf Docker artifacts
@@ -207,8 +199,6 @@ jobs:
     needs:
       - build-release
       - build-maxperf
-    permissions:
-      contents: write
     if: startsWith(github.ref, 'refs/tags/')
     steps:
       - name: Download binary artifacts
