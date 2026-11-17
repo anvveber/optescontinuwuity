@@ -158,6 +158,12 @@ Not gated in this version (known gaps):
   room included in a sync for another reason may show a count that already
   includes an unreleased message.
 - `/report`: needs an event ID, which clients can't learn before release.
+- Thread summaries (found 2026-11-17, audit finding 18): a reply updates the
+  summary stored in the thread root (`unsigned.m.relations.m.thread`: count
+  and latest reply) when it is sent. A member who fetches the root sees the
+  reply up to one interval early. "Bundled aggregations" above is therefore
+  true only for aggregations computed when they are read, not for this
+  stored one.
 
 ## 11. Test results (2026-10-24, local debug build)
 
