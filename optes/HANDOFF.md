@@ -4,10 +4,12 @@ Written 2026-11-09, updated 2026-11-10 (audit and its fixes: §4b), 2026-11-14 (
 script: §4c; review of spaces, template tool and tests: §4d; first run over real Tor:
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
 fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g; backups: §4h;
-relay after sleep and slow connects: §4i). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+relay after sleep and slow connects: §4i) and 2026-11-17 (upstream v26.9.4 and
+dependency advisories: §4j). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
-**v26.9.1** (`optes/UPSTREAM`). Every fork-specific file lives in `optes/`, except the server
+**v26.9.4** (`optes/UPSTREAM`; v26.9.1 until 2026-11-17, §4j). Upstream releases
+are merged, not rebased: `main` is never rewritten. Every fork-specific file lives in `optes/`, except the server
 patches under `src/`.
 
 ## 1. What this is
@@ -98,7 +100,7 @@ Everything else:
   - `setup-relay.sh`
 - **Tools:**
   - `tools/make-space.py`: builds a whole server (space, categories, channels) from a TOML file
-  - `update-upstream.sh`: rebases onto a new upstream tag and runs every test
+  - `update-upstream.sh`: merges a new upstream tag on a branch and runs every test
   - `make-kit.sh`: builds the release binaries and packs the deploy kit (§4c)
 - **Tests:** `optes/test/` (see §5)
 
@@ -246,7 +248,7 @@ options: the header of the script. What it does besides copying files:
     `update-upstream.sh --test-only` passed on the same commit.
 - **No git remote, no commit in the server binary.** continuwuity's build script
   would record the URL of the remote `origin` and the commit. The kit build sets
-  fixed values; the server reports its version as `26.9.1 (kit)`. The kit's name
+  fixed values; the server reports its version as `<upstream version> (kit)`, e.g. `26.9.4 (kit)`. The kit's name
   and README give the commit. A commit that changes no source needs no rebuild.
 - **Same input, same archive** (fixed order, owner and times in the tar file).
   Whether two machines produce the same binaries is not checked.
@@ -611,6 +613,60 @@ Not shown: that `NEWNYM` shortens outages in general (once it was followed by
 a connect a few minutes later; the network's own delays made a clean
 comparison impossible); a long real sleep with the new relay; level 2 and 3
 silence limits on real Tor.
+
+## 4j. Upstream v26.9.4 and dependency advisories (2026-11-17)
+
+- **Server moved from upstream v26.9.1 to v26.9.4** by a merge (no history
+  rewrite). Upstream's six security fixes (SEC15, 31, 34, 36, 39, 45) are
+  described from the code in `audit-2026-11-10.md`, section "Dependency
+  advisories". Upstream changed no dependency, no config key and no
+  database format; `CONFIG_ADDED` in `setup-core.sh` needs nothing new.
+- One conflict, in `user_can_see_event`: the delayed-release and retention
+  checks stay first; upstream's new rule follows (an event without computed
+  state is visible only to members who are joined now; before, to anyone).
+- **Dependencies:** `cargo audit` on both lockfiles. The tunnel has no
+  advisory. The server had 23; 20 are fixed by patch updates of 13 crates
+  (`Cargo.lock` only). The 3 left (rsa, crypto-bigint, webpage) are not
+  reachable here. Every advisory with its answer: audit L6.
+- **`update-upstream.sh` now merges instead of rebasing**, commits in UTC
+  and adds the same `Co-Authored-By` trailer as the rest of the history.
+  Its final `git merge --ff-only` now works, because the update branch
+  starts from `main`.
+- **New finding 18 (open):** with delayed release on, a room member sees a
+  thread reply up to one window early in the thread root's stored summary
+  (since v26.9.4 with sender and event ID). Audit finding 18, handbook
+  §4.6, `delayed-release-spec.md` §10.
+
+How it was tested:
+- `update-upstream.sh --test-only` on the merge alone, and again after
+  the crate updates: tunnel unit tests (26 + 2), the server's unit tests
+  (`release::`, `sync::`: 11; `guard_tests::`: 2), all 16 e2e runs. All
+  passed both times.
+- The script's new merge path, in a throwaway clone with a shell in a
+  non-UTC time zone (tests skipped): it stopped at the conflict with the
+  hint; both commits got UTC dates and the trailer.
+- `make-kit.sh`: no build path in the binaries; the server reports
+  `26.9.4 (kit)`.
+- Debian 13 VM: core installed from the kit of `e3fa54f` (v26.9.1); one
+  front entry, one ingress client, one device; three users registered over
+  the server's socket, device keys and one-time keys uploaded, an encrypted
+  direct room with a thread; a plaintext message refused. Then
+  `setup-core.sh update` to the new kit: 8 s. Afterwards: version 26.9.4;
+  all services active; 18 fingerprinted key and config files unchanged
+  (onion keys and names, client keys, gateway and list keys, device key,
+  front list, registration token, config); everything the users can read
+  (devices, key query from the other user, one-time key count, rooms,
+  members, messages, the thread root) equal to before, except the `age`
+  field; device names still hidden from the other user. No migration ran.
+  In the old thread a new reply counted, and its redaction took it out of
+  the summary again (upstream SEC39).
+- The leak of finding 18: a local debug server, on v26.9.1 (kit binary) and
+  on v26.9.4.
+
+Not tested: the update with a relay connected over real Tor (done for
+earlier updates, §4g); a rollback (no code change since §4g); `update`
+after `lockdown`; on a VPS. A real database migration still has not
+happened, because v26.9.4 has none.
 
 ## 5. Building and testing
 

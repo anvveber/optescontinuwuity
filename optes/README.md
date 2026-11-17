@@ -1,7 +1,7 @@
 # optes — private Matrix server
 
 This folder holds everything specific to this fork. The rest of the repository
-is upstream continuwuity (v26.9.1) plus a small set of patches.
+is upstream continuwuity (v26.9.4) plus a small set of patches.
 
 Start with `HANDOFF.md` (project state), then `handbook.md` (design, threat model, section 14 = current status).
 

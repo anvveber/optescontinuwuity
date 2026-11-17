@@ -104,7 +104,7 @@ design is wrong for the use case and that should be settled before building.
 
 **Continuwuity.** Rationale:
 
-- Actively maintained; calendar versioning (26.x). Fork pinned to **v26.9.1**.
+- Actively maintained; calendar versioning (26.x). Fork pinned to **v26.9.4** (since 2026-11-17; before: v26.9.1).
   The official community
   continuation of conduwuit (which continued conduit).
 - Single Rust binary with an embedded database (RocksDB). No Postgres. Good for a
@@ -559,7 +559,7 @@ thin.
 |---|---|---|
 | Verification of section 10 | done for phases 1–2 | `verification-notes.md` |
 | Core setup (Tor, sandboxing, firewall, config) | dry-run in a Debian 13 VM without Tor (2026-11-09, `HANDOFF.md` §4a); 2026-11-14 in a Debian 13 VM over real Tor: install, apt over Tor, admin onion SSH, `lockdown`, reboot, `add-client`/`remove-client` (revocation now restarts Tor), `add-front`/`remove-front` (`HANDOFF.md` §4e). Not run on a VPS | `setup-core.sh` |
-| Delayed release patch | built, e2e tested | `delayed-release-spec.md`, `src/service/release/` |
+| Delayed release patch | built, e2e tested. Gap found 2026-11-17: thread replies show early in the thread root's summary (audit finding 18, open) | `delayed-release-spec.md`, `src/service/release/` |
 | `record_device_activity` (replaces the bouncer) | built, e2e tested | `bouncer-decision.md` |
 | Bouncer | **dropped** (covered by the above + relay) | `bouncer-decision.md` |
 | Tunnel: relay, gateway, keys tool | built, e2e tested at levels 1–3 (no Tor); 2026-11-14 over real Tor between VMs at levels 1–3, straight and through a front. Level 2 and 3 traffic shape checked on the relay's link to its Tor guard; level 1 not | `tunnel/`, `phase2-protocol-spec.md` |
@@ -571,7 +571,7 @@ thin.
 | Front-list renewal (weekly re-sign; relay refresh) | built, e2e tested | `phase2-protocol-spec.md` §5 |
 | Per-channel retention (MSC1763; whole events deleted) | built, e2e tested (incl. restart on purged DB). 2026-11-15: purged events are also erased from the database files; e2e checks every file (fails on the binary before) | `retention-design.md` |
 | Fuzzing of tunnel parsers (6 targets) | 2026-11-15 on protocol v2: 15 minutes per target, ~136M runs, no crashes. New target `hello_counter`: real handshakes through the replay check | `tunnel/fuzz/` |
-| Audit of the fork's own parts | done 2026-11-10; `space_autojoin`, `make-space.py` and the tests read on 2026-11-14; findings and fixes listed | `audit-2026-11-10.md` |
+| Audit of the fork's own parts | done 2026-11-10; `space_autojoin`, `make-space.py` and the tests read on 2026-11-14; dependency advisories triaged 2026-11-17 (L6); findings and fixes listed | `audit-2026-11-10.md` |
 | Tunnel protocol v2: handshake counter (no replay), gateway time for level-2 windows, onion/b32-only fronts | built, unit and e2e tested (no Tor) | `phase2-protocol-spec.md` §3.1, §4, §5 |
 | Browser guard (`restrict_request_hosts`, `allowed_origins`), OAuth off | built, e2e tested with crafted requests; not tested with real clients or browsers | `hardening.md` |
 | `allow_pushers`, `allow_openid_tokens` | built, e2e tested | `hardening.md` |
@@ -579,9 +579,10 @@ thin.
 | Memory-only logs, no core dumps, front client auth by default, socket group by ingress mode | in the setup scripts; dry-run in a Debian 13 VM without Tor (2026-11-10) | `setup-core.sh`, `setup-front.sh` |
 | I2P front | install dry-run in a Debian 13 VM without I2P (2026-11-09): i2pd starts with the config. Open: DNS for reseeding is blocked by the firewall on systemd-resolved images (`HANDOFF.md` §4a). i2pd config and address computation checked against i2pd 2.49; relay I2P path tested via a SOCKS stand-in | `setup-front.sh --type i2p` |
 | Deploy kit | built by script; a kit made by it installed in a Debian 13 VM without Tor (2026-11-14, `HANDOFF.md` §4c), and in VMs over real Tor (§4e). Since 2026-11-15 no build path in any binary; same binaries on two machines not checked | `make-kit.sh` |
-| Updates: `setup-core.sh update` (programs, rollback) and unattended-upgrades over Tor (core and fronts) | built 2026-11-15; in Debian 13 VMs over real Tor: update between two kits keeps keys, onions, config and data; rollback after a failing server or gateway restores programs and database, also when the SSH session drops; security updates installed over Tor, reboot warning. Not tested: a real new server version, after `lockdown`, on a VPS | `setup-core.sh`, `HANDOFF.md` §4g |
+| Updates: `setup-core.sh update` (programs, rollback) and unattended-upgrades over Tor (core and fronts) | built 2026-11-15; in Debian 13 VMs over real Tor: update between two kits keeps keys, onions, config and data; rollback after a failing server or gateway restores programs and database, also when the SSH session drops; security updates installed over Tor, reboot warning. 2026-11-17 in a VM: update from upstream v26.9.1 to v26.9.4 kept users, keys, rooms and threads (no database migration in that release). Not tested: a database migration, after `lockdown`, on a VPS | `setup-core.sh`, `HANDOFF.md` §4g, §4j |
 | Backup and restore of the core (`backup-key`, `backup`, `restore`) | built 2026-11-15; in Debian 13 VMs over real Tor: backup over SSH, restore onto a second core with the same server name, the relay then reached the new core under the old onion; rollback of a broken restore; name check. Not tested: after `lockdown`, on a VPS | `setup-core.sh`, `HANDOFF.md` §4h |
 | Clock over Tor (core and fronts) | built 2026-11-15; decision rule tested offline; in Debian 13 VMs over real Tor: corrections from 5 min to 1 day both ways on a core (relay through a front still answered after each; before the 30-minute limit was added), a front, the 30-minute limit and `--allow-back`, the 3-days-ahead case (warning, clock untouched), the timer after a reboot. Not tested: after `lockdown`, on a VPS | `optes-clock.sh` |
+| Upstream base | v26.9.4 since 2026-11-17, merged (not rebased); `update-upstream.sh` | `UPSTREAM`, `HANDOFF.md` §4j |
 | Nym | deferred | — |
 | Client fork | not needed (relay) | section 7 |
 
