@@ -8,12 +8,19 @@
 #
 # What it does:
 #   1. fetches upstream tags (GitHub mirror);
-#   2. rebases our commits from the current base (optes/UPSTREAM) onto the new
-#      tag, on a new branch update/<tag>;
+#   2. on a new branch update/<tag> from main, merges the new tag (a merge
+#      commit, then a commit that records the tag in optes/UPSTREAM);
 #   3. builds continuwuity and the tunnel, runs the unit and end-to-end tests.
 # It never touches main. If everything passes, review and fast-forward main
-# yourself (the script prints the command). On a rebase conflict it stops and
-# leaves the rebase in progress for you to resolve.
+# yourself (the script prints the command). On a merge conflict it stops and
+# leaves the merge in progress for you to resolve.
+#
+# Why a merge and not a rebase: main is published. A rebase gives every fork
+# commit a new hash, so main could only be pushed with --force and every
+# commit cited in the docs would go stale. A merge keeps them.
+#
+# Commits are made in UTC and end with the same Co-Authored-By line as the
+# rest of the history.
 
 set -euo pipefail
 
@@ -78,20 +85,26 @@ if [[ $new == "$old" ]]; then
 fi
 echo "==> $old -> $new"
 
+trailer="Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>"
 branch=update/$new
 git checkout -q -B "$branch" main
-if ! git rebase --onto "$new" "$old" "$branch"; then
+if ! TZ=UTC git merge -q --no-ff -m "Merge upstream $new" -m "$trailer" "$new"; then
   echo
-  echo "Rebase conflict. Resolve, 'git rebase --continue', then rerun the tests:"
+  echo "Merge conflict. Resolve and keep the behaviour of our patches, then:"
+  echo "  TZ=UTC git commit        (the message is prepared; keep the trailer)"
+  echo "  echo $new > optes/UPSTREAM"
+  echo "  TZ=UTC git commit -am 'chore: track upstream $new' -m '$trailer'"
   echo "  optes/update-upstream.sh --test-only"
   exit 1
 fi
 echo "$new" > optes/UPSTREAM
-git commit -qam "chore: track upstream $new"
+TZ=UTC git commit -qam "chore: track upstream $new" -m "$trailer"
 
 run_tests
 
 echo
 echo "All tests passed on $new (branch $branch)."
-echo "Check upstream's changelog for config changes, then:"
+echo "Check upstream's changelog (CHANGELOG.md) for security fixes, new config"
+echo "keys (add them to setup-core.sh and its CONFIG_ADDED) and database"
+echo "migrations. Run cargo-audit on Cargo.lock. Then:"
 echo "  git checkout main && git merge --ff-only $branch && git push"
