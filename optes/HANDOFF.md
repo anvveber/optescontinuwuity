@@ -5,7 +5,8 @@ script: §4c; review of spaces, template tool and tests: §4d; first run over re
 §4e) and 2026-11-15 (no build paths in the server binary: §4c; vanguards: §4b;
 fuzzing on protocol v2: §3; clock over Tor: §4f; updates: §4g; backups: §4h;
 relay after sleep and slow connects: §4i) and 2026-11-17 (upstream v26.9.4 and
-dependency advisories: §4j). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
+dependency advisories: §4j) and 2026-11-18 (thread summaries and delayed
+release, test gaps: §4k). Read this first, then `optes/handbook.md` (design, threat model, §14 status).
 
 `main` holds everything. This repository is a fork of continuwuity (https://github.com/continuwuity/continuwuity), based on tag
 **v26.9.4** (`optes/UPSTREAM`; v26.9.1 until 2026-11-17, §4j). Upstream releases
@@ -115,7 +116,7 @@ Design notes for each feature: `delayed-release-spec.md`, `bouncer-decision.md`,
   address, memory limits), or on I2P.
 - Still never exercised:
   - `setup-front.sh lockdown`; a front or core in daily use (T7)
-  - level 1 padding on the wire
+  - level 1 padding on real Tor (on one machine: checked since 2026-11-18, §4k)
   - an I2P front on the real I2P network
   - a relay machine that sleeps and wakes (recovery of the relay not shown)
 - **One audit (`audit-2026-11-10.md`), not independent. No outside review yet.**
@@ -667,6 +668,40 @@ Not tested: the update with a relay connected over real Tor (done for
 earlier updates, §4g); a rollback (no code change since §4g); `update`
 after `lockdown`; on a VPS. A real database migration still has not
 happened, because v26.9.4 has none.
+
+## 4k. Thread summaries and delayed release; test gaps (2026-11-18)
+
+**Thread summaries (audit finding 18).** With delayed release on, a thread
+reply no longer shows early:
+- A reply only queues its thread update. The tick that releases the reply
+  applies it: the summary in the root (count, latest reply) and the thread's
+  participants, before waiting clients are woken. So the root's summary and
+  the thread list (`/threads`) change at the tick, like everything else.
+- A summary is rebuilt from released replies only. A redaction in a thread
+  also rebuilds it; before, that counted replies still held.
+- At shutdown the queue is applied in full (after a restart everything is
+  released). A crash loses the queue: the summary lacks those replies until
+  the thread's next reply or redaction.
+- Release off: unchanged (upstream behaviour). Server change only: a new
+  server binary is needed.
+- Tested: new checks in `run-e2e.sh` (summary through `/event` and
+  `/messages`, the thread list, a redaction while a reply is held); four
+  fail on the binary before the fix, all pass after, with release on and
+  off. A reply held when the server stops is counted after the restart
+  (by hand; fails without the shutdown rule). Not tested: a crash; real
+  clients' thread views.
+
+**Test gaps (audit L9, L10).** New checks, each with a control that shows
+it can fail (details: audit L9, L10):
+- level 1 on the wire (one machine): every group of traffic is a whole
+  number of padded bursts; a build without padding fails it;
+- sliding sync with delayed release (before and after the tick) and with
+  retention (after expiry), initial and from an earlier position;
+- retention in a `/sync` that continues from an old token;
+- a profile change in a space does not re-join a channel the member left;
+- an `Origin` with an allowed host and another port is refused.
+
+All suites pass (`update-upstream.sh --test-only`).
 
 ## 5. Building and testing
 
