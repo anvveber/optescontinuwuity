@@ -99,6 +99,30 @@ def sync_ids(token, room):
             .get("timeline", {}).get("events", [])}
 
 
+FILTER = q(json.dumps({"room": {"timeline": {"limit": 50}}}))
+
+
+def sync_since_ids(token, room, since):
+    """An incremental /sync that continues from an old token."""
+    _, s = call("GET", f"/_matrix/client/v3/sync?timeout=0&filter={FILTER}&since={since}", token=token)
+    return {e["event_id"] for e in s.get("rooms", {}).get("join", {}).get(room, {})
+            .get("timeline", {}).get("events", [])}
+
+
+SLIDING = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
+
+
+def sliding(token, room, conn=None, pos=None):
+    """Sliding sync (MSC4186) of one room: (event IDs, conn, pos). Without
+    conn: a new connection (initial sliding sync)."""
+    conn = conn or uuid.uuid4().hex
+    body = {"conn_id": conn, "room_subscriptions": {room: {"timeline_limit": 50, "required_state": []}}}
+    status, resp = call("POST", SLIDING + "?timeout=0" + (f"&pos={pos}" if pos else ""), body, token)
+    assert status == 200, (status, resp)
+    events = resp.get("rooms", {}).get(room, {}).get("timeline", [])
+    return {e["event_id"] for e in events}, conn, resp.get("pos")
+
+
 def readable(token, room, eid):
     return call("GET", f"/_matrix/client/v3/rooms/{q(room)}/event/{q(eid)}", token=token)[0] == 200
 
@@ -112,6 +136,12 @@ word = "kumquat" + sfx
 temp = room_with(alice, "temp", LIFETIME_MS)
 perm = room_with(alice, "permanent")
 call("POST", f"/_matrix/client/v3/join/{q(temp)}", {}, bob)
+settle()
+# Positions taken before the messages exist: a client that was offline
+# continues from such a position (audit L10).
+since_old = call("GET", "/_matrix/client/v3/sync?timeout=0", token=bob)[1]["next_batch"]
+_, ss_control, ss_control_pos = sliding(bob, temp)
+_, ss_after, ss_after_pos = sliding(bob, temp)
 
 m1 = send(alice, temp, text(f"first {word}"))
 m2 = send(alice, temp, text(f"second marker{sfx}m2"))
@@ -124,6 +154,9 @@ old = {m1, m2, reply, reaction, thread}
 settle()
 
 check("messages visible before expiry", old <= timeline_ids(alice, temp))
+check("control: sync from an old token has them before expiry", old <= sync_since_ids(bob, temp, since_old))
+check("control: sliding sync from an old pos has them before expiry",
+      old <= sliding(bob, temp, ss_control, ss_control_pos)[0])
 
 
 def search_hits():
@@ -149,6 +182,11 @@ settle()
 # --- hidden right away -----------------------------------------------------
 check("expired messages gone from /messages", not (old & timeline_ids(bob, temp)))
 check("expired messages gone from initial sync", not (old & sync_ids(bob, temp)))
+check("expired messages gone from a sync that continues from an old token",
+      not (old & sync_since_ids(bob, temp, since_old)))
+check("expired messages gone from initial sliding sync", not (old & sliding(bob, temp)[0]))
+check("expired messages gone from sliding sync from an old pos",
+      not (old & sliding(bob, temp, ss_after, ss_after_pos)[0]))
 check("expired message not readable via /event", not readable(bob, temp, m1))
 _, ctx = call("GET", f"/_matrix/client/v3/rooms/{q(temp)}/context/{q(m1)}", token=bob)
 check("expired message not served via /context", "event" not in ctx)

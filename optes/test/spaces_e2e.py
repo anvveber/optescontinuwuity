@@ -194,6 +194,22 @@ check("removal from the server leaves its channels",
 check("removal from the server does not touch a room that does not name the space",
       dm in joined(carol))
 
+# --- a profile change does not re-join a channel the member left ------------
+# A new display name is a join -> join member event in every room, the
+# space included (audit L10). Only a real join may join channels.
+links = rooms["links"]
+call("POST", f"/_matrix/client/v3/rooms/{q(links)}/leave", {}, bob)
+check("bob leaves one channel", wait_until(lambda: links not in joined(bob)))
+new_name = "bob renamed " + sfx
+status, _ = call("PUT", f"/_matrix/client/v3/profile/{q(bob_id)}/displayname", {"displayname": new_name}, bob)
+check("bob changes his display name", status == 200, str(status))
+check("control: the new name reached the space",
+      wait_until(lambda: call("GET", f"/_matrix/client/v3/rooms/{q(server)}/state/m.room.member/{q(bob_id)}",
+                              token=bob)[1].get("displayname") == new_name))
+time.sleep(2)  # the auto-join work would have run by now
+check("a profile change does not re-join a channel the member left", links not in joined(bob))
+check("the other channels stay joined", (open_rooms - {links}) <= joined(bob))
+
 # --- leaving ---------------------------------------------------------------
 call("POST", f"/_matrix/client/v3/rooms/{q(server)}/leave", {}, bob)
 ok = wait_until(lambda: not (open_rooms & joined(bob)))

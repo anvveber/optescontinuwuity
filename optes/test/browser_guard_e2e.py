@@ -106,6 +106,18 @@ if ON:
     status, _, _, _ = call("GET", VERSIONS, origin="https://client.listed.example.evil.example")
     check("origin that only starts like a listed one: refused", status == 403, str(status))
 
+# Same host, another port: another web server on the user's machine (audit
+# L10). The guard compares host and port together.
+host_only = ADDR.rsplit(":", 1)[0]
+other_port = int(ADDR.rsplit(":", 1)[1]) + 1
+for origin in (f"http://{host_only}:{other_port}", "https://client.listed.example:8443"):
+    status, hdrs, _, _ = call("GET", VERSIONS, origin=origin)
+    if ON:
+        check(f"origin {origin} (allowed host, other port): refused", status == 403 and ACAO not in hdrs,
+              str(status))
+    else:
+        check(f"(off) origin {origin}: served", status == 200, str(status))
+
 # Preflight, as a browser sends before a cross-origin POST with JSON.
 pre = {"Access-Control-Request-Method": "POST",
        "Access-Control-Request-Headers": "authorization,content-type"}

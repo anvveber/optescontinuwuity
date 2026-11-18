@@ -104,6 +104,11 @@ def wire_checks():
         total = sum(n for _, n in chunks)
         check(f"{name}: whole frames only", total % FRAME == 0, f"{total} bytes")
 
+    if LEVEL == 1 and (up or down):
+        # Only where a recorder sits on the path (not in the SOCKS suite,
+        # which passes an empty log).
+        level1_checks()
+
     if LEVEL == 3:
         # Idle period: count frames per second in both directions.
         time.sleep(5)
@@ -154,6 +159,48 @@ def wire_checks():
             off_grid = [t for t in later if min((t - offset) % w, w - (t - offset) % w) > 500]
             check(f"level 2 {d}: nothing off the window grid during the whole session",
                   len(later) >= 8 and not off_grid, f"{len(later)} chunks, {len(off_grid)} off-grid")
+
+
+def bursts(direction, since_ms, gap_ms=150):
+    """Frames per group of chunks, groups split by idle gaps."""
+    rows = [line.split() for line in open(WIRE)]
+    times = [(int(t), int(n)) for d, t, n in rows if d == direction and int(t) >= since_ms]
+    groups, last = [], None
+    for t, n in times:
+        if last is None or t - last > gap_ms:
+            groups.append(0)
+        groups[-1] += n
+        last = t
+    return [g / FRAME for g in groups]
+
+
+def level1_checks():
+    """Level 1 pads every burst to a power of two, at least 4 frames
+    (audit L9). On one machine two bursts can follow each other too closely
+    to tell apart, and a request can take several bursts (the relay sends
+    what it has read so far). So the check is: every group of traffic is a
+    whole number of padded bursts, a multiple of 4 frames. Without padding
+    a small request or response is 1-3 frames."""
+    time.sleep(2)
+    start = int(time.time() * 1000)
+    for i in range(6):
+        if i % 2:
+            # About 6 KB of request body: several data frames.
+            req = urllib.request.Request(BASE + "/_matrix/client/v3/login",
+                                         data=json.dumps({"x": "y" * 6000}).encode(), method="POST")
+            req.add_header("Content-Type", "application/json")
+        else:
+            req = urllib.request.Request(BASE + "/_matrix/client/versions")
+        try:
+            urllib.request.urlopen(req, timeout=60).read()
+        except urllib.error.HTTPError as err:
+            err.read()
+        time.sleep(1.5)
+    for d in ("up", "down"):
+        groups = bursts(d, start)
+        bad = [g for g in groups if g < 4 or g % 4]
+        check(f"level 1 {d}: every burst padded (groups of 4k frames)",
+              len(groups) >= 6 and not bad, f"frames per group: {groups}")
 
 
 wait_for_tunnel()

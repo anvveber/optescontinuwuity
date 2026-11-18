@@ -56,6 +56,22 @@ def register(username, token=None):
     return resp["access_token"]
 
 
+SLIDING = "/_matrix/client/unstable/org.matrix.simplified_msc3575/sync"
+
+
+def sliding(token, room_id, conn=None, pos=None):
+    """Sliding sync (MSC4186) of one room. Returns (event IDs, conn, pos).
+    Without conn: a new connection, i.e. an initial sliding sync."""
+    conn = conn or uuid.uuid4().hex
+    path = SLIDING + "?timeout=0" + (f"&pos={pos}" if pos else "")
+    body = {"conn_id": conn, "room_subscriptions": {room_id: {"timeline_limit": 50, "required_state": []}}}
+    status, resp = call("POST", path, body, token)
+    if status != 200:
+        sys.exit(f"sliding sync failed: {status} {resp}")
+    events = resp.get("rooms", {}).get(room_id, {}).get("timeline", [])
+    return {e["event_id"] for e in events}, conn, resp.get("pos")
+
+
 def now_ms():
     return int(time.time() * 1000)
 
@@ -97,6 +113,7 @@ def main():
 
     _, sync = call("GET", "/_matrix/client/v3/sync?timeout=0", token=bob)
     since = sync["next_batch"]
+    _, ss_conn, ss_pos = sliding(bob, room_id)
 
     wait_until_just_after_tick()
     sent_at = now_ms()
@@ -118,6 +135,11 @@ def main():
         _, quick = call("GET", f"/_matrix/client/v3/sync?timeout=0&since={since}", token=bob)
         timeline = quick.get("rooms", {}).get("join", {}).get(room_id, {}).get("timeline", {}).get("events", [])
         check("sync (no wait) hidden before tick", event_id not in [e["event_id"] for e in timeline])
+
+        ids, _, _ = sliding(bob, room_id)
+        check("sliding sync (initial) hidden before tick", event_id not in ids)
+        ids, _, _ = sliding(bob, room_id, ss_conn, ss_pos)
+        check("sliding sync (from an earlier pos) hidden before tick", event_id not in ids)
 
     # Long-poll until it arrives.
     found, got_at, ts = False, None, None
@@ -143,6 +165,10 @@ def main():
               f"{got_at - next_tick}ms after tick")
         status, _ = call("GET", f"/_matrix/client/v3/rooms/{room_id}/event/{event_id}", token=bob)
         check("/event visible after tick", status == 200, str(status))
+        ids, _, _ = sliding(bob, room_id, ss_conn, ss_pos)
+        check("sliding sync (from the earlier pos) delivers it after tick", event_id in ids)
+        ids, _, _ = sliding(bob, room_id)
+        check("sliding sync (initial) has it after tick", event_id in ids)
 
         # State endpoints: a topic change must not show before its tick.
         wait_until_just_after_tick()
@@ -156,6 +182,8 @@ def main():
         check("/state then shows the new topic", got.get("topic") == topic, json.dumps(got))
     else:
         check("delivered immediately", delay < 3000, f"delay={delay}ms")
+        ids, _, _ = sliding(bob, room_id, ss_conn, ss_pos)
+        check("sliding sync (from an earlier pos) has it at once", event_id in ids)
         check("timestamp not rounded", abs(ts - sent_at) < 3000, f"ts-sent={ts - sent_at}ms")
 
     check_threads(alice, bob, room_id)
