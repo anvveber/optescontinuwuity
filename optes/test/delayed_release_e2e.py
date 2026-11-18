@@ -11,6 +11,7 @@ import json
 import sys
 import time
 import urllib.error
+import urllib.parse
 import urllib.request
 import uuid
 
@@ -156,6 +157,75 @@ def main():
     else:
         check("delivered immediately", delay < 3000, f"delay={delay}ms")
         check("timestamp not rounded", abs(ts - sent_at) < 3000, f"ts-sent={ts - sent_at}ms")
+
+    check_threads(alice, bob, room_id)
+
+
+def send_text(token, room_id, body, thread_root=None):
+    content = {"msgtype": "m.text", "body": body}
+    if thread_root:
+        content["m.relates_to"] = {"rel_type": "m.thread", "event_id": thread_root}
+    status, resp = call("PUT", f"/_matrix/client/v3/rooms/{room_id}/send/m.room.message/{uuid.uuid4().hex}",
+                        content, token)
+    if status != 200:
+        sys.exit(f"send failed: {status} {resp}")
+    return resp["event_id"]
+
+
+def summary_via_event(room_id, root, token):
+    """The thread summary the server stores in the root's unsigned."""
+    _, ev = call("GET", f"/_matrix/client/v3/rooms/{room_id}/event/{urllib.parse.quote(root)}", token=token)
+    return ev.get("unsigned", {}).get("m.relations", {}).get("m.thread")
+
+
+def summary_via_messages(room_id, root, token):
+    _, msgs = call("GET", f"/_matrix/client/v3/rooms/{room_id}/messages?dir=b&limit=50", token=token)
+    for e in msgs.get("chunk", []):
+        if e["event_id"] == root:
+            return e.get("unsigned", {}).get("m.relations", {}).get("m.thread")
+    return "root missing"
+
+
+def listed_threads(room_id, token):
+    _, resp = call("GET", f"/_matrix/client/v1/rooms/{room_id}/threads", token=token)
+    return [e["event_id"] for e in resp.get("chunk", [])]
+
+
+def check_threads(alice, bob, room_id):
+    """A thread reply must not show in its root's summary, or put the root in
+    the thread list, before the tick that releases the reply (audit finding
+    18). Bob reads; alice writes."""
+    root = send_text(alice, room_id, "thread root")
+    time.sleep(INTERVAL + 1)
+    wait_until_just_after_tick()
+    reply1 = send_text(alice, room_id, "reply one", root)
+    if INTERVAL:
+        got = summary_via_event(room_id, root, bob)
+        check("thread: root summary (/event) hides the reply before tick", got is None, json.dumps(got))
+        got = summary_via_messages(room_id, root, bob)
+        check("thread: root summary (/messages) hides the reply before tick", got is None, json.dumps(got))
+        check("thread: /threads does not list the root before tick", root not in listed_threads(room_id, bob))
+        time.sleep(INTERVAL)
+    got = summary_via_event(room_id, root, bob) or {}
+    check("thread: summary counts the released reply",
+          got.get("count") == 1 and got.get("latest_event", {}).get("event_id") == reply1, json.dumps(got))
+    check("thread: /threads lists the root", root in listed_threads(room_id, bob))
+    if not INTERVAL:
+        return
+
+    # A redaction recomputes the summary. It must not pick up a reply that is
+    # still held.
+    wait_until_just_after_tick()
+    reply2 = send_text(alice, room_id, "reply two", root)
+    status, _ = call("PUT", f"/_matrix/client/v3/rooms/{room_id}/redact/{urllib.parse.quote(reply1)}/{uuid.uuid4().hex}",
+                     {}, alice)
+    check("thread: redact the first reply", status == 200, str(status))
+    got = summary_via_event(room_id, root, bob)
+    check("thread: redaction does not reveal a held reply", reply2 not in json.dumps(got), json.dumps(got))
+    time.sleep(INTERVAL)
+    got = summary_via_event(room_id, root, bob) or {}
+    check("thread: after the tick the summary has only the new reply",
+          got.get("count") == 1 and got.get("latest_event", {}).get("event_id") == reply2, json.dumps(got))
 
 
 def check_no_device_activity():

@@ -37,7 +37,7 @@ use async_trait::async_trait;
 use conduwuit::{Result, debug, matrix::PduCount, utils};
 use tokio::sync::Notify;
 
-use crate::{Dep, globals, sync};
+use crate::{Dep, globals, rooms, sync};
 
 pub struct Service {
 	/// Tick length in milliseconds. 0 = disabled.
@@ -53,6 +53,7 @@ pub struct Service {
 struct Services {
 	globals: Dep<globals::Service>,
 	sync: Dep<sync::Service>,
+	threads: Dep<rooms::threads::Service>,
 }
 
 #[async_trait]
@@ -72,6 +73,7 @@ impl crate::Service for Service {
 			services: Services {
 				globals: args.depend::<globals::Service>("globals"),
 				sync: args.depend::<sync::Service>("sync"),
+				threads: args.depend::<rooms::threads::Service>("rooms::threads"),
 			},
 		}))
 	}
@@ -96,6 +98,10 @@ impl crate::Service for Service {
 				() = tokio::time::sleep(Duration::from_millis(wait)) => self.advance().await?,
 			}
 		}
+
+		// Thread summaries still held: after a restart everything is
+		// released, so apply them now rather than lose them.
+		self.services.threads.release_pending(true).await;
 
 		Ok(())
 	}
@@ -162,8 +168,9 @@ impl Service {
 		round_up_to_tick(now_ms, self.interval_ms)
 	}
 
-	/// One tick: moves the watermark to the current counter value, then wakes
-	/// the users whose wake-ups were held since the last tick.
+	/// One tick: moves the watermark to the current counter value, updates
+	/// the thread summaries of released replies, then wakes the users whose
+	/// wake-ups were held since the last tick.
 	///
 	/// The held wake-ups are taken *before* reading the counter. A wake-up is
 	/// only queued after its event is appended, so every event behind a taken
@@ -173,6 +180,7 @@ impl Service {
 		let users = self.services.sync.take_deferred_wakes();
 		let current = self.services.globals.current_count()?;
 		self.watermark.fetch_max(current, Ordering::AcqRel);
+		self.services.threads.release_pending(false).await;
 		self.ticked.notify_waiters();
 		self.services.sync.wake_users(users).await;
 

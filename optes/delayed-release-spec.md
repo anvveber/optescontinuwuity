@@ -147,6 +147,20 @@ Does not hide:
   threads, search, bundled aggregations, unsigned context), so one check covers
   them. Federation uses `server_can_see_event`, which is untouched.
 - Room `/initialSync`: filtered by `is_released()`.
+- Thread summaries (`src/service/rooms/threads/`, audit finding 18). The
+  summary is not computed when read: it is stored in the thread root
+  (`unsigned.m.relations.m.thread`: count and latest reply), and the reply
+  used to update it when it was sent, so a member who fetched the root saw
+  the reply up to one interval early; the thread list (`/threads`) also
+  listed a root at its first reply. Now, while enabled, a reply is only
+  queued; each tick, right after the watermark moves and before the held
+  wake-ups fire, the queued replies at or below the watermark update the
+  summary and the thread's participants. The summary is rebuilt from the
+  thread's released replies only, also after a redaction (which rebuilds
+  it too). At shutdown the queue is applied in full (everything is
+  released after a restart). A crash loses the queue: the summary then
+  lacks those replies until the thread's next reply or redaction rebuilds
+  it.
 - Room state (`/state`, members, joined members, aliases, room initial sync,
   state in search results): all pass through
   `state_accessor::user_can_see_state_events`. If the room's newest event is
@@ -158,12 +172,6 @@ Not gated in this version (known gaps):
   room included in a sync for another reason may show a count that already
   includes an unreleased message.
 - `/report`: needs an event ID, which clients can't learn before release.
-- Thread summaries (found 2026-11-17, audit finding 18): a reply updates the
-  summary stored in the thread root (`unsigned.m.relations.m.thread`: count
-  and latest reply) when it is sent. A member who fetches the root sees the
-  reply up to one interval early. "Bundled aggregations" above is therefore
-  true only for aggregations computed when they are read, not for this
-  stored one.
 
 ## 11. Test results (2026-10-24, local debug build)
 
